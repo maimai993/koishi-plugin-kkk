@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>kkk 配置</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#f6f7fb;color:#1f2430}
+  .wrap{max-width:900px;margin:0 auto;padding:22px 16px 64px}
+  h1{font-size:21px;margin:6px 0 4px}
+  .sub{color:#6b7280;font-size:13px;margin-bottom:18px}
+  .card{background:#fff;border-radius:10px;padding:18px;box-shadow:0 1px 3px rgba(0,0,0,.08);margin-bottom:16px}
+  label{display:block;font-weight:600;font-size:14px;margin:14px 0 6px}
+  .hint{font-weight:400;color:#6b7280;font-size:12px;margin-left:6px}
+  input[type=text],input[type=number],input[type=password],select,textarea{width:100%;padding:9px 11px;border:1px solid #d7dae0;border-radius:8px;font-size:14px;background:#fff;color:inherit}
+  textarea{min-height:260px;font-family:ui-monospace,Consolas,monospace;font-size:12.5px;line-height:1.5}
+  .row{display:flex;gap:12px;flex-wrap:wrap}.row>div{flex:1 1 200px}
+  button{padding:10px 18px;border:0;border-radius:8px;background:#4f46e5;color:#fff;font-size:14px;font-weight:600;cursor:pointer}
+  button.ghost{background:#eef0f6;color:#1f2430}
+  .bar{display:flex;gap:10px;align-items:center;margin-top:18px;flex-wrap:wrap}
+  .ok{color:#059669}.err{color:#dc2626}.msg{font-size:13px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>kkk 配置</h1>
+  <div class="sub">保存后会写回 <code>koishi.yml</code> 并热重载插件；上游配置对应 <code>data/koishi-plugin-kkk/config/config.json</code></div>
+  <div class="card">
+    <div id="form">加载中…</div>
+    <div class="bar">
+      <button id="save">保存</button>
+      <button class="ghost" id="reload">重新加载</button>
+      <span class="msg" id="msg"></span>
+    </div>
+  </div>
+</div>
+<script>
+let data = null;
+
+function field(kind, key, label, hint) {
+  const h = hint ? '<span class="hint">' + hint + '</span>' : '';
+  const attr = 'data-k="' + key + '"';
+  if (kind === 'bool') return '<label>' + label + h + '</label><select ' + attr + '><option value="true">开</option><option value="false">关</option></select>';
+  if (kind === 'num') return '<label>' + label + h + '</label><input type="number" ' + attr + '>';
+  return '<label>' + label + h + '</label><input type="text" ' + attr + '>';
+}
+
+function render() {
+  const o = data.options || {};
+  let html = '';
+  html += field('bool', 'qqPanel', 'QQ 平台先发交互面板', '解析前用 Markdown + 按钮让用户选内容与画质');
+  html += field('bool', 'recallPanel', '操作后撤回上一条面板', '选集/选画质/开始下载都会撤掉上一步');
+  html += field('bool', 'autoParse', '自动解析消息里的链接');
+  html += field('bool', 'debug', '输出调试日志');
+  html += '<div class="row"><div>' + field('num', 'bangumiPanelCols', '番剧表格列数', '默认 5') + '</div>'
+        + '<div>' + field('num', 'bangumiPanelRows', '番剧表格行数', '默认 4（含表头）') + '</div>'
+        + '<div>' + field('num', 'qqFileLimitMB', '画质体积上限 (MB)', '超过的不显示') + '</div></div>';
+  html += field('text', 'webUiPassword', '本页访问口令', '留空表示不修改');
+  html += '<label>上游配置 upstream<span class="hint">JSON，对应 config.json（画质、竖屏模式、渲染缩放等）</span></label>';
+  html += '<textarea id="upstream"></textarea>';
+  document.getElementById('form').innerHTML = html;
+  for (const el of document.querySelectorAll('[data-k]')) {
+    const k = el.dataset.k;
+    if (el.tagName === 'SELECT') el.value = String(o[k]);
+    else el.value = (o[k] === undefined || o[k] === null) ? '' : o[k];
+  }
+  document.getElementById('upstream').value = JSON.stringify(data.upstream || {}, null, 2);
+}
+
+async function load() {
+  const r = await fetch('/kkk/api/config');
+  if (!r.ok) { location.href = '/kkk/login'; return; }
+  data = await r.json();
+  render();
+}
+
+document.getElementById('reload').onclick = load;
+
+document.getElementById('save').onclick = async () => {
+  const msg = document.getElementById('msg');
+  const options = {};
+  for (const el of document.querySelectorAll('[data-k]')) {
+    const k = el.dataset.k;
+    let v = el.value;
+    if (el.tagName === 'SELECT') v = (v === 'true');
+    else if (el.type === 'number') v = Number(v);
+    if (k === 'webUiPassword' && !v) continue;
+    options[k] = v;
+  }
+  let upstream;
+  try {
+    upstream = JSON.parse(document.getElementById('upstream').value || '{}');
+  } catch (e) {
+    msg.className = 'msg err';
+    msg.textContent = 'upstream 不是合法 JSON：' + e.message;
+    return;
+  }
+  msg.className = 'msg';
+  msg.textContent = '保存中…';
+  const r = await fetch('/kkk/api/save', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ options: options, upstream: upstream })
+  });
+  const j = await r.json();
+  msg.className = 'msg ' + (j.ok ? 'ok' : 'err');
+  msg.textContent = j.ok ? '已保存并重载' : ('失败：' + j.error);
+  if (j.ok) setTimeout(load, 1500);
+};
+
+load();
+</script>
+</body>
+</html>

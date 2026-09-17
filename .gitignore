@@ -1,0 +1,17 @@
+# 依赖
+node_modules/
+.yarn/
+yarn.lock
+
+# 构建产物（用 scripts/build.mjs 生成）
+lib/
+
+# 运行时数据 / 测试残留
+data/
+data-smoke-*/
+*.log
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/

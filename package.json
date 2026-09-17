@@ -1,0 +1,85 @@
+{
+  "name": "koishi-plugin-kkk",
+  "version": "1.0.0",
+  "description": "抖音 / B站 / 快手 / 小红书 视频解析与动态推送，带 QQ 交互面板与弹幕烧录（karin-plugin-kkk 的 Koishi 移植版）",
+  "main": "lib/index.js",
+  "typings": "lib/index.d.ts",
+  "files": [
+    "lib",
+    "src",
+    "scripts",
+    "resources",
+    "config",
+    "assets",
+    "client",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "license": "GPL-3.0-only",
+  "keywords": [
+    "bot",
+    "chatbot",
+    "koishi",
+    "plugin",
+    "douyin",
+    "bilibili",
+    "kuaishou",
+    "xiaohongshu",
+    "danmaku",
+    "kkk"
+  ],
+  "koishi": {
+    "description": {
+      "zh": "抖音/B站/快手/小红书 视频解析与动态推送，QQ 交互面板 + 弹幕烧录（karin-plugin-kkk 移植版）",
+      "en": "Parse and push videos from Douyin / Bilibili / Kuaishou / Xiaohongshu, with QQ interactive panel and danmaku burning (port of karin-plugin-kkk)"
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "deploy": "node scripts/build.mjs && node scripts/deploy.mjs",
+    "postinstall": "node scripts/patch-deps.mjs",
+    "patch-deps": "node scripts/patch-deps.mjs",
+    "smoke": "node scripts/smoke-parse.cjs",
+    "smoke:render": "node scripts/smoke-render.cjs",
+    "check-types": "tsc -p tsconfig.json"
+  },
+  "peerDependencies": {
+    "koishi": "^4.18.7"
+  },
+  "dependencies": {
+    "@ikenxuan/amagi": "6.6.0",
+    "@ikenxuan/qrcode": "1.5.0",
+    "@icons-pack/react-simple-icons": "^13.15.1",
+    "@outpacelabs/avatars": "0.6.0",
+    "@phosphor-icons/react": "^2.1.10",
+    "@thesvg/icons": "^3.3.7",
+    "axios": "^1.20.0",
+    "clsx": "^2.1.1",
+    "date-fns": "^4.4.0",
+    "echarts": "^6.1.0",
+    "express": "^5.2.1",
+    "heic-decode": "^2.1.0",
+    "jpeg-js": "^0.4.4",
+    "lucide-react": "^1.46.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "react-icons": "^5.7.0",
+    "react-markdown": "^10.1.0",
+    "rehype-highlight": "^7.0.2",
+    "tailwind-merge": "^3.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.5",
+    "koishi": "^4.18.7",
+    "typescript": "^5.6.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/maimai993/koishi-plugin-kkk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/maimai993/koishi-plugin-kkk/issues"
+  },
+  "homepage": "https://github.com/maimai993/koishi-plugin-kkk#readme"
+}

@@ -1,0 +1,448 @@
+import fs from 'node:fs'
+import { Transform } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
+
+import { logger } from 'node-karin'
+import type { AxiosInstance } from 'node-karin/axios'
+import { AxiosError } from 'node-karin/axios'
+
+import {
+  calculateBackoffDelay,
+  formatBytes,
+  getErrorDescription,
+  isRecoverableNetworkError,
+  isThrottlingError,
+  sanitizeHeaders
+} from './helpers'
+import { ThrottleStream } from './ThrottleStream'
+import type { CustomAxiosRequestConfig, DownloadResult, ProgressCallback, ThrottleConfig } from './types'
+import { DEFAULT_THROTTLE_CONFIG } from './types'
+
+/**
+ * 正在下载的任务进度表。
+ *
+ * QQ 面板上有个「📊 查询下载进度」按钮，用户点一下就知道现在下到哪了 ——
+ * 不然解析大文件时群里只有一句「收到请求，开始下载」，完全看不到动静。
+ * 只保留最近 2 分钟内有更新的条目，避免这里变成内存垃圾堆。
+ */
+export interface DownloadProgressEntry {
+  /** 文件名（给用户看的） */
+  name: string
+  /** 已下载字节 */
+  bytes: number
+  /** 总字节（0 = 未知） */
+  total: number
+  /** 最近一次更新的时间戳 */
+  at: number
+}
+
+const activeDownloads = new Map<string, DownloadProgressEntry>()
+
+/** 登记一次进度（由下载器内部调用） */
+export function reportDownloadProgress (filepath: string, bytes: number, total: number) {
+  try {
+    const name = String(filepath ?? '').split(/[\\/]/).pop() || '未知文件'
+    activeDownloads.set(filepath, { name, bytes, total, at: Date.now() })
+    if (activeDownloads.size > 64) activeDownloads.delete(activeDownloads.keys().next().value as string)
+  } catch { /* 观测失败不影响下载 */ }
+}
+
+/** 结束一次下载（成功/失败都要清掉，否则按钮会一直显示已完成的任务） */
+export function clearDownloadProgress (filepath: string) {
+  activeDownloads.delete(filepath)
+}
+
+/** 当前仍在进行的下载（60 秒内有过更新才算「进行中」） */
+export function listActiveDownloads (): DownloadProgressEntry[] {
+  const now = Date.now()
+  const result: DownloadProgressEntry[] = []
+  for (const [key, value] of activeDownloads) {
+    if (now - value.at > 60_000) {
+      activeDownloads.delete(key)
+      continue
+    }
+    result.push(value)
+  }
+  return result.sort((left, right) => right.at - left.at)
+}
+
+/**
+ * 文件下载器
+ * 支持断点续传、限速下载、自动重试
+ */
+export class Downloader {
+  private axiosInstance: AxiosInstance
+  private url: string
+  private filepath: string
+  private headers: Record<string, string>
+  private timeout: number
+  private maxRetries: number
+  private throttleConfig: ThrottleConfig
+  private currentSpeed: number
+  private consecutiveResets: number
+
+  constructor(
+    axiosInstance: AxiosInstance,
+    url: string,
+    filepath: string,
+    headers: Record<string, string>,
+    timeout: number,
+    maxRetries: number,
+    throttleConfig?: Partial<ThrottleConfig>
+  ) {
+    this.axiosInstance = axiosInstance
+    this.url = url
+    this.filepath = filepath
+    this.headers = headers
+    this.timeout = timeout
+    this.maxRetries = maxRetries
+    this.throttleConfig = { ...DEFAULT_THROTTLE_CONFIG, ...throttleConfig }
+    this.currentSpeed = this.throttleConfig.maxSpeed
+    this.consecutiveResets = 0
+  }
+
+  /**
+   * 执行下载
+   * @param progressCallback 进度回调
+   * @param retryCount 当前重试次数
+   */
+  async download(progressCallback: ProgressCallback, retryCount = 0): Promise<DownloadResult> {
+    // URL 校验
+    if (!this.url || !/^https?:\/\//i.test(this.url)) {
+      const sanitized = sanitizeHeaders(this.headers)
+      throw new Error(`Invalid URL: ${this.url || '(empty)'}, Headers: ${JSON.stringify(sanitized)}`)
+    }
+
+    if (!this.filepath) {
+      throw new Error('未指定文件保存路径: filepath 为空')
+    }
+
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), this.timeout)
+    let intervalId: NodeJS.Timeout | null = null
+    let throttleStream: ThrottleStream | null = null
+    let writer: fs.WriteStream | null = null
+
+    try {
+      // 检查断点续传
+      let startByte = 0
+      if (fs.existsSync(this.filepath)) {
+        const stats = fs.statSync(this.filepath)
+        // 由于 stream.pipeline 出错时可能丢失内部缓冲区数据（最多约 32KB），
+        // 保守起见回退 256KB 重新下载，避免文件损坏
+        startByte = Math.max(0, stats.size - 256 * 1024)
+        if (startByte > 0 && startByte < stats.size) {
+          // 截断文件到回退位置，避免 r+ 模式下旧数据残留在文件末尾
+          fs.truncateSync(this.filepath, startByte)
+          logger.debug(`检测到部分下载文件，截断到 ${formatBytes(startByte)} 后重新下载（回退 256KB 安全裕量）`)
+        } else if (startByte > 0) {
+          logger.debug(`检测到部分下载文件，从 ${formatBytes(startByte)} 处继续下载（回退 256KB 安全裕量）`)
+        } else {
+          logger.debug('检测到部分下载文件，文件较小，将重新下载')
+        }
+      }
+
+      // 构建请求配置
+      const requestConfig: CustomAxiosRequestConfig = {
+        url: this.url,
+        method: 'GET',
+        responseType: 'stream',
+        signal: controller.signal,
+        headers: { ...this.headers },
+        skipRetry: true
+      }
+
+      // 断点续传
+      if (startByte > 0) {
+        requestConfig.headers = {
+          ...requestConfig.headers,
+          Range: `bytes=${startByte}-`
+        }
+      }
+
+      logger.debug('开始下载流', {
+        url: this.url,
+        headers: sanitizeHeaders(requestConfig.headers),
+        throttleEnabled: this.throttleConfig.enabled,
+        currentSpeed: this.throttleConfig.enabled ? formatBytes(this.currentSpeed) + '/s' : '不限速'
+      })
+
+      const response = await this.axiosInstance(requestConfig)
+      clearTimeout(timeoutId)
+
+      // 检查 HTTP 状态码
+      // 416 Range Not Satisfiable
+      if (response.status === 416) {
+        logger.warn('服务器返回 416，文件可能已下载完成，验证文件大小...')
+
+        if (fs.existsSync(this.filepath)) {
+          const stats = fs.statSync(this.filepath)
+          logger.debug(`当前文件大小: ${formatBytes(stats.size)}`)
+
+          // 如果文件大小合理（大于 1KB），认为下载完成
+          if (stats.size > 1024) {
+            logger.debug('文件大小合理，认为下载已完成')
+            return {
+              filepath: this.filepath,
+              totalBytes: stats.size
+            }
+          } else {
+            // 文件太小，删除并重新下载
+            logger.warn('文件太小，删除并重新下载')
+            fs.unlinkSync(this.filepath)
+            return this.download(progressCallback, retryCount + 1)
+          }
+        }
+      }
+
+      if (response.status !== 200 && response.status !== 206) {
+        logger.error(`下载失败: HTTP ${response.status}, URL: ${this.url}`)
+        logger.error(`响应头: ${JSON.stringify(response.headers)}`)
+
+        // 如果响应体很小，可能是错误信息，尝试读取
+        if (response.headers['content-length'] && parseInt(response.headers['content-length']) < 10240) {
+          let errorBody = ''
+          response.data.on('data', (chunk: Buffer) => {
+            errorBody += chunk.toString()
+          })
+          await new Promise((resolve) => setTimeout(resolve, 100))
+          logger.error(`响应内容: ${errorBody}`)
+        }
+
+        throw new Error(`HTTP ${response.status}: ${this.url}`)
+      }
+
+      // 检查服务器是否支持断点续传
+      const supportsRange = response.status === 206
+      if (startByte > 0 && !supportsRange) {
+        logger.warn('服务器不支持断点续传，将重新下载整个文件')
+        if (fs.existsSync(this.filepath)) {
+          fs.unlinkSync(this.filepath)
+        }
+        startByte = 0
+      }
+
+      // 验证 206 响应的 Content-Range 起始位置，防止 CDN 返回错误范围导致文件损坏
+      if (supportsRange && response.headers['content-range']) {
+        const contentRange = String(response.headers['content-range'])
+        const rangeMatch = contentRange.match(/bytes\s*(\d+)-\d+\/\d+/)
+        if (rangeMatch) {
+          const responseStartByte = Number.parseInt(rangeMatch[1], 10)
+          if (responseStartByte !== startByte) {
+            logger.warn(`Content-Range 起始位置不匹配: 请求 ${startByte}, 实际 ${responseStartByte}，将重新下载`)
+            if (fs.existsSync(this.filepath)) {
+              fs.unlinkSync(this.filepath)
+            }
+            startByte = 0
+          }
+        }
+      }
+
+      // 解析内容长度
+      const rawContentLength = response.headers['content-length']
+      const contentLength = Number.parseInt(rawContentLength ?? '-1', 10)
+      if (Number.isNaN(contentLength)) {
+        const sanitized = sanitizeHeaders(this.headers)
+        throw new Error(`无效的 content-length 响应头, URL: ${this.url}, Headers: ${JSON.stringify(sanitized)}`)
+      }
+
+      const totalBytes = supportsRange ? startByte + contentLength : contentLength
+      let downloadedBytes = startByte
+      let lastPrintedPercentage = -1
+
+      // 创建写入流
+      // 使用 r+ 模式和 start 选项，从指定位置覆盖写入，避免 append 模式导致的数据错位
+      writer = fs.createWriteStream(this.filepath, {
+        flags: startByte > 0 ? 'r+' : 'w',
+        start: startByte > 0 ? startByte : undefined
+      })
+
+      // 进度回调
+      const printProgress = () => {
+        if (totalBytes > 0) {
+          const progressPercentage = Math.floor((downloadedBytes / totalBytes) * 100)
+          if (progressPercentage !== lastPrintedPercentage) {
+            progressCallback(downloadedBytes, totalBytes)
+            lastPrintedPercentage = progressPercentage
+          }
+        } else {
+          progressCallback(downloadedBytes, totalBytes)
+        }
+        // 登记进度：面板上的「📊 查询下载进度」按钮读的就是这里
+        reportDownloadProgress(this.filepath, downloadedBytes, totalBytes)
+      }
+
+      const interval = totalBytes > 0 && totalBytes < 10 * 1024 * 1024 ? 1000 : 500
+      intervalId = setInterval(printProgress, interval)
+
+      // 创建计数流
+      const counterStream = new Transform({
+        transform(chunk, encoding, callback) {
+          downloadedBytes += chunk.length
+          callback(null, chunk)
+        }
+      })
+
+      // 根据配置决定是否使用限速流
+      if (this.throttleConfig.enabled) {
+        throttleStream = new ThrottleStream(this.currentSpeed)
+        logger.debug(`启用限速下载: ${formatBytes(this.currentSpeed)}/s`)
+        await pipeline(response.data, throttleStream, counterStream, writer as fs.WriteStream)
+      } else {
+        await pipeline(response.data, counterStream, writer as fs.WriteStream)
+      }
+
+      if (intervalId) clearInterval(intervalId)
+
+      // pipeline 已经等待所有流完成，包括 writer 的 finish 事件
+      logger.debug('文件下载并写入完成')
+
+      // 验证文件大小
+      if (fs.existsSync(this.filepath)) {
+        const stats = fs.statSync(this.filepath)
+        const actualSize = stats.size
+        const expectedSize = totalBytes > 0 ? totalBytes : downloadedBytes
+
+        // 检查文件是否太小（可能是错误响应）
+        if (actualSize < 1024 && expectedSize < 1024) {
+          logger.error(`下载的文件异常小 (${formatBytes(actualSize)})，可能是错误响应`)
+
+          // 尝试读取文件内容
+          try {
+            const content = fs.readFileSync(this.filepath, 'utf-8')
+            logger.error(`文件内容: ${content}`)
+          } catch {
+            logger.error('无法读取文件内容（可能是二进制文件）')
+          }
+
+          throw new Error(`下载的文件异常小: ${formatBytes(actualSize)}，可能是错误响应或链接失效`)
+        }
+
+        if (actualSize < expectedSize) {
+          logger.warn(`文件大小不匹配: 实际 ${formatBytes(actualSize)}, 预期 ${formatBytes(expectedSize)}`)
+          logger.warn(
+            `差异: ${formatBytes(expectedSize - actualSize)} (${(((expectedSize - actualSize) / expectedSize) * 100).toFixed(2)}%)`
+          )
+
+          // 如果差异大于 10KB，认为下载不完整
+          if (expectedSize - actualSize > 10 * 1024) {
+            throw new Error(`文件下载不完整: 实际 ${formatBytes(actualSize)}, 预期 ${formatBytes(expectedSize)}`)
+          }
+        } else {
+          logger.debug(`文件大小验证通过: ${formatBytes(actualSize)}`)
+        }
+      }
+
+      // 下载成功，重置连续重置计数
+      this.consecutiveResets = 0
+      clearDownloadProgress(this.filepath)
+
+      return {
+        filepath: this.filepath,
+        totalBytes: totalBytes > 0 ? totalBytes : downloadedBytes
+      }
+    } catch (error) {
+      clearTimeout(timeoutId)
+      if (intervalId) clearInterval(intervalId)
+      // 失败/中断也要清掉，不然「查询下载进度」会一直卡在旧任务上
+      clearDownloadProgress(this.filepath)
+
+      const isRecoverable = isRecoverableNetworkError(error)
+      const isThrottling = isThrottlingError(error)
+      const errorDesc = getErrorDescription(error)
+
+      if (error instanceof AxiosError) {
+        const sanitized = sanitizeHeaders(this.headers)
+        logger.error(`请求失败: ${errorDesc}, URL: ${this.url}, Headers: ${JSON.stringify(sanitized)}`)
+      } else {
+        logger.error(`下载失败: ${errorDesc}`)
+      }
+
+      // 如果是断流错误，自动降速
+      if (isThrottling && this.throttleConfig.enabled) {
+        this.consecutiveResets++
+        const newSpeed = Math.max(this.currentSpeed * this.throttleConfig.autoReduceRatio, this.throttleConfig.minSpeed)
+
+        if (newSpeed < this.currentSpeed) {
+          logger.warn(
+            `检测到服务器断流 (连续 ${this.consecutiveResets} 次)，自动降速: ${formatBytes(this.currentSpeed)}/s -> ${formatBytes(newSpeed)}/s`
+          )
+          this.currentSpeed = newSpeed
+        } else {
+          logger.warn(`已达到最低速度限制 ${formatBytes(this.throttleConfig.minSpeed)}/s，无法继续降速`)
+        }
+      }
+
+      const nextDelay = calculateBackoffDelay(retryCount)
+
+      if (retryCount < this.maxRetries) {
+        // 等待 writer 完全关闭，确保异步写入操作已完成，避免 stat 获取到不准确的文件大小
+        if (writer && !(writer.closed ?? false)) {
+          const ws = writer
+          await new Promise<void>((resolve) => {
+            const timeout = setTimeout(() => {
+              ws.off('close', onClose)
+              resolve()
+            }, 1000)
+            const onClose = () => {
+              clearTimeout(timeout)
+              resolve()
+            }
+            ws.once('close', onClose)
+          })
+        }
+
+        if (isRecoverable && fs.existsSync(this.filepath)) {
+          const stats = fs.statSync(this.filepath)
+          logger.warn(`检测到可恢复的网络错误，保留已下载的 ${formatBytes(stats.size)} 数据`)
+          logger.warn(`正在重试下载... (${retryCount + 1}/${this.maxRetries})，将在 ${nextDelay / 1000} 秒后使用断点续传重试`)
+        } else {
+          logger.warn(`正在重试下载... (${retryCount + 1}/${this.maxRetries})，将在 ${nextDelay / 1000} 秒后重试`)
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, nextDelay))
+        return this.download(progressCallback, retryCount + 1)
+      } else {
+        // 最终失败处理
+        if (fs.existsSync(this.filepath)) {
+          const stats = fs.statSync(this.filepath)
+
+          if (isRecoverable && stats.size > 0) {
+            logger.warn(`下载失败但保留了部分文件 (${formatBytes(stats.size)}): ${this.filepath}`)
+            logger.warn('这可能是由于网络环境变化或服务器风控导致的，文件已保留供后续恢复')
+
+            if (isThrottling) {
+              logger.warn('建议: 服务器可能有下载速度限制，请尝试在配置中降低 maxSpeed 参数')
+            }
+          } else {
+            try {
+              fs.unlinkSync(this.filepath)
+              logger.debug('已清理部分下载的文件')
+            } catch (cleanupError) {
+              logger.warn('清理部分下载文件失败:', cleanupError)
+            }
+          }
+        }
+
+        const sanitized = sanitizeHeaders(this.headers)
+        throw new Error(`在 ${this.maxRetries} 次尝试后下载失败: ${errorDesc}, URL: ${this.url}, Headers: ${JSON.stringify(sanitized)}`)
+      }
+    }
+  }
+
+  /**
+   * 手动设置下载速度
+   * @param speed 速度 (bytes/s)
+   */
+  setSpeed(speed: number): void {
+    this.currentSpeed = Math.max(speed, this.throttleConfig.minSpeed)
+    logger.debug(`手动设置下载速度: ${formatBytes(this.currentSpeed)}/s`)
+  }
+
+  /**
+   * 获取当前速度设置
+   */
+  getSpeed(): number {
+    return this.currentSpeed
+  }
+}

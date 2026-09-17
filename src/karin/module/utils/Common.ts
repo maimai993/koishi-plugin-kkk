@@ -1,0 +1,448 @@
+import fs from 'node:fs'
+import path from 'node:path'
+
+import { createNotFoundResponse, logger, type Message } from 'node-karin'
+import axios from 'node-karin/axios'
+import type { Response } from 'node-karin/express'
+import { karinPathTemp } from 'node-karin/root'
+
+import { importEsm } from '../../../compat/esm'
+import { resolveQqCardContent } from './QqCardResolve'
+import { Config } from '@/module/utils/Config'
+
+import { Count } from '..'
+import { Root } from '../../root'
+
+type VideoPreviewInfo = {
+  filename: string
+  filePath: string
+  createdAt: number
+  expireAt?: number
+  removeCache: boolean
+  removedAt?: number
+  cleanupAt?: number
+}
+
+/** 常用工具合集 */
+class Tools {
+  private static readonly VIDEO_PREVIEW_REMOVED_RETENTION_MS = 5 * 60 * 1000
+  private static readonly VIDEO_PREVIEW_SWEEP_INTERVAL_MS = 10 * 60 * 1000
+  /**
+   * 插件缓存目录
+   */
+  tempDri: {
+    /** 插件缓存目录 */
+    default: string
+    /** 视频缓存文件 */
+    video: string
+    /** 图片缓存文件 */
+    images: string
+  }
+  private videoPreviewState: Map<string, VideoPreviewInfo>
+
+  /**
+   * 初始化工具实例并启动预览状态的后台清理任务。
+   */
+  constructor() {
+    this.tempDri = {
+      /** 插件缓存目录 */
+      default: `${karinPathTemp}/${Root.pluginName}/`.replace(/\\/g, '/'),
+      /** 视频缓存文件 */
+      video: `${karinPathTemp}/${Root.pluginName}/kkkdownload/video/`.replace(/\\/g, '/'),
+      /** 图片缓存文件 */
+      images: `${karinPathTemp}/${Root.pluginName}/kkkdownload/images/`.replace(/\\/g, '/')
+    }
+    this.videoPreviewState = new Map()
+    const cleanupTimer = setInterval(() => {
+      this.pruneVideoPreviewState()
+    }, Tools.VIDEO_PREVIEW_SWEEP_INTERVAL_MS)
+    cleanupTimer.unref?.()
+  }
+
+  /**
+   * 获取引用消息
+   * @param e event 消息事件
+   * @returns 被引用的消息
+   */
+  /**
+   * 尝试从图片 URL 识别二维码并返回支持的平台链接
+   * @param imageUrl 图片 URL
+   * @param source 来源描述（用于日志）
+   * @returns 识别到的平台链接，或 null
+   */
+  private async tryScanImageQrCode(imageUrl: string, source: string): Promise<string | null> {
+    try {
+      logger.debug(`检测到${source}为图片，尝试识别二维码...`)
+      const response = await axios.get(imageUrl, { responseType: 'arraybuffer' })
+      const buffer = Buffer.from(response.data)
+      // Koishi 移植：@ikenxuan/qrcode 是 ESM-only 包（exports 没有 require 条件），
+      // 且 tsc 会把 import() 降级成 require()，所以用 importEsm 走真正的 ESM 加载。
+      const { scanSync } = await importEsm<typeof import('@ikenxuan/qrcode')>('@ikenxuan/qrcode')
+      const qrContent = scanSync(buffer)
+      const patterns = [
+        /(https?:\/\/)?(www|v|jx|m|jingxuan)\.(douyin|iesdouyin)\.com/i, // 抖音分享链接
+        /https:\/\/aweme\.snssdk\.com\/aweme\/v1\/play/i, // 抖音 CDN 下载链接
+        /(bilibili\.com|b23\.tv|t\.bilibili\.com|bili2233\.cn|\bBV[1-9a-zA-Z]{10}\b|\bav\d+\b)/i, // B站
+        /(快手.*快手|v\.kuaishou\.com|kuaishou\.com)/, // 快手
+        /(xiaohongshu\.com|xhslink\.(?:com|cn))/ // 小红书
+      ]
+      if (qrContent && patterns.some((pattern) => pattern.test(qrContent))) {
+        logger.debug(`从${source}二维码中识别到支持的平台链接: ${qrContent}`)
+        return qrContent
+      } else if (qrContent) {
+        logger.debug(`识别到二维码内容但不是支持的平台: ${qrContent}`)
+      }
+    } catch (error) {
+      logger.error(`识别${source}二维码时发生错误:`, error)
+    }
+    return null
+  }
+
+  async getReplyMessage(e: Message): Promise<string> {
+    const result = await this.readReplyMessage(e)
+    // Koishi 移植：QQ 分享卡片在适配器里是「带 JSON 转义的一整段文本」，
+    // 引用解析时同样要还原转义 + 补上挖出来的链接，否则平台的链接正则匹配不到；
+    // 新版卡片可能完全不带链接，这里再走一次「卡片 → B站搜索还原」。
+    return await resolveQqCardContent(result)
+  }
+
+  private async readReplyMessage(e: Message): Promise<string> {
+    if (e.replyId) {
+      const reply = await e.bot.getMsg(e.contact, e.replyId)
+      for (const v of reply.elements) {
+        if (v.type === 'text') {
+          try {
+            const parsed = JSON.parse(v.text)
+            if (parsed.type === 'markdown' && parsed.data?.content) {
+              const content = parsed.data.content
+              // 尝试从 markdown 中提取图片链接并识别二维码
+              const imageRegex = /!\[.*?\]\((.*?)\)/g
+              let match: RegExpExecArray | null
+              while ((match = imageRegex.exec(content)) !== null) {
+                const qrResult = await this.tryScanImageQrCode(match[1], '引用消息中的 markdown 图片')
+                if (qrResult) return qrResult
+              }
+              return content
+            }
+          } catch {
+            // 不是 JSON 格式，按普通文本处理
+          }
+          return v.text
+        } else if (v.type === 'json') {
+          return v.data
+        } else if (v.type === 'image') {
+          const qrResult = await this.tryScanImageQrCode(v.file, '引用消息')
+          if (qrResult) return qrResult
+        }
+      }
+    }
+    return ''
+  }
+
+  /**
+   * 将中文数字转换为阿拉伯数字的函数
+   * @param chineseNumber 数字的中文
+   * @returns 中文数字对应的阿拉伯数字映射
+   */
+  chineseToArabic(chineseNumber: string): number {
+    // 映射表，定义基础的中文数字
+    const chineseToArabicMap: Record<string, number> = {
+      零: 0,
+      一: 1,
+      二: 2,
+      三: 3,
+      四: 4,
+      五: 5,
+      六: 6,
+      七: 7,
+      八: 8,
+      九: 9
+    }
+    // 对应中文单位映射
+    const units: Record<string, number> = {
+      十: 10,
+      百: 100,
+      千: 1000,
+      万: 10000,
+      亿: 100000000
+    }
+    let result = 0
+    let temp = 0 // 存储每一段的临时结果
+    let unit = 1 // 当前处理的单位，初始为1
+
+    for (let i = chineseNumber.length - 1; i >= 0; i--) {
+      const char = chineseNumber[i]
+
+      // 如果是单位字符
+      if (units[char] !== undefined) {
+        unit = units[char]
+        if (unit === 10000 || unit === 100000000) {
+          result += temp * unit
+          temp = 0
+        }
+      } else {
+        // 如果是数字字符
+        const num = chineseToArabicMap[char]
+        if (unit > 1) {
+          temp += num * unit
+        } else {
+          temp += num
+        }
+        unit = 1 // 重置单位
+      }
+    }
+    return result + temp
+  }
+
+  /**
+   * 格式化cookie字符串
+   * @param cookies cookie数组
+   * @returns 格式化后的cookie字符串
+   */
+  formatCookies(cookies: any[]): string {
+    return cookies
+      .map((cookie) => {
+        // 分割每个cookie字符串以获取名称和值
+        const [nameValue] = cookie.split(';').map((part: string) => part.trim())
+        const [name, value] = nameValue.split('=')
+
+        // 重新组合名称和值，忽略其他属性
+        return `${name}=${value}`
+      })
+      .join('; ')
+  }
+
+  /**
+   * 计算目标视频平均码率（单位：Kbps）
+   * @param targetSizeMB 目标视频大小（MB）
+   * @param duration 视频时长（秒）
+   * @returns
+   */
+  calculateBitrate(targetSizeMB: number, duration: number): number {
+    // 将目标大小转换为字节
+    const targetSizeBytes = targetSizeMB * 1024 * 1024 // 转换为字节
+    // 计算比特率并返回单位 Mbps
+    return (targetSizeBytes * 8) / duration / 1024 // Kbps
+  }
+
+  /**
+   * 获取视频文件大小（单位MB）
+   * @param filePath 视频文件绝对路径
+   * @returns
+   */
+  async getVideoFileSize(filePath: string): Promise<number> {
+    try {
+      const stats = await fs.promises.stat(filePath) // 获取文件信息
+      const fileSizeInBytes = stats.size // 文件大小（字节）
+      const fileSizeInMB = fileSizeInBytes / (1024 * 1024) // 转换为MB
+      return fileSizeInMB
+    } catch (error) {
+      console.error('获取文件大小时发生错误:', error)
+      throw error
+    }
+  }
+
+  /**
+   * 根据配置文件的配置项，删除缓存文件
+   * @param path 文件的绝对路径
+   * @param force 是否强制删除，默认 `false`
+   * @returns
+   */
+  async removeFile(path: string, force = false): Promise<boolean> {
+    path = path.replace(/\\/g, '/')
+    if (Config.app.removeCache) {
+      try {
+        await fs.promises.unlink(path)
+        logger.mark('缓存文件: ', path + ' 删除成功！')
+        return true
+      } catch (err) {
+        logger.error('缓存文件: ', path + ' 删除失败！', err)
+        return false
+      }
+    } else if (force) {
+      try {
+        await fs.promises.unlink(path)
+        logger.mark('缓存文件: ', path + ' 删除成功！')
+        return true
+      } catch (err) {
+        logger.error('缓存文件: ', path + ' 删除失败！', err)
+        return false
+      }
+    }
+    return true
+  }
+
+  /**
+   * 注册一个视频预览状态，供预览页面和 SSE 状态流读取。
+   * @param filePath 视频文件绝对路径。
+   * @param removeCache 预览文件是否会在 TTL 到期后自动删除。
+   * @param ttlMs 预览状态的生存时间，单位为毫秒。
+   * @returns 当前注册后的预览状态对象。
+   */
+  registerVideoPreview(filePath: string, removeCache: boolean, ttlMs: number): VideoPreviewInfo {
+    this.pruneVideoPreviewState()
+    const filename = path.basename(filePath)
+    const createdAt = Date.now()
+    const expireAt = removeCache ? createdAt + ttlMs : undefined
+    const info: VideoPreviewInfo = {
+      filename,
+      filePath,
+      createdAt,
+      expireAt,
+      removeCache
+    }
+    this.videoPreviewState.set(filename, info)
+    return info
+  }
+
+  /**
+   * 按文件名获取视频预览状态。
+   * @param filename 预览文件名。
+   * @returns 命中的预览状态；未命中时返回 `null`。
+   */
+  getVideoPreview(filename: string): VideoPreviewInfo | null {
+    this.pruneVideoPreviewState()
+    return this.videoPreviewState.get(filename) ?? null
+  }
+
+  /**
+   * 将视频预览状态标记为已移除，并安排延迟回收。
+   * @param filePathOrFilename 视频绝对路径或文件名。
+   * @returns 更新后的预览状态；若不存在则返回 `null`。
+   */
+  markVideoPreviewRemoved(filePathOrFilename: string): VideoPreviewInfo | null {
+    this.pruneVideoPreviewState()
+    const filename =
+      filePathOrFilename.includes('/') || filePathOrFilename.includes('\\') ? path.basename(filePathOrFilename) : filePathOrFilename
+    const info = this.videoPreviewState.get(filename)
+    if (!info) {
+      return null
+    }
+    const updated: VideoPreviewInfo = {
+      ...info,
+      removedAt: Date.now(),
+      cleanupAt: Date.now() + Tools.VIDEO_PREVIEW_REMOVED_RETENTION_MS
+    }
+    this.videoPreviewState.set(filename, updated)
+    return updated
+  }
+
+  /**
+   * 清理过期或已删除的视频预览状态，避免全局缓存持续增长。
+   * @param now 当前时间戳，默认使用 `Date.now()`。
+   */
+  private pruneVideoPreviewState(now = Date.now()) {
+    for (const [filename, info] of this.videoPreviewState) {
+      const fileMissing = !fs.existsSync(info.filePath)
+      const shouldMarkRemoved =
+        !info.removedAt &&
+        ((info.removeCache && typeof info.expireAt === 'number' && now >= info.expireAt && fileMissing) ||
+          (!info.removeCache && fileMissing))
+
+      if (shouldMarkRemoved) {
+        const removedAt = now
+        this.videoPreviewState.set(filename, {
+          ...info,
+          removedAt,
+          cleanupAt: removedAt + Tools.VIDEO_PREVIEW_REMOVED_RETENTION_MS
+        })
+        continue
+      }
+
+      if (info.cleanupAt && now >= info.cleanupAt) {
+        this.videoPreviewState.delete(filename)
+      }
+    }
+  }
+
+  /**
+   * 评论图、推送图是否使用深色模式
+   * @returns
+   */
+  useDarkTheme(): boolean {
+    let dark = true
+    const configTheme = Config.app.Theme
+    if (configTheme === 0 || configTheme === 3) {
+      // 自动 / 智能场景的兜底自动
+      const currentHour = new Date().getHours()
+      if (currentHour >= 6 && currentHour < 18) {
+        dark = false
+      }
+    } else if (configTheme === 1) {
+      dark = false
+    } else if (configTheme === 2) {
+      dark = true
+    }
+    return dark
+  }
+
+  /**
+   * 验证视频请求
+   * @param filename 文件名
+   * @param res 响应对象
+   * @returns 返回安全解析后的路径
+   */
+  validateVideoRequest(filename: string | undefined, res: Response): string | null {
+    // 1. 基础校验
+    if (!filename) {
+      createNotFoundResponse(res, '无效的文件名')
+      return null
+    }
+
+    // 2. 规范化并解析路径
+    const intendedBaseDir = path.resolve(Common.tempDri.video)
+    const requestedPath = path.join(intendedBaseDir, filename) // 先拼接
+    const resolvedPath = path.normalize(requestedPath) // 规范化
+
+    // 3. 安全性检查：防止路径穿越
+    if (!resolvedPath.startsWith(intendedBaseDir + path.sep) || filename.includes('/') || filename.includes('\\')) {
+      logger.warn(`潜在的路径穿越尝试或无效文件名: ${filename}, 解析路径: ${resolvedPath}`)
+      createNotFoundResponse(res, '无效的文件名或路径')
+      return null
+    }
+
+    // 确保文件名本身不包含路径分隔符
+    if (path.basename(filename) !== filename) {
+      logger.warn(`文件名包含路径分隔符: ${filename}`)
+      createNotFoundResponse(res, '无效的文件名')
+      return null
+    }
+
+    // 检查文件是否存在
+    if (!fs.existsSync(resolvedPath)) {
+      createNotFoundResponse(res, '视频文件未找到')
+      return null
+    }
+
+    return resolvedPath // 返回安全解析后的路径
+  }
+
+  /**
+   * 格式化数字
+   * @param num 数字
+   * @returns 格式化后的字符串
+   */
+  count(num: number) {
+    return Count(num)
+  }
+
+  /**
+   * 格式化文件大小
+   * @param sizeInMB 文件大小（MB）
+   * @returns 格式化后的文件大小字符串（带单位）
+   */
+  formatFileSize(sizeInMB: number | string): string {
+    const size = typeof sizeInMB === 'string' ? parseFloat(sizeInMB) : sizeInMB
+
+    if (size < 1024) {
+      return `${size.toFixed(2)}MB`
+    } else if (size < 1024 * 1024) {
+      return `${(size / 1024).toFixed(2)}GB`
+    } else {
+      return `${(size / (1024 * 1024)).toFixed(2)}TB`
+    }
+  }
+}
+
+/** 常用工具合集 */
+export const Common = new Tools()

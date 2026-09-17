@@ -1,0 +1,73 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "declaration": false,
+    "emitDeclarationOnly": false,
+    "noEmit": true,
+    "target": "es2022",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "baseUrl": ".",
+    "rootDir": "src",
+    "outDir": "lib",
+    "types": [
+      "node"
+    ],
+    "lib": [
+      "es2022",
+      "dom"
+    ],
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "strict": false,
+    "noImplicitAny": false,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "experimentalDecorators": true,
+    "paths": {
+      "@/*": [
+        "src/karin/*"
+      ],
+      "node-karin": [
+        "src/compat/node-karin.ts"
+      ],
+      "node-karin/root": [
+        "src/compat/root.ts"
+      ],
+      "node-karin/sqlite3": [
+        "src/compat/sqlite3.ts"
+      ],
+      "node-karin/axios": [
+        "src/compat/axios.ts"
+      ],
+      "node-karin/yaml": [
+        "src/compat/yaml.ts"
+      ],
+      "node-karin/express": [
+        "src/compat/express.ts"
+      ],
+      "node-karin/start": [
+        "src/compat/start.ts"
+      ],
+      "@karinjs/template-react": [
+        "src/compat/template-react.ts"
+      ],
+      "@heroui/react": [
+        "src/compat/heroui.tsx"
+      ],
+      "node-karin/lodash": [
+        "src/compat/lodash.ts"
+      ],
+      "@template/*": [
+        "src/ktr/*"
+      ]
+    },
+    "jsx": "react-jsx",
+    "jsxImportSource": "react"
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx"
+  ]
+}
