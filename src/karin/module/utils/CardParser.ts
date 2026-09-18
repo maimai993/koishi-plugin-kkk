@@ -340,7 +340,13 @@ export const searchBiliVideos = async (
 
 export const searchDouyinWorks = async (keyword: string, limit = 8): Promise<Array<{ aweme_id: string; desc: string; author: string; score: number }>> => {
   try {
-    const res: any = await douyinFetcher.search({ query: String(keyword ?? '').trim(), type: 'video', number: limit })
+    // 这版接口库的抖音 fetcher 不一定有 search（实测 6.6.0 上没有），没有就干脆跳过
+    const fetcher: any = douyinFetcher as any
+    if (typeof fetcher?.search !== 'function') {
+      logger.debug('[卡片解析] 当前接口库没有抖音搜索能力，跳过')
+      return []
+    }
+    const res: any = await fetcher.search({ query: String(keyword ?? '').trim(), type: 'video', number: limit })
     const list: any[] =
       res?.data?.data?.aweme_list ?? res?.data?.aweme_list ?? res?.aweme_list ?? []
     const titleKey = normalizeText(keyword)
@@ -415,8 +421,10 @@ export const resolveCardToUrl = async (
     return null
   }
 
-  const looksDouyin = /抖音|douyin|快手|ks\./i.test(card.title + ' ' + card.desc + ' ' + upName)
-  const looksBili = /bilibili|哔哩|B站|UP主/i.test(card.title + ' ' + card.desc + ' ' + ocrText)
+  /** 卡片自带的 source 字段最准（实测 `source: 哔哩哔哩`），其次是 OCR 文本 */
+  const hint = String(card.source ?? '') + ' ' + card.title + ' ' + card.desc + ' ' + upName + ' ' + ocrText
+  const looksDouyin = /抖音|douyin|快手|ks\./i.test(hint)
+  const looksBili = /bilibili|哔哩|B站|UP主/i.test(hint)
 
   // ③ 先按最可能的平台搜，命中就返回
   const tryBili = async (): Promise<{ url?: string; candidates: CardCandidate[] }> => {

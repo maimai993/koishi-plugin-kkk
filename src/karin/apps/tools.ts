@@ -1,4 +1,4 @@
-import karin, { logger, type Message } from 'node-karin'
+import karin, { logger, segment, type Message } from 'node-karin'
 import { cmdInput } from '@/module/utils/QqPanel'
 import { replyReplacing } from '@/module/utils/QqPanel'
 import { resolveCardToUrl } from '@/module/utils/CardParser'
@@ -422,8 +422,15 @@ const handleCardParse = wrapWithErrorHandler(
      *   [卡片消息] 小程序 / 摘要: … / source: 哔哩哔哩 / title: … / preview: https://…
      * 老版本才是 JSON 卡片，所以两种都要认。有链接的直接放行走原流程。
      */
-    const looksCard = text.includes('[卡片消息]') || (text.includes('{') && /"title"|"preview"|jumpUrl/.test(text))
-    if (!looksCard || /https?:\/\//i.test(text)) return next()
+    /**
+     * 只判断「这是不是一张卡片」。
+     *
+     * **千万不要再加「文本里有 http 就放行」** —— 卡片本身一定带 preview / source_logo
+     * 两个图片链接，那样写会让所有卡片都在这行被挡回去（表现就是用户说的「没反应」）。
+     * 有真实作品链接的消息不会带 `[卡片消息]` 前缀，自然走原流程。
+     */
+    const looksCard = /\[卡片消息\]|卡片消息|"app"\s*:/.test(text)
+    if (!looksCard) return next()
     logger.mark('[卡片解析] 收到卡片消息: ' + text.replace(/\s+/g, ' ').slice(0, 130))
 
     // 提取 + OCR + 搜索要几秒，先给个反馈，免得用户以为插件没反应
