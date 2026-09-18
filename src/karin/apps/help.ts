@@ -31,8 +31,8 @@ const HELP_MENU_CONFIG: RoleMenuGroup[] = [
         roles: ['member', 'master']
       },
       {
-        title: '「解析」「弹幕解析」',
-        description: '直接发链接或引用消息后发送；弹幕解析仅适用于「抖音」「哔哩哔哩」（指令前缀按 Koishi 配置，本插件不带 # 前缀）',
+        title: '「解析」',
+        description: '直接发链接或引用消息后发送（指令前缀按 Koishi 配置，本插件不带 # 前缀）；发链接会自动识别平台并弹画质面板',
         icon: 'ph:magic-wand-fill',
         roles: ['member', 'master']
       },
