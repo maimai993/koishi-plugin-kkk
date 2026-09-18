@@ -156,9 +156,20 @@ export const sendSlicedImage = async (e: Message, input: any): Promise<boolean> 
     const sendPromise = (async () => {
       try {
         const result: any = await e.reply(segment.image(source))
+        /**
+         * 失败有三种表现，缺一不可（用户提醒：**不一定只是拿不到消息 ID**，QQ 会直接返回错误信息）：
+         *   1. 抛异常（网络/TLS 问题最常见，比如证书校验失败）
+         *   2. 拿不到 messageId（适配器静默失败）
+         *   3. **返回体里带错误**（result.error / message 里含 error/失败/超过限制 之类）
+         */
+        const errorText = String(result?.error?.message ?? result?.error ?? result?.message ?? result?.data?.error ?? '')
+        if (errorText && /error|fail|失败|超过|限制|拒绝|invalid|denied/i.test(errorText)) {
+          logger.mark('[图片切片] 普通发送返回错误信息: ' + errorText.slice(0, 120))
+          return false
+        }
         return Boolean(result?.messageId)
       } catch (error: any) {
-        logger.debug('[图片切片] 普通发送抛错: ' + String(error?.message ?? error))
+        logger.mark('[图片切片] 普通发送抛错，改走切片: ' + String(error?.message ?? error).slice(0, 120))
         return false
       }
     })()

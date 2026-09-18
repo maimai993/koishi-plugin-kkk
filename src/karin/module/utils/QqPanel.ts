@@ -790,10 +790,19 @@ export const toMarkdownImage = async (url: string, maxWidth = 420): Promise<stri
     const ctx: any = tryGetRuntime()?.ctx
     const assets: any = ctx?.assets
     if (!assets?.upload) return null
-    const res = await fetch(url)
-    if (!res.ok) return null
-    const buffer = Buffer.from(await res.arrayBuffer())
-    const mime = String(res.headers.get('content-type') ?? 'image/jpeg').split(';')[0]
+    // data URI（卡片/提示图就是这种）直接上传，不用再下载一遍
+    let buffer: Buffer
+    let mime = 'image/jpeg'
+    if (url.startsWith('data:')) {
+      const comma = url.indexOf(',')
+      mime = url.slice(5, url.indexOf(';')) || 'image/jpeg'
+      buffer = Buffer.from(url.slice(comma + 1), 'base64')
+    } else {
+      const res = await fetch(url)
+      if (!res.ok) return null
+      buffer = Buffer.from(await res.arrayBuffer())
+      mime = String(res.headers.get('content-type') ?? 'image/jpeg').split(';')[0]
+    }
     const meta = getImageMetadata(buffer)
     const uploaded: any = await assets.upload('data:' + mime + ';base64,' + buffer.toString('base64'), 'kkk-md.png')
     const finalUrl = typeof uploaded === 'string' ? uploaded : uploaded?.url
