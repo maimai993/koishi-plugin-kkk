@@ -4,10 +4,8 @@ import { Common, downloadVideo } from '@/module'
 import { getStatisticsDB, type ParsePlatform, type ParseWorkType } from '@/module/db'
 import { Config } from '@/module/utils/Config'
 import { acquireParseLock } from '@/module/utils/ParseLock'
-// 弹幕解析开关在运行时配置里（见 index.ts 的 enableDanmakuParse）。
 // 注意路径必须用相对写法：@/ 别名在这个仓库里指向 karin/，写 @/compat/... 会解析成 karin/compat/...
 // 那个目录不存在，会让整个 tools 应用加载失败（解析指令全部消失）。
-import { tryGetRuntime } from '../../compat/runtime'
 import { parseParseFlags, runWithParseOverride } from '@/module/utils/ParseOverride'
 import {
   DANMAKU_SUPPORTED,
@@ -136,11 +134,10 @@ const handleDouyin = wrapWithErrorHandler(
 
     // 是否为弹幕解析：用 \`弹幕解析\` 指令触发，或面板按钮里带了 --dm=1
     /**
-     * 是否为弹幕解析：用「弹幕解析」指令触发，或面板按钮里带了 --dm=1。
-     * 配置关掉弹幕解析功能后，这里一律为 false（连 --dm=1 也不认）。
+     * 弹幕功能已整体移除：这里恒为 false，无论指令、--dm=1 还是配置都不会触发烧录。
+     * （卡片上方的热门弹幕是另一条链路，不受影响）
      */
-    const danmakuEnabled = (tryGetRuntime() as any)?.config?.enableDanmakuParse !== false
-    const requestBurnDanmaku = danmakuEnabled && (/^#?弹幕解析/.test(e.msg) || flags.override.burnDanmaku === true)
+    const requestBurnDanmaku = false
 
     const urlMatch = e.msg.match(/(https?:\/\/[^\s]*\.(douyin|iesdouyin)\.com[^\s]*)/gi)
     if (!urlMatch) {
@@ -196,12 +193,8 @@ const handleBilibili = wrapWithErrorHandler(
     e.msg = e.msg.replace(/\\/g, '') // 移除消息中的反斜杠
 
     // 是否为弹幕解析（通过 #弹幕解析 命令触发，或面板里选了「视频＋弹幕」）
-    /**
-     * 是否为弹幕解析：用「弹幕解析」指令触发，或面板按钮里带了 --dm=1。
-     * 配置关掉弹幕解析功能后，这里一律为 false（连 --dm=1 也不认）。
-     */
-    const danmakuEnabled = (tryGetRuntime() as any)?.config?.enableDanmakuParse !== false
-    const requestBurnDanmaku = danmakuEnabled && (/^#?弹幕解析/.test(e.msg) || flags.override.burnDanmaku === true)
+    /** 弹幕功能已移除：恒为 false */
+    const requestBurnDanmaku = false
 
     const urlRegex = /(https?:\/\/(?:(?:www\.|m\.|t\.)?bilibili\.com|b23\.tv|bili2233\.cn)\/[a-zA-Z0-9_\-.~:/?#[\]@!$&'()*+,;=]+)/
     const bvRegex = /^BV[1-9a-zA-Z]{10}$/

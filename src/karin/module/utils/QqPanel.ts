@@ -705,7 +705,11 @@ export async function sendQqParsePanel (e: Message, request: PanelRequest, optio
    *   - 开启弹幕解析：清晰度 / 视频 / 弹幕 / 大小 四列（清晰度是文字，后两列是按钮）
    *   - **关闭**弹幕解析：去掉弹幕列，且「清晰度」本身就是按钮（配置项 enableDanmakuParse）
    */
-  const danmakuEnabled = (runtime.config as any)?.enableDanmakuParse !== false && DANMAKU_SUPPORTED
+  /**
+   * 弹幕功能已整体移除：这里恒为 false，面板只保留「清晰度=按钮 + 大小」两列。
+   * （卡片上方的热门弹幕是渲染层面的事，不在这个面板里，不受影响）
+   */
+  const danmakuEnabled = false
   if (danmakuEnabled) {
     lines.push('| 清晰度 | 视频 | 弹幕 | 大小 |')
     lines.push('| :--- | :---: | :---: | ---: |')
