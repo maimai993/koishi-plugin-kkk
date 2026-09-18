@@ -32,6 +32,8 @@ export type CardInfo = {
   cover: string
   /** 卡片自带的跳转链接（有就不能浪费） */
   link: string
+  /** 卡片来源（如「哔哩哔哩」） */
+  source?: string
   /** 原始 JSON（调试用） */
   raw?: any
 }
@@ -108,11 +110,44 @@ const deepFind = (node: any, keys: string[], depth = 0): string => {
 }
 
 /**
- * 从消息里挖卡片信息。
- * @param content 消息文本（已经是「卡片 JSON 被还原成文本」的形态）
+ * QQ 把卡片转成的**摘要文本**长这样（实测）：
+ * ```
+ * [卡片消息] 小程序
+ * 摘要: [QQ小程序]四不相被鬼压床，了？
+ * source: 哔哩哔哩
+ * source_logo: http://miniapp.gtimg.cn/...
+ * title: 四不相被鬼压床，了？
+ * preview: https://qq.ugcimg.cn/v1/...
+ * ```
+ * 注意它**不是 JSON**（早期版本是 JSON 卡片，现在的适配器直接给摘要），
+ * 所以按行解析；source 那一行还直接告诉了我们平台，比猜准得多。
  */
+const parseCardSummary = (text: string): CardInfo | null => {
+  if (!text.includes('[卡片消息]')) return null
+  const pick = (label: string): string => {
+    const matched = text.match(new RegExp('^\\s*' + label + '\\s*[:：]\\s*(.+)$', 'm'))
+    return matched ? matched[1].trim() : ''
+  }
+  const summary = pick('摘要')
+  const source = pick('source')
+  const title = pick('title')
+  const preview = pick('preview')
+  if (!title && !preview && !summary) return null
+  return {
+    title: title || summary.replace(/^\[QQ小程序\]/, ''),
+    desc: summary,
+    author: '',
+    cover: preview,
+    link: '',
+    source
+  }
+}
+
 export const extractCardInfo = (content: string): CardInfo | null => {
   const text = unescapeJson(content ?? '')
+  // 现在的适配器给的是摘要文本，老版本才是 JSON 卡片 —— 两种都认
+  const fromSummary = parseCardSummary(text)
+  if (fromSummary) return fromSummary
   if (!text.includes('{')) return null
   const json = pickJsonObject(text)
   if (!json) return null
@@ -339,7 +374,25 @@ export const searchDouyinWorks = async (keyword: string, limit = 8): Promise<Arr
  * 有链接直接返回；没有链接就 OCR 封面，再按平台搜索定位作品。
  * 任何一步失败都返回 null（调用方据此走原来的「未找到链接」逻辑，不影响已有功能）。
  */
-export const resolveCardToUrl = async (content: string): Promise<{ url: string; platform: 'bilibili' | 'douyin'; card: CardInfo } | null> => {
+export type CardCandidate = {
+  platform: 'bilibili' | 'douyin'
+  id: string
+  title: string
+  author: string
+  score: number
+}
+
+export const resolveCardToUrl = async (
+  content: string
+): Promise<{
+  url?: string
+  platform: 'bilibili' | 'douyin'
+  card: CardInfo
+  /** 搜到但不确定唯一时的候选（交给用户用 md 表格挑） */
+  candidates: CardCandidate[]
+  ocrText: string
+  upName: string
+} | null> => {
   const card = extractCardInfo(content)
   if (!card) return null
 
@@ -366,30 +419,48 @@ export const resolveCardToUrl = async (content: string): Promise<{ url: string; 
   const looksBili = /bilibili|哔哩|B站|UP主/i.test(card.title + ' ' + card.desc + ' ' + ocrText)
 
   // ③ 先按最可能的平台搜，命中就返回
-  const tryBili = async (): Promise<string> => {
+  const tryBili = async (): Promise<{ url?: string; candidates: CardCandidate[] }> => {
     const hits = await searchBiliVideos(keyword, card.title, upName, 8)
+    const candidates = hits.slice(0, 6).map((item) => ({
+      platform: 'bilibili' as const, id: item.bvid, title: item.title, author: item.author, score: item.score
+    }))
     const strict = hits.filter((item) => item.authorMatch || item.titleMatch)
+    // 只有「标题和作者都命中」才敢自动继续，否则交给用户挑
     const best = (strict.length ? strict : hits)[0]
-    if (best && (best.titleMatch || best.authorMatch)) return 'https://www.bilibili.com/video/' + best.bvid
-    return ''
+    if (best && best.titleMatch && best.authorMatch) return { url: 'https://www.bilibili.com/video/' + best.bvid, candidates }
+    return { candidates }
   }
-  const tryDouyin = async (): Promise<string> => {
+  const tryDouyin = async (): Promise<{ url?: string; candidates: CardCandidate[] }> => {
     const hits = await searchDouyinWorks(keyword || card.title, 8)
+    const candidates = hits.slice(0, 6).map((item) => ({
+      platform: 'douyin' as const, id: item.aweme_id, title: item.desc, author: item.author, score: item.score
+    }))
     const best = hits[0]
-    // 抖音搜索噪声大，要求分数为正才算命中
-    if (best && best.score > 20) return 'https://www.douyin.com/video/' + best.aweme_id
-    return ''
+    // 抖音搜索噪声大，要求分数足够高才自动继续，否则交给用户挑
+    if (best && best.score > 40) return { url: 'https://www.douyin.com/video/' + best.aweme_id, candidates }
+    return { candidates }
   }
 
   const order = looksDouyin && !looksBili ? [tryDouyin, tryBili] : [tryBili, tryDouyin]
+  const candidates: CardCandidate[] = []
   for (const attempt of order) {
-    const url = await attempt()
-    if (url) {
-      logger.mark('[卡片解析] 定位成功: ' + url)
-      return { url, platform: url.includes('bilibili') ? 'bilibili' : 'douyin', card }
+    const hit = await attempt()
+    if (hit) {
+      candidates.push(...hit.candidates)
+      if (hit.url) {
+        logger.mark('[卡片解析] 定位成功: ' + hit.url)
+        return { url: hit.url, platform: hit.url.includes('bilibili') ? 'bilibili' : 'douyin', card, candidates, ocrText, upName }
+      }
     }
   }
 
-  logger.mark('[卡片解析] 没能定位到作品（标题: ' + card.title + '，UP: ' + upName + '）')
+  logger.mark('[卡片解析] 没能唯一定位（标题: ' + card.title + '，UP: ' + upName + '），候选 ' + candidates.length + ' 条')
+  if (candidates.length) {
+    return { platform: candidates[0].platform, card, candidates, ocrText, upName }
+  }
   return null
 }
+
+/* ------------------------------------------------------------------ *
+ * B站搜索（自带 Wbi 签名）
+ * ------------------------------------------------------------------ */

@@ -1,4 +1,5 @@
 import karin, { logger, type Message } from 'node-karin'
+import { cmdInput } from '@/module/utils/QqPanel'
 import { replyReplacing } from '@/module/utils/QqPanel'
 import { resolveCardToUrl } from '@/module/utils/CardParser'
 
@@ -398,27 +399,78 @@ const handlePrefix = wrapWithErrorHandler(
  * 这里先用 OCR + 平台搜索把作品定位出来，再把消息文本**换成规范链接**并 next()，
  * 后面的抖音/B站命令就能照常命中，画质面板、评论区等全部复用既有流程。
  */
+/**
+ * 卡片流程里回话：不同入口拿到的对象不一样 —— karin 风格的是 Message（有 reply），
+ * Koishi 中间件那条链路给的是 Session（只有 send）。两种都兜上，否则会报 e.reply is not a function。
+ */
+const cardReply = async (target: any, content: any): Promise<void> => {
+  try {
+    if (typeof target?.reply === 'function') { await target.reply(content); return }
+    if (typeof target?.send === 'function') { await target.send(content); return }
+  } catch (error: any) {
+    logger.debug('[卡片解析] 回话失败: ' + String(error?.message ?? error))
+  }
+}
+
 const handleCardParse = wrapWithErrorHandler(
   async (e, next) => {
     const text = String(e.msg ?? '')
-    // 有链接的走原流程；不像卡片的（没有 JSON 花括号）也直接放行 —— 这条中间件只做兜底
-    if (!text.includes('{') || /https?:\/\//i.test(text)) return next()
-    logger.mark('[卡片解析] 收到疑似卡片消息，长度 ' + text.length + '，开头: ' + text.slice(0, 120))
-    // 先给用户一个反馈：提取 + OCR + 搜索要几秒钟，没有任何提示会让人以为插件死了
-    await replyReplacing(e, '正在提取卡片信息…')
+    // 诊断：这条中间件到底有没有被调用（确认后再降级为 debug）
+    logger.mark('[卡片解析] 中间件收到消息: ' + text.replace(/\s+/g, ' ').slice(0, 90))
+    /**
+     * 卡片消息的形态（实测）：适配器给的**不是 JSON**，而是一段摘要文本 ——
+     *   [卡片消息] 小程序 / 摘要: … / source: 哔哩哔哩 / title: … / preview: https://…
+     * 老版本才是 JSON 卡片，所以两种都要认。有链接的直接放行走原流程。
+     */
+    const looksCard = text.includes('[卡片消息]') || (text.includes('{') && /"title"|"preview"|jumpUrl/.test(text))
+    if (!looksCard || /https?:\/\//i.test(text)) return next()
+    logger.mark('[卡片解析] 收到卡片消息: ' + text.replace(/\s+/g, ' ').slice(0, 130))
+
+    // 提取 + OCR + 搜索要几秒，先给个反馈，免得用户以为插件没反应
+    await cardReply(e, '正在提取卡片信息…')
+
     const resolved = await resolveCardToUrl(text)
     if (!resolved) {
-      logger.mark('[卡片解析] 未能定位到作品，放弃')
+      await cardReply(e, '没能从这张卡片里认出作品，直接发链接给我吧')
+      return
+    }
+    // ① 唯一命中：把消息文本换成链接，后面的平台解析照常跑
+    if (resolved.url) {
+      ;(e as any).msg = resolved.url
+      logger.mark('[卡片解析] 已定位到作品，转交平台解析: ' + resolved.url)
       return next()
     }
-    ;(e as any).msg = resolved.url
-    logger.mark('[卡片解析] 已定位到作品，转交平台解析: ' + resolved.url)
-    return next()
+    // ② 不确定：发一张 md 表格让用户自己挑（每行一个按钮）
+    const lines = ['| # | 标题 | UP / 作者 | 操作 |', '| :---: | :--- | :--- | :---: |']
+    resolved.candidates.slice(0, 6).forEach((item, index) => {
+      const link =
+        item.platform === 'bilibili'
+          ? 'https://www.bilibili.com/video/' + item.id
+          : 'https://www.douyin.com/video/' + item.id
+      const title = item.title.replace(/[|\n]/g, ' ').slice(0, 26) || '（无标题）'
+      const author = (item.author || '-').replace(/[|\n]/g, ' ').slice(0, 12)
+      lines.push('| ' + (index + 1) + ' | ' + title + ' | ' + author + ' | ' + cmdInput('解析 ' + link, '解析') + ' |')
+    })
+    const tip =
+      '没找到唯一匹配（识别到：' + (resolved.upName || resolved.card.title || '未知') + '），下面是搜到的候选，点右侧按钮直接解析：'
+    await cardReply(e, segment.markdown(tip + '\n' + lines.join('\n')))
+    logger.mark('[卡片解析] 已发出候选表格，共 ' + resolved.candidates.length + ' 条')
   },
   { businessName: '卡片解析' }
 )
 
-export const cardAPP = karin.command(/./, handleCardParse, { name: 'kkk-卡片解析' })
+/**
+ * 卡片消息（摘要形态 / 老版 JSON 卡片）专用正则。
+ *
+ * **不要用 /./** ——通配正则会把命令注册表搅乱（实测指令数从 32 掉到 30，
+ * 解析/kkk解析 直接消失）。这里只匹配卡片的特征文本。
+ */
+/**
+ * 注意正则的写法：**必须能推导出指令名**，否则 index.ts 的注册循环会直接 continue，
+ * 连中间件都不会挂上去（这就是卡片功能一直没反应的原因）。
+ * `卡片消息` 是可推导的中文名，放最前面。
+ */
+export const cardAPP = karin.command(/卡片消息/, handleCardParse, { name: 'kkk-卡片解析' })
 
 const douyin = karin.command(reg.douyin, handleDouyin, {
   name: 'kkk-视频功能-抖音',

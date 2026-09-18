@@ -326,7 +326,7 @@ async function fetchPanelInfo (request: PanelRequest): Promise<PanelInfo | null>
  * @param command 点击后发送的指令文本
  * @param show 展示文字（默认同 command）
  */
-function cmdInput (command: string, show?: string): string {
+export function cmdInput (command: string, show?: string): string {
   const text = encodeURIComponent(command).replace(/'/g, '%27')
   const label = encodeURIComponent(show ?? command).replace(/'/g, '%27')
   return '<qqbot-cmd-input text="' + text + '" show="' + label + '" reference="false" />'
