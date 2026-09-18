@@ -1,5 +1,5 @@
 import type { KuaishouVideoWorkResponse } from '@ikenxuan/amagi'
-import { type Message } from 'node-karin'
+import { logger, type Message } from 'node-karin'
 
 import { Base, downloadVideo, extractTotalBytesFromHeaders, Networks, Render } from '@/module'
 import type { ParseWorkType } from '@/module/db'
@@ -44,13 +44,44 @@ export class Kuaishou extends Base {
     // 入参是 fetchKuaishouData 的联合返回，本插件只解析视频，先收窄到 one_work 那一支：
     // H5 换形状后所有取值都得靠 tsc 检查，不能再裸读 any
     const payload = data as KuaishouOneWorkPayload
-    const work = payload.VideoData
+    /**
+     * 快手 H5 的响应多包了一层 `data`：`{ data: { result, photo, … } }`。
+     * 直接读 `work.result` / `work.photo` 会全是 undefined，于是每个链接都被判成「不支持解析的视频」
+     * （诊断日志：顶层键=["data"]、photo键=[] ✓）。这里统一拆一层，两种形状都兼容。
+     */
+    const rawWork: any = payload.VideoData
+    const work: any =
+      rawWork?.data?.visionVideoDetail ??
+      rawWork?.visionVideoDetail ??
+      (rawWork?.data && typeof rawWork.data === 'object' && !rawWork.photo ? rawWork.data : rawWork)
 
     // H5 这条响应没有 `data.visionVideoDetail.status`（那是 PC GraphQL 的字段），
     // 顶层 `result` 才是接口状态位（1 = 成功）；再加一道「拿不到视频直链」，
     // 图集 / 单图落到这里也能给出原来那句提示而不是报错
     const video_url = pickVideoUrl(work)
-    if (work.result !== 1 || !video_url) {
+    /**
+     * 成功与否**以能否取到视频直链为准**：
+     * H5 那版响应里状态字段叫 `status`，没有 `result`（PC GraphQL 才有）；
+     * 死抠 `work.result !== 1` 会把所有能解析的作品都判成「不支持解析的视频」。
+     * 只有状态位明确是失败（非 1）时才提前返回。
+     */
+    const statusOk = work?.result === undefined && work?.status === undefined
+      ? true
+      : (work?.result === 1 || work?.status === 1 || work?.status === true || work?.status === 'ok')
+    if (!video_url && !statusOk) {
+      await this.e.reply('接口没有返回视频直链，稍后再试试')
+      return true
+    }
+    if (!video_url) {
+      // 诊断：把真实响应形状打出来，便于判断是「接口没给直链」还是「状态位字段变了」
+      const reps = work?.photo?.manifest?.adaptationSet?.flatMap((set: any) => set.representation ?? []) ?? []
+      logger.mark(
+        '[快手] 判为不支持解析 → result=' + String(work?.result) +
+        ' 顶层键=' + JSON.stringify(Object.keys(work ?? {}).slice(0, 12)) +
+        ' photo键=' + JSON.stringify(Object.keys(work?.photo ?? {}).slice(0, 14)) +
+        ' 码流数=' + reps.length +
+        ' mainMvUrls=' + (work?.photo?.mainMvUrls?.length ?? 0)
+      )
       await this.e.reply('不支持解析的视频')
       return true
     }

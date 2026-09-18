@@ -20,7 +20,7 @@ import { zhCN } from 'date-fns/locale'
 import karin, { common, ElementTypes, logger, Message, segment, SendMessage } from 'node-karin'
 
 // 番剧在 QQ 上用「卡片 + 分集表格」面板（见 sendBangumiPanel 的说明）
-import { buildDownloadTip, replyReplacing, sendBangumiPanel } from '../../module/utils/QqPanel'
+import { buildDownloadTip, recallLastPanel, replyReplacing, sendBangumiPanel } from '../../module/utils/QqPanel'
 
 import type { ParseWorkType } from '@/module/db'
 import {
@@ -126,15 +126,22 @@ export class Bilibili extends Base {
           cid: iddata.p ? (infoData.data.data.pages[iddata.p - 1]?.cid ?? infoData.data.data.cid) : infoData.data.data.cid
         })
         // const playUrl = bilibiliApiUrls.视频流信息({ avid: infoData.data.aid, cid: infoData.data.cid })
-
         /**
-         * Koishi 移植补充：未配置 Cookie 时 B 站只会下发 \`durl\`（360P），没有 \`dash\`。
-         * 原逻辑仅按 videoQuality 判断，默认画质（127）在无 Cookie 环境下会因为取不到 dash 而直接报错，
-         * 这里补一条「没有 dash 就按免登录直链处理」的判断，让无 CK 部署也能出结果。
+         * 免登录（直链 durl）分支的判断。
+         *
+         * 上游只看「画质 < 64 就当免登录」——**登录状态下选 360P/480P 会被误判**，
+         * 于是走了形状完全不同的直链分支，一取就崩
+         * （日志里的 Cannot read properties of undefined (reading '0') 就是它）。
+         *
+         * 现在：先看 Cookie 到底有没有登录；没登录时才按低画质走直链；接口没给 dash 时也走直链。
          */
-        const useAnonymousQuality =
-          (Config.bilibili.videoQuality !== 0 && Config.bilibili.videoQuality < 64) || !playUrlData.data?.data?.dash
-        this.islogin = (await checkCk()).Status === 'isLogin'
+        const loginStatus = (await checkCk()).Status === 'isLogin'
+        this.islogin = loginStatus
+        /** 有没有 dash：无 CK 部署只会下发 durl，这时无论如何都得走直链分支 */
+        const hasDash = !!playUrlData.data?.data?.dash
+        /** 低画质（< 64）：**只在没登录时**才因此走直链；登录了就用 dash 正常取流 */
+        const wantLowQuality = Config.bilibili.videoQuality !== 0 && Config.bilibili.videoQuality < 64
+        const useAnonymousQuality = loginStatus ? !hasDash : (!hasDash || wantLowQuality)
 
         this.downloadfilename = infoData.data.data.title.substring(0, 50).replace(/[\\/:*?"<>|\r\n\s]/g, ' ')
 
@@ -218,7 +225,14 @@ export class Bilibili extends Base {
           videoList: videoDownloadUrlList
         }
 
-        if (this.islogin && (Config.bilibili.videoQuality > 64 || Config.bilibili.videoQuality === 0)) {
+        /**
+         * 选流：**已登录时一律按画质筛选**。
+         *
+         * 上游这里判断的是「画质 > 64 或自动」，于是请求低画质（360P/480P）时会掉进 else 分支 ——
+         * 那边不筛流，直接用 dash.video[0]，而 B站返回的列表是**按画质从高到低**的，
+         * 结果就是要 360P 却下了个 4K：文件巨大、手机还解不出来，表现就是「只有声音没有画面」。
+         */
+        if (this.islogin && !useAnonymousQuality) {
           /** 提取出视频流信息对象，并排除清晰度重复的视频流 */
           const simplify = playUrlData.data.data.dash.video.filter((item: { id: number }, index: any, self: any[]) => {
             return (
@@ -305,7 +319,7 @@ export class Bilibili extends Base {
                 Clarity:
                   useAnonymousQuality
                     ? (nockData?.data?.accept_description?.slice(-1)[0] ?? '免登录 360P')
-                    : playUrlData.data.data.accept_description[0],
+                    : (playUrlData.data?.data?.accept_description?.[0] ?? '未知画质'),
                 VideoSize:
                   useAnonymousQuality
                     ? Common.formatFileSize(((nockData?.data?.durl?.[0]?.size ?? 0) / (1024 * 1024)).toFixed(2))
@@ -482,9 +496,21 @@ export class Bilibili extends Base {
           playUrlData.result.dash.video = correctList.videoList
           playUrlData.result.cept_description = correctList.accept_description
         }
+        /**
+         * 番剧分支原来没有拉弹幕名单 —— 所以「弹幕解析」一部番剧，出来的是**没有弹幕的视频**。
+         * 这里和普通视频分支一样，按当前这一集的 cid 拉一份。
+         */
+        let bangumiDanmakuList: BiliDanmakuElem[] = []
+        if (this.forceBurnDanmaku || Config.bilibili.burnDanmaku) {
+          const currentEpisode = videoInfo.data.result.episodes[Number(Episode) - 1] as any
+          const epDuration = Number(currentEpisode?.duration ?? 0) || 0
+          bangumiDanmakuList = await this.fetchVideoDanmakuList(currentEpisode.cid, epDuration)
+          logger.debug('[番剧] 第' + Episode + '集弹幕: ' + bangumiDanmakuList.length + ' 条')
+        }
         await this.getvideo({
           infoData: videoInfo.data,
-          playUrlData
+          playUrlData,
+          danmakuList: bangumiDanmakuList
         })
         break
       }
@@ -1300,6 +1326,17 @@ export class Bilibili extends Base {
           let success: boolean
           /** 最终要上传的文件：合成/烧录的产物，或没有音频流时直接用的视频流 */
           let sourcePath = bmp4.filepath
+
+          /**
+           * 弹幕解析的中间状态提示：下载已经完成、接下来是合成 + 烧录（要等一两分钟）。
+           * 这时把「收到请求，开始下载」那条撤掉，换成「下载完成，正在添加弹幕」，
+           * 让用户知道进度到哪了。
+           */
+          if (hasDanmaku) {
+            // 用统一出口：它会撤掉上一条（「收到请求，开始下载」）**并把自己记下来**，
+            // 等视频真正发出去时再被撤回（Base.ts 的发送流程会调 recallLastPanel）
+            await replyReplacing(this.e, '下载完成，正在添加弹幕…')
+          }
           if (!bmp3) {
             if (hasDanmaku) {
               logger.debug(`开始烧录 ${danmakuList.length} 条弹幕...`)
@@ -1356,11 +1393,24 @@ export class Bilibili extends Base {
         break
       }
       case false: {
-        /** 没登录（没配置ck）情况下直接发直链，传直链在DownLoadVideo()处理 */
-        logger.debug('视频 URL:', playUrlData.data.durl[0].url)
+        /**
+         * 没登录（没配置 ck）时直接发直链。
+         *
+         * 注意 `durl` 不一定在 `playUrlData.data` 下：html5 直链接口偶发失败时会退回 amagi 的形状，
+         * 那时候对象层级不一样 —— 直接写 `playUrlData.data.durl[0].url` 会抛
+         * `Cannot read properties of undefined (reading '0')`（登录状态下选 360P 就会中招）。
+         */
+        const anonymousInner = (playUrlData as any)?.data?.data ?? (playUrlData as any)?.data
+        const directUrl: string | undefined =
+          (playUrlData as any)?.data?.durl?.[0]?.url || anonymousInner?.durl?.[0]?.url
+        logger.debug('视频 URL:', directUrl)
+        if (!directUrl) {
+          await this.e.reply('没有拿到可用的视频直链（未登录时部分稿件拿不到），可尝试【#B站登录】后再解析')
+          return false
+        }
         // 如果需要烧录弹幕，先下载视频再烧录
         if ((this.forceBurnDanmaku || Config.bilibili.burnDanmaku) && danmakuList.length > 0) {
-          const videoFile = await downloadFile(playUrlData.data.durl[0].url, {
+          const videoFile = await downloadFile(directUrl, {
             title: `Bil_V_tmp_${Date.now()}.mp4`,
             headers: this.headers
           })
@@ -1393,7 +1443,7 @@ export class Bilibili extends Base {
           }
         } else {
           await downloadVideo(this.e, {
-            video_url: playUrlData.data.durl[0].url,
+            video_url: directUrl,
             title: { timestampTitle: `tmp_${Date.now()}.mp4`, originTitle: `${this.downloadfilename}.mp4` }
           })
         }
@@ -1702,7 +1752,9 @@ export const bilibiliProcessVideos = async (
     }
 
     // 更新视频列表和清晰度描述
-    const matchedQuality = qnd[matchedVideo.id] || qualityOptions.accept_description[0]
+    // accept_description 在免登录 / 只给 durl 的画质下可能是 undefined，
+    // 直接 [0] 会抛 "Cannot read properties of undefined (reading '0')"（登录状态选 360P 就会中招）
+    const matchedQuality = qnd[matchedVideo.id] || qualityOptions.accept_description?.[0] || ('qn' + matchedVideo.id)
     qualityOptions.accept_description = [matchedQuality]
     videoList = [matchedVideo]
 

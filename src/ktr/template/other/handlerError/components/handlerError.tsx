@@ -324,6 +324,9 @@ const getAdapterLogo = (adapterName: string): React.ReactNode => {
  * 印 `kind` 本身对看图的人没用 —— 有用的是它指向哪一类处置：改配置、等一会儿、
  * 还是提 issue。所以每一类都带一句处置提示。
  */
+/** 未知 kind 的兜底（表里找不到时用它，避免整张错误卡片渲染失败） */
+const FALLBACK_KIND_META = { zh: '接口错误', hint: '接口没有返回预期数据，可能是登录凭证过期或被风控拦截。' }
+
 const ERROR_KIND_META: Record<AmagiErrorDetail['kind'], { zh: string; hint: string }> = {
   validation: { zh: '参数校验', hint: '调用参数不合法，通常是插件自身的问题' },
   auth: { zh: '身份失效', hint: 'Cookie 缺失或已过期，重新扫码登录即可' },
@@ -633,7 +636,7 @@ export const handlerError: React.FC<PosterProps<ApiErrorData>> = (props) => {
                     color: primaryColor
                   }}
                 >
-                  {ERROR_KIND_META[data.amagi.kind].zh}
+                  {(ERROR_KIND_META[data.amagi.kind] ?? FALLBACK_KIND_META).zh}
                 </span>
                 <span
                   className="px-6 py-3 rounded-full text-2xl font-bold tracking-wide"
@@ -656,7 +659,7 @@ export const handlerError: React.FC<PosterProps<ApiErrorData>> = (props) => {
               </div>
 
               <p className="text-3xl mb-10" style={{ color: secondaryColor }}>
-                {ERROR_KIND_META[data.amagi.kind].hint}
+                {(ERROR_KIND_META[data.amagi.kind] ?? FALLBACK_KIND_META).hint}
               </p>
 
               {/* 平台返回的原文：与堆栈里那份 inspect 转储不同，这里是干净的一句话 */}
@@ -1139,7 +1142,7 @@ export const handlerError: React.FC<PosterProps<ApiErrorData>> = (props) => {
                   GitHub Issue
                 </p>
                 <p className="text-xl break-all" style={{ color: secondaryColor }}>
-                  https://github.com/ikenxuan/karin-plugin-kkk/issues/new/choose
+                  https://github.com/maimai993/koishi-plugin-kkk/issues/new/choose
                 </p>
               </div>
               <div>
@@ -1147,7 +1150,7 @@ export const handlerError: React.FC<PosterProps<ApiErrorData>> = (props) => {
                   GitHub Repository
                 </p>
                 <p className="text-xl break-all" style={{ color: secondaryColor }}>
-                  https://github.com/ikenxuan/karin-plugin-kkk
+                  https://github.com/maimai993/koishi-plugin-kkk
                 </p>
               </div>
               <div>
@@ -1155,7 +1158,7 @@ export const handlerError: React.FC<PosterProps<ApiErrorData>> = (props) => {
                   QQ 群
                 </p>
                 <p className="text-xl" style={{ color: secondaryColor }}>
-                  795874649
+                  1050229473
                 </p>
               </div>
               <div>

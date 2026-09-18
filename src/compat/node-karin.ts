@@ -7,6 +7,7 @@
  *   logger（见 ./logger）、segment（见 ./segment）、common.makeForward、config.master、db(KV)、render、sqlite3、root
  */
 import { spawn } from 'node:child_process'
+import { pathToFileURL } from 'node:url'
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -365,15 +366,49 @@ export class Message {
     })
   }
 
-  /** 回复消息 */
+  /**
+   * 回复消息。
+   *
+   * **被动回复兜底**：QQ 官方 bot 的「被动回复」有硬限制（一条消息只能回几次、还有时间窗），
+   * 而弹幕烧录这种操作动辄几分钟 —— 回来再 reply 就会撞
+   * `[40034128] 回复消息失败，被动回复时间或者次数超过限制`，视频明明下好了却发不出去。
+   * 这时自动改用**主动消息**（不带引用，直接往频道里发），失败才把原错误抛出去。
+   */
   async reply (content: any, _options?: any): Promise<{ messageId: string; rawData?: any }> {
     const elements = normalizeContent(content)
-    if (this.session) {
-      const ids = await this.session.send(elements as any)
-      return { messageId: ids[ids.length - 1] ?? '' }
+
+    /**
+     * 主动消息兜底（重点）。
+     *
+     * QQ 适配器在「被动回复超限」时**不一定抛异常**：它只是发不出去、返回空数组，
+     * 于是 await send() 看起来是成功的 —— 视频就静默丢了。所以这里除了 catch，
+     * 还要看**有没有拿到消息 ID**：没拿到就换主动消息（不带引用）重发一次。
+     */
+    const sendActive = async (): Promise<{ messageId: string; rawData?: any }> => {
+      const activeIds = await this.bot.bot.sendMessage(this.contact.peer, elements as any)
+      return { messageId: activeIds?.[activeIds.length - 1] ?? '' }
     }
-    const ids = await this.bot.bot.sendMessage(this.contact.peer, elements as any)
-    return { messageId: ids[ids.length - 1] ?? '' }
+
+    try {
+      if (this.session) {
+        const ids = await this.session.send(elements as any)
+        const id = ids?.[ids.length - 1] ?? ''
+        if (!id) {
+          logger.mark('[compat] 回复没有返回消息 ID（多为被动回复超限），改用主动消息重发')
+          return await sendActive()
+        }
+        return { messageId: id }
+      }
+      const ids = await this.bot.bot.sendMessage(this.contact.peer, elements as any)
+      return { messageId: ids?.[ids.length - 1] ?? '' }
+    } catch (error: any) {
+      const text = String(error?.message ?? error)
+      // 被动回复额度/时间窗超了：换成主动消息再试一次
+      if (!/被动回复|40034128|timeout|次数超过/.test(text)) throw error
+      // 用 mark 级别：这是「视频明明下好了却发不出去」的关键兜底，日志里要看得见
+      logger.mark('[compat] 被动回复受限，改用主动消息发送: ' + text)
+      return await sendActive()
+    }
   }
 
   /** karin 的 e.bot 直接就是发送者 */
@@ -595,14 +630,41 @@ export const render = {
       pageGotoParams: options.pageGotoParams
     }
 
-    let result: any
-    if (typeof puppeteer.screenshot === 'function') {
-      result = await puppeteer.screenshot(options.name ?? 'kkk', screenshotOptions)
-    } else if (typeof puppeteer.render === 'function') {
-      const html = fs.readFileSync(options.file, 'utf8')
-      result = await puppeteer.render(html, screenshotOptions)
-    } else {
-      throw new Error('[kkk] 渲染失败：puppeteer 服务没有 screenshot/render 方法')
+    /**
+     * 自己开页面对 HTML 文件截图。
+     *
+     * 不能走 `puppeteer.render(html, options)` —— 那个 API 的第二个参数是**回调函数**，
+     * 传截图配置进去会直接报 `callback is not a function`
+     * （抖音弹幕条渲染就是这么挂的，日志里一堆「弹幕条渲染失败，将按纯文字处理」）。
+     */
+    const target = options.selector ?? '#container'
+    const newPage = async (): Promise<any> => {
+      if (typeof puppeteer.page === 'function') return await puppeteer.page()
+      if (puppeteer.browser && typeof puppeteer.browser.newPage === 'function') return await puppeteer.browser.newPage()
+      return null
+    }
+    const page = await newPage()
+    if (!page) throw new Error('[kkk] 渲染失败：puppeteer 服务没有可用的页面')
+
+    try {
+      if (page.setViewport) await page.setViewport({ width: 1200, height: 900, deviceScaleFactor: 2 })
+      await page.goto(pathToFileURL(options.file).href, {
+        waitUntil: options.pageGotoParams?.waitUntil ?? 'load',
+        timeout: options.pageGotoParams?.timeout ?? 15000
+      })
+      const handle = (await page.$(target)) ?? (await page.$('body'))
+      const box = handle ? await handle.boundingBox() : null
+      if (box && box.height > 900 && page.setViewport) {
+        await page.setViewport({ width: Math.ceil(box.width) + 4, height: Math.ceil(box.height) + 4, deviceScaleFactor: 2 })
+      }
+      const buffer = await page.screenshot({
+        clip: box ?? undefined,
+        omitBackground: options.omitBackground ?? true,
+        type: (options.type as any) ?? 'png'
+      } as any)
+      return buffer.toString('base64')
+    } finally {
+      try { await page.close() } catch { /* 忽略 */ }
     }
 
     if (Buffer.isBuffer(result)) return result.toString('base64')

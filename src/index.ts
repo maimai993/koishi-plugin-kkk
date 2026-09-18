@@ -50,7 +50,7 @@ export const inject = {
   // ffmpeg：由 koishi-plugin-ffmpeg-path 提供，兼容层的 ffmpeg()/ffprobe() 会优先用它
   // assets：koishi-plugin-assets-qqbot-part-file 之类提供的图床服务，
   // 面板卡片要上传成 https 地址才能放进 QQ 的 markdown 图片里
-  optional: ['puppeteer', 'database', 'http', 'ffmpeg', 'assets', 'server']
+  optional: ['puppeteer', 'database', 'http', 'ffmpeg', 'assets', 'server', 'console']
 }
 
 export interface Config {
@@ -66,6 +66,8 @@ export interface Config {
   qqPanel: boolean
   /** QQ 面板里隐藏超过该体积（MB）的画质按钮 */
   qqFileLimitMB: number
+  /** 是否开启弹幕解析功能（默认开）。关掉后：弹幕解析指令不注册，画质面板里「清晰度」本身变成按钮 */
+  enableDanmakuParse: boolean
   /** 操作后撤回上一条面板消息（默认开） */
   recallPanel: boolean
   /** 番剧分集表格的列数（默认 5） */
@@ -96,6 +98,10 @@ export const Config: Schema<Config> = Schema.intersect([
     qqFileLimitMB: Schema.number().default(200).description(
       'QQ 面板里隐藏超过该体积（MB）的画质按钮。QQ 富媒体上传对视频的硬限制是 200MB（超过软限制 30MB 会降级成文件发送），' +
       '所以默认 200：点了也发不出去的档位干脆不显示。'
+    ),
+    enableDanmakuParse: Schema.boolean().default(true).description(
+      '是否开启**弹幕解析**功能。关掉之后：弹幕解析指令不再注册（发出来也不会有反应）；' +
+      '画质面板去掉「弹幕」那一列，画质名本身直接变成可点的按钮；解析时即使带了 --dm=1 也不会烧录弹幕。'
     ),
     recallPanel: Schema.boolean().default(true).description(
       '面板操作后自动**撤回上一条面板消息**：选集 → 选清晰度 → 下载，每步都会撤掉上一步的面板，群里不会越堆越多。'
@@ -327,7 +333,13 @@ const permissionNotified = new Set<string>()
  */
 const EMPTY_RESULT = ''
 
-function registerCommands (ctx: Context, logger: ReturnType<Context['logger']>, autoParse: boolean) {
+function registerCommands (
+  ctx: Context,
+  logger: ReturnType<Context['logger']>,
+  autoParse: boolean,
+  /** 弹幕解析功能开关（关闭时不注册相关指令） */
+  enableDanmakuParse = true
+) {
   const registrations = [...commandQueue].sort((a, b) => {
     const pa = Number(a.options?.priority ?? 0)
     const pb = Number(b.options?.priority ?? 0)
@@ -393,6 +405,16 @@ function registerCommands (ctx: Context, logger: ReturnType<Context['logger']>, 
     }
     for (const name of names) {
       if (registered.has(name)) continue
+      /**
+       * 关掉「弹幕解析」功能时，相关的指令**根本不注册** ——
+       * 这样用户发「弹幕解析 …」不会有任何反应，控制台的指令列表里也不会出现它。
+       */
+      // 注意只跳过「名字就是弹幕解析」的那一个：用 includes 会把别名组里的 解析 也误伤掉
+
+      if (!enableDanmakuParse && /^#?弹幕解析$/.test(name.trim())) {
+        logger.debug('弹幕解析功能已关闭，跳过注册指令 %s', name)
+        continue
+      }
       registered.add(name)
       const description = COMMAND_DESCRIPTIONS[name] ?? ('koishi-plugin-kkk: ' + (registration.options?.name ?? name))
       // 解析类指令接一段自由文本（链接 / BV 号 / 参数），声明出来控制台里能看清用法；
@@ -562,6 +584,7 @@ export async function apply (ctx: Context, config: Config) {
       qqPanel: config.qqPanel !== false,
       qqFileLimitMB: Number(config.qqFileLimitMB) || 200,
       recallPanel: config.recallPanel !== false,
+      enableDanmakuParse: config.enableDanmakuParse !== false,
       bangumiPanelCols: Number(config.bangumiPanelCols) || 5,
       bangumiPanelRows: Number(config.bangumiPanelRows) || 4
     },
@@ -615,7 +638,7 @@ export async function apply (ctx: Context, config: Config) {
     logger.warn('初始化临时目录失败: %s', error?.message ?? error)
   }
 
-  registerCommands(ctx, logger, config.autoParse !== false)
+  registerCommands(ctx, logger, config.autoParse !== false, config.enableDanmakuParse !== false)
   startScheduler(ctx, logger, taskQueue)
 
   // 兼容 karin 的 BOT_CONNECT：Koishi 侧用 bot-status-update 近似

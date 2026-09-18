@@ -24,6 +24,8 @@ import { commandInvocation, tryGetRuntime } from '../../../compat/runtime'
 import { getDouyinQualityLevel } from '@/platform/douyin/videoQuality'
 import { getImageMetadata, Render } from '@/module/utils/Render'
 import { getHotDanmaku } from '@/platform/bilibili/danmaku'
+// 抖音卡片复用推送那套构建器（保真度最高）
+import { renderWorkImage } from '@/platform/douyin/push/render'
 
 import { bilibiliFetcher, douyinFetcher } from './amagiClient'
 
@@ -283,7 +285,9 @@ async function fetchDouyinInfo (request: PanelRequest): Promise<PanelInfo | null
     title: String(detail.desc ?? ''),
     author: String(detail.author?.nickname ?? ''),
     duration: formatDuration(Number(detail.video?.duration) / 1000),
-    options
+    options,
+    // 抖音卡片用：renderWorkImage 需要原始的 aweme_detail
+    detail
   }
 }
 
@@ -457,7 +461,28 @@ async function uploadPanelCard (
       return null
     }
 
-    const route = request.platform === 'bilibili' ? 'bilibili/videoInfo' : 'douyin/video-work'
+    // 抖音：直接复用推送那套卡片构建器（renderWorkImage），保证和解析结果同一张卡
+    if (request.platform === 'douyin') {
+      const images: any = await renderWorkImage({
+        e,
+        Detail_Data: detail,
+        create_time: Number(detail?.create_time) || Math.floor(Date.now() / 1000),
+        shareLink: 'https://www.douyin.com/video/' + String(detail?.aweme_id ?? request.id),
+        // 还没选档，所以不显示分辨率块（和分享信息图一致）
+        videoSource: undefined
+      } as any)
+      const first = Array.isArray(images) ? images[0] : images
+      const src = String(first?.attrs?.src ?? first?.data?.file ?? '')
+      if (!src.startsWith('data:image/')) return null
+      const buffer = Buffer.from(src.slice(src.indexOf(',') + 1), 'base64')
+      const meta = getImageMetadata(buffer)
+      const uploaded = await assets.upload(src, 'kkk-douyin-panel.png')
+      const url = typeof uploaded === 'string' ? uploaded : uploaded?.url
+      if (!url || !/^https?:\/\//i.test(String(url))) return null
+      return { url: String(url), width: Number(meta.width) || 0, height: Number(meta.height) || 0 }
+    }
+
+    const route = 'bilibili/videoInfo'
     const cardData: any = request.platform === 'bilibili'
       ? {
           share_url: 'https://b23.tv/' + (detail.bvid ?? request.id),
@@ -474,7 +499,7 @@ async function uploadPanelCard (
       : {
           // 抖音卡片的数据结构由模板决定，这里先不做卡片，交给兜底面板
         }
-    if (request.platform !== 'bilibili') return null
+
 
     const images: any = await Render(e, route, cardData).catch(() => null)
     const first = Array.isArray(images) ? images[0] : images
@@ -676,19 +701,29 @@ export async function sendQqParsePanel (e: Message, request: PanelRequest, optio
     cmdInput(command + ' ' + (urlPart || short) + ' ' + short + ' ' + qualityFlag + id, label)
 
   /**
-   * 表格排版：清晰度 / 大小 / 视频 / 视频+弹幕 四列。
-   * 前两列是文字，后两列是可点的按钮 —— 一档画质一行，点哪格就按什么方式解析。
+   * 表格排版。
+   *   - 开启弹幕解析：清晰度 / 视频 / 弹幕 / 大小 四列（清晰度是文字，后两列是按钮）
+   *   - **关闭**弹幕解析：去掉弹幕列，且「清晰度」本身就是按钮（配置项 enableDanmakuParse）
    */
-  lines.push('| 清晰度 | 视频 | 弹幕 | 大小 |')
-  lines.push('| :--- | :---: | :---: | ---: |')
-  for (const option of shown) {
-    // 大小列只写体积、放在最后，不做「文件」标记（那个提示只在真正发送时给）
-    const size = Math.round(option.sizeMB) + 'M'
-    const videoCell = cell(parseCommand, option.id, '视频')
-    const danmakuCell = DANMAKU_SUPPORTED ? cell(danmakuCommand, option.id, '弹幕') : '—'
-    lines.push('| ' + option.label + ' | ' + videoCell + ' | ' + danmakuCell + ' | ' + size + ' |')
+  const danmakuEnabled = (runtime.config as any)?.enableDanmakuParse !== false && DANMAKU_SUPPORTED
+  if (danmakuEnabled) {
+    lines.push('| 清晰度 | 视频 | 弹幕 | 大小 |')
+    lines.push('| :--- | :---: | :---: | ---: |')
+    for (const option of shown) {
+      const size = Math.round(option.sizeMB) + 'M'
+      const videoCell = cell(parseCommand, option.id, '视频')
+      const danmakuCell = cell(danmakuCommand, option.id, '弹幕')
+      lines.push('| ' + option.label + ' | ' + videoCell + ' | ' + danmakuCell + ' | ' + size + ' |')
+    }
+  } else {
+    // 没有弹幕可选时，画质名直接当按钮，省掉中间那一步
+    lines.push('| 清晰度 | 大小 |')
+    lines.push('| :--- | ---: |')
+    for (const option of shown) {
+      const size = Math.round(option.sizeMB) + 'M'
+      lines.push('| ' + cell(parseCommand, option.id, option.label) + ' | ' + size + ' |')
+    }
   }
-
   await replaceLoadingTip(e, loadingId, segment.markdown(lines.join(String.fromCharCode(10))))
   logger.debug('[QQ面板] 已发送解析面板: ' + request.platform + ' ' + request.id + '（' + shown.length + '/' + info.options.length + ' 档画质）')
   return true

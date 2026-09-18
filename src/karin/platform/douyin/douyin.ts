@@ -27,6 +27,7 @@ import {
 } from '@/module/utils'
 import { Config } from '@/module/utils/Config'
 import { EmojiReactionManager, getEmojiId } from '@/module/utils/EmojiReaction'
+import { getParseOverride } from '@/module/utils/ParseOverride'
 import { douyinComments } from '@/platform/douyin'
 import { burnDouyinDanmaku, type DouyinDanmakuElem } from '@/platform/douyin/danmaku'
 import { renderWorkImage } from '@/platform/douyin/push/render'
@@ -565,7 +566,12 @@ export class DouYin extends Base {
           mp4size = (selectedVideo.play_addr.data_size / (1024 * 1024)).toFixed(2)
         }
 
-        if (Config.douyin.sendContent.includes('info')) {
+        /**
+         * 从面板点进来的解析：卡片在面板里已经发过了，这里不再重复发一张。
+         * （bilibili 那边同样处理，见 bilibili.ts 的 fromPanel 判断）
+         */
+        const fromPanelDouyin = getParseOverride()?.fromPanel === true
+        if (!fromPanelDouyin && Config.douyin.sendContent.includes('info')) {
           if (Config.douyin.videoInfoMode === 'text') {
             // 构建回复内容数组
             const replyContent: SendMessage = []
@@ -688,14 +694,29 @@ export class DouYin extends Base {
           if ((this.forceBurnDanmaku || Config.douyin.burnDanmaku) && video) {
             try {
               const duration = video.duration // 视频时长（毫秒）
-              logger.debug(`[抖音] 视频时长: ${duration}ms, 开始获取弹幕数据`)
+              logger.mark(`[抖音] 视频时长: ${duration}ms, 开始获取弹幕数据`)
               const danmakuData = await this.amagi.douyin.fetcher.fetchDanmakuList({
                 aweme_id: data.aweme_id,
                 duration
               })
-              if (danmakuData.data?.danmaku_list) {
-                danmakuList = danmakuData.data.danmaku_list
-                logger.debug(`[抖音] 获取到 ${danmakuList.length} 条弹幕`)
+              /**
+               * 取值层级：amagi 的返回是 `{ data: { data: { danmaku_list } } }`
+               * （和 B站那边 `res.data?.data?.elems` 一样多包一层）。
+               * 原来只读到第一层 `data.danmaku_list` → 永远是 0 条弹幕，压根不会烧。
+               * 这里两种层级都兼容，万一还取不到就把响应结构打进日志，方便继续查。
+               */
+              const raw: any = danmakuData as any
+              const list: any[] | undefined =
+                raw?.data?.danmaku_list ?? raw?.data?.data?.danmaku_list ?? raw?.danmaku_list
+              if (Array.isArray(list) && list.length) {
+                danmakuList = list
+                logger.mark(`[抖音] 获取到 ${danmakuList.length} 条弹幕`)
+              } else {
+                logger.mark(
+                  '[抖音] 没取到弹幕列表；响应结构: ' +
+                  JSON.stringify(Object.keys(raw?.data ?? {})) + ' / 内层 ' +
+                  JSON.stringify(Object.keys((raw?.data as any)?.data ?? {}))
+                )
               }
             } catch (err) {
               logger.warn('[抖音] 获取弹幕失败，将不烧录弹幕', err)
@@ -703,6 +724,13 @@ export class DouYin extends Base {
           }
 
           // 如果需要烧录弹幕，先下载视频再烧录
+          if (!(this.forceBurnDanmaku || Config.douyin.burnDanmaku) || danmakuList.length === 0) {
+            logger.mark(
+              '[抖音] 跳过烧录：forceBurnDanmaku=' + String(this.forceBurnDanmaku) +
+              ' 配置burnDanmaku=' + String(Config.douyin.burnDanmaku) +
+              ' 弹幕数=' + danmakuList.length
+            )
+          }
           if ((this.forceBurnDanmaku || Config.douyin.burnDanmaku) && danmakuList.length > 0) {
             const videoFile = await downloadFile(g_video_url, {
               title: `Douyin_V_tmp_${Date.now()}.mp4`,

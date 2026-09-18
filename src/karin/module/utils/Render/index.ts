@@ -498,6 +498,39 @@ export const getImageMetadata = (buffer: Buffer): ImageMetadata => {
  * 但那个代理在有些网络下**根本连不上** —— 表现就是卡片里 UP 主头像是个裂图。
  * 实测 B站原图直连（i0/i2.hdslb.com）不带 Referer 也是 200，所以这里直接还原成原地址。
  */
+/**
+ * 把模板里 `src="/image/xxx"` 这种**本地绝对路径**的图片内联成 data URI。
+ *
+ * 上游是 karin 的 HTTP 服务在提供 `/image/*`（插件 resources/image 目录）；Koishi 移植版渲染的是
+ * 本地 HTML 文件，绝对路径会指向磁盘根目录 → 裂图。评论卡片里的 B站 logo、大会员标记、等级图标
+ * 就是这么丢的（页脚 logo 之前也踩过同一个坑）。
+ */
+function inlineLocalImages (html: string): string {
+  const imageRoot = path.join(Root.pluginPath, 'resources')
+  const mimeOf = (file: string): string => {
+    const ext = path.extname(file).toLowerCase()
+    if (ext === '.svg') return 'image/svg+xml'
+    if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg'
+    if (ext === '.webp') return 'image/webp'
+    if (ext === '.gif') return 'image/gif'
+    return 'image/png'
+  }
+  return html.replace(/(src=")(\/image\/[^"]+)(")/g, (all: string, head: string, url: string, tail: string) => {
+    try {
+      const relative = decodeURIComponent(url.replace(/^\/+/, ''))
+      const full = path.join(imageRoot, relative)
+      if (!full.startsWith(path.resolve(imageRoot))) return all
+      if (!fs.existsSync(full)) return all
+      const buffer = fs.readFileSync(full)
+      const mime = mimeOf(full)
+      // svg 是文本，用 utf8 base64 也一样能显示，这里统一 base64 省事
+      return head + 'data:' + mime + ';base64,' + buffer.toString('base64') + tail
+    } catch {
+      return all
+    }
+  })
+}
+
 function unwrapImageProxy (html: string): string {
   return html.replace(/https:\/\/images\.weserv\.nl\/\?url=([^"'&\s]+)/gi, (all: string, encoded: string) => {
     try {
@@ -517,7 +550,7 @@ export const Render = async (_event: any, route: string, data: any): Promise<any
   if (!html) {
     html = buildFallbackHtml(route, data, dark, scale)
   }
-  html = unwrapImageProxy(html)
+  html = inlineLocalImages(unwrapImageProxy(html))
 
   const htmlPath = path.resolve(karinPathHtml, Root.pluginName, route.replace(/[\\/]/g, '_') + '.html')
   try {

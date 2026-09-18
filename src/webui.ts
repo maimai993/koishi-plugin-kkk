@@ -61,7 +61,42 @@ export function registerWebUi ({ ctx, config, logger, pluginRoot }: WebUiDeps) {
       return null
     }
   }
-  const indexHtml = () => readWebFile('index.html') ?? Buffer.from('<h1>KKK Config</h1><p>assets/web/index.html 缺失</p>')
+  /**
+   * 返回 SPA 首页。
+   *
+   * 原版面板自带一个登录页（karin 那边要输 WebUI 口令）。Koishi 这边走 auth 插件：
+   * **没启用 auth 时接口本来就放行**，所以这里注入一段自动登录脚本，
+   * 直接把口令框填上并提交 —— 用户看到的就直接是配置界面，不用再想「key 是什么」。
+   */
+  const autoLoginScript = `<script>
+(function () {
+  var tries = 0;
+  var timer = setInterval(function () {
+    if (++tries > 80) { clearInterval(timer); return; }
+    var input = document.querySelector('input[type=password], input[type=text]');
+    var button = document.querySelector('button[type=submit], form button, button');
+    if (!input || !button) return;
+    clearInterval(timer);
+    try {
+      // React 受控组件：直接改 value 不会触发 onChange，必须走原生 setter + 派发 input 事件
+      var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(input, 'koishi');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    } catch (e) { input.value = 'koishi'; }
+    setTimeout(function () { try { button.click(); } catch (e) { } }, 400);
+  }, 400);
+})();
+</script>`
+
+  const indexHtml = (): Buffer => {
+    const raw = readWebFile('index.html')
+    if (!raw) return Buffer.from('<h1>KKK Config</h1><p>assets/web/index.html 缺失</p>')
+    // 只有「不需要登录」时才自动登录；开了 auth 插件就得让用户自己登控制台
+    if (authRequired()) return raw
+    const text = raw.toString('utf-8')
+    return Buffer.from(text.includes('</body>') ? text.replace('</body>', autoLoginScript + '</body>') : text + autoLoginScript)
+  }
 
   /* ---------------- 登录策略 ---------------- */
 
@@ -146,6 +181,38 @@ export function registerWebUi ({ ctx, config, logger, pluginRoot }: WebUiDeps) {
     server.post(prefix + '/refresh', refreshHandler)
   }
 
+  /* ---------------- 配置接口（原版 SPA 的主功能） ---------------- */
+
+  /**
+   * 原版面板的配置读写：
+   *   GET  /kkk/v1/config  →  { code: 200, data: <配置> }
+   *   POST /kkk/v1/config  →  保存（body 就是整份配置）
+   * 判定成功的方式是 `(res.success || res.code === 200) && res.data !== undefined`，
+   * 所以 data 一定要给（哪怕空对象），否则前端会直接抛「获取配置失败」。
+   */
+  server.get('/kkk/v1/config', (response: any) => {
+    if (!authed(response)) return fail(response, 401, '鉴权失败: 缺少authorization')
+    // 面板面向的是 karin 那份 config.json（画质 / 发送内容 / 推送 / 渲染…），
+    // 在 Koishi 这边它就存在 `upstream` 里，启动时同步进 config.json
+    ok(response, config?.upstream ?? {}, '')
+  })
+
+  server.post('/kkk/v1/config', async (response: any) => {
+    if (!authed(response)) return fail(response, 401, '鉴权失败: 缺少authorization')
+    try {
+      const body: any = response.request?.body
+      if (!body || typeof body !== 'object') throw new Error('请求体不是配置对象')
+      // 原版面板发过来的是整份配置；这里把它整体写进 upstream，
+      // 保存会走 scope.update → 落盘 koishi.yml → 热重载 → 启动时同步回 config.json
+      await (ctx as any).scope.update({ ...config, upstream: body })
+      logger.info('[kkk] 配置面板已保存 upstream 配置（写回 koishi.yml）')
+      ok(response, null, '已保存')
+    } catch (error: any) {
+      logger.warn('[kkk] 配置面板保存失败: ' + String(error?.message ?? error))
+      fail(response, 500, String(error?.message ?? error))
+    }
+  })
+
   /* ---------------- 数据接口 ---------------- */
 
   const botList = () => {
@@ -195,7 +262,8 @@ export function registerWebUi ({ ctx, config, logger, pluginRoot }: WebUiDeps) {
       return
     }
     response.type = MIME[path.extname(relative).toLowerCase()] ?? 'application/octet-stream'
-    response.set('Cache-Control', 'public, max-age=3600')
+    // 不缓存：面板的前端包会被我们改动（接口路径等），浏览器缓存旧包会直接导致「打不开/接口报错」
+    response.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
     response.body = file
   })
 

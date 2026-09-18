@@ -18,9 +18,9 @@
       "kuaishou": "",
       "xiaohongshu": ""
     },
-    "APIServer": true,
+    "APIServer": false,
     "APIServerMount": true,
-    "APIServerPort": 4567
+    "APIServerPort": 4568
   },
   "app": {
     "videoTool": true,
