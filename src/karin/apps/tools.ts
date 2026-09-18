@@ -1,4 +1,6 @@
 import karin, { logger, type Message } from 'node-karin'
+import { replyReplacing } from '@/module/utils/QqPanel'
+import { resolveCardToUrl } from '@/module/utils/CardParser'
 
 import { Common, downloadVideo } from '@/module'
 import { getStatisticsDB, type ParsePlatform, type ParseWorkType } from '@/module/db'
@@ -389,6 +391,35 @@ const handlePrefix = wrapWithErrorHandler(
 )
 
 // 注册命令
+/**
+ * 卡片消息解析（**必须排在平台命令之前**，否则轮不到它）。
+ *
+ * 群里转发的分享卡片 / 小程序卡片大多没有链接，平台正则匹配不到，插件就完全没反应。
+ * 这里先用 OCR + 平台搜索把作品定位出来，再把消息文本**换成规范链接**并 next()，
+ * 后面的抖音/B站命令就能照常命中，画质面板、评论区等全部复用既有流程。
+ */
+const handleCardParse = wrapWithErrorHandler(
+  async (e, next) => {
+    const text = String(e.msg ?? '')
+    // 有链接的走原流程；不像卡片的（没有 JSON 花括号）也直接放行 —— 这条中间件只做兜底
+    if (!text.includes('{') || /https?:\/\//i.test(text)) return next()
+    logger.mark('[卡片解析] 收到疑似卡片消息，长度 ' + text.length + '，开头: ' + text.slice(0, 120))
+    // 先给用户一个反馈：提取 + OCR + 搜索要几秒钟，没有任何提示会让人以为插件死了
+    await replyReplacing(e, '正在提取卡片信息…')
+    const resolved = await resolveCardToUrl(text)
+    if (!resolved) {
+      logger.mark('[卡片解析] 未能定位到作品，放弃')
+      return next()
+    }
+    ;(e as any).msg = resolved.url
+    logger.mark('[卡片解析] 已定位到作品，转交平台解析: ' + resolved.url)
+    return next()
+  },
+  { businessName: '卡片解析' }
+)
+
+export const cardAPP = karin.command(/./, handleCardParse, { name: 'kkk-卡片解析' })
+
 const douyin = karin.command(reg.douyin, handleDouyin, {
   name: 'kkk-视频功能-抖音',
   priority: Config.app.videoTool ? -Infinity : 800

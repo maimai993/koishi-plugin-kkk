@@ -775,3 +775,46 @@ export const sendParseTip = async (e: Message, platformName: string): Promise<vo
     await replyReplacing(e, '检测到' + platformName + '链接，开始解析')
   }
 }
+
+/**
+ * 把一张远程图片转成 QQ markdown 能用的地址。
+ *
+ * QQ 的 markdown 图片必须写成 `![#宽px #高px](https url)`，而且外链常常被拦，
+ * 所以这里先下载再通过宿主的 assets 服务上传一份，返回可直接嵌进 markdown 的地址与原始尺寸。
+ *
+ * @param url 原始图片地址
+ * @param maxWidth 最大显示宽度（等比缩放，避免大图刷屏）
+ */
+export const toMarkdownImage = async (url: string, maxWidth = 420): Promise<string | null> => {
+  try {
+    const ctx: any = tryGetRuntime()?.ctx
+    const assets: any = ctx?.assets
+    if (!assets?.upload) return null
+    const res = await fetch(url)
+    if (!res.ok) return null
+    const buffer = Buffer.from(await res.arrayBuffer())
+    const mime = String(res.headers.get('content-type') ?? 'image/jpeg').split(';')[0]
+    const meta = getImageMetadata(buffer)
+    const uploaded: any = await assets.upload('data:' + mime + ';base64,' + buffer.toString('base64'), 'kkk-md.png')
+    const finalUrl = typeof uploaded === 'string' ? uploaded : uploaded?.url
+    if (!finalUrl || !/^https?:\/\//i.test(String(finalUrl))) return null
+    const width = Number(meta.width) || maxWidth
+    const height = Number(meta.height) || maxWidth
+    const w = Math.min(width, maxWidth)
+    const h = Math.max(1, Math.round((height * w) / width))
+    return '![#' + w + 'px #' + h + 'px](' + finalUrl + ')'
+  } catch (error: any) {
+    logger.debug('[QQ面板] 图片转 markdown 失败: ' + String(error?.message ?? error))
+    return null
+  }
+}
+
+/**
+ * 一组图片合成**一条** markdown 消息（图集解析用）：
+ * 一张图一条消息、或者走合并转发都会刷屏，这里统一成单条 md，图片按 maxWidth 等比缩放。
+ */
+export const buildMarkdownImageMessage = async (urls: string[], maxWidth = 420): Promise<any | null> => {
+  const parts = (await Promise.all(urls.map((url) => toMarkdownImage(url, maxWidth)))).filter(Boolean) as string[]
+  if (!parts.length) return null
+  return segment.markdown(parts.join('\n'))
+}

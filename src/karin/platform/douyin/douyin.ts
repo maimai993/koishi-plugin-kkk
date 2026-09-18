@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import { buildMarkdownImageMessage } from '@/module/utils/QqPanel'
 import { sendParseTip } from '@/module/utils/QqPanel'
 
 import { type DouyinEmojiListResponse, DouyinVideoWorkResponse } from '@ikenxuan/amagi'
@@ -314,9 +315,20 @@ export class DouYin extends Base {
                 )
                 image_data.push(res)
                 image_res.push(image_data)
-                if (imageres.length === 1) {
-                  const imageUrl = await processImageUrl(image_url, g_title)
-                  await this.e.reply(segment.image(imageUrl))
+                /**
+                 * 统一成**一条** markdown 消息。
+                 *
+                 * 原来是「单图直接发、多图走合并转发」——官方 bot 上转发经常发不出去，
+                 * 就会退化成一张图一条消息，把群刷屏。这里改成单条 md，
+                 * 图片按 420px 等比缩放（`![#宽px #高px](url)`），一条消息装下整套图集。
+                 */
+                const mdMessage = await buildMarkdownImageMessage(
+                  images.map((item: any) => item.url_list[2] || item.url_list[1]).filter(Boolean)
+                )
+                if (mdMessage) {
+                  await this.e.reply(mdMessage)
+                } else if (imageres.length === 1) {
+                  await this.e.reply(imageres[0])
                 } else {
                   await this.e.bot.sendForwardMsg(this.e.contact, res, {
                     source: '图片合集',
