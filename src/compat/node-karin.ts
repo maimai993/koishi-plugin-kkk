@@ -108,6 +108,13 @@ export class KkkBot {
   }
 
   /** 好友列表 */
+  /**
+   * 好友列表。
+   *
+   * Koishi 的 Bot 没有统一的 getFriendList，拿不到就返回空数组 ——
+   * 上游用它来「找能给主人发消息的 bot」，空数组会自然走到后面的兜底逻辑（getAllBotID），
+   * 所以这里**不能抛错**，否则整条推送链路会断在第一步。
+   */
   async getFriendList (): Promise<any[]> {
     try {
       return await (this.bot as any).getFriendList()
@@ -1028,7 +1035,18 @@ export const karin = {
   task,
   on,
   getBot: (selfId: string) => resolveBot(selfId),
-  getAllBotID: (): string[] => (tryGetRuntime()?.ctx.bots ?? []).map((bot) => bot.selfId),
+  /**
+   * 取所有在线 bot 的 id。
+   *
+   * 不能只读 `bot.selfId` —— 实测 `ctx.bots` 里混着 console / sandbox 这类
+   * selfId 为 null 的实例，过滤前会得到 `[null, null]`，推送任务就永远"找不到可用 bot"。
+   * 这里把几种可能的来源都兜上，并且丢掉空值。
+   */
+  getAllBotID: (): string[] => {
+    const bots: any[] = tryGetRuntime()?.ctx.bots ?? []
+    const ids = bots.map((bot) => bot?.selfId ?? bot?.user?.id ?? bot?.internal?.selfId ?? '')
+    return [...new Set(ids.map((id) => String(id ?? '')).filter((id) => id && id !== 'undefined'))]
+  },
   getAllBotList: () => (tryGetRuntime()?.ctx.bots ?? []).map((bot) => ({ bot: new KkkBot(bot), status: 1 })),
   contactGroup,
   contactFriend,

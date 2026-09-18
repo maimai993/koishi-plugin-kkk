@@ -63,6 +63,9 @@ const ALIASES = [
   { prefix: '@template/', target: 'ktr', exact: false },
   { prefix: '@karinjs/template-react', target: 'compat/template-react', exact: true },
   { prefix: '@heroui/react', target: 'compat/heroui', exact: true },
+  // 这个包自己打包有问题（type:module + require 指向 .js），require 它就抛
+  // 「exports is not defined in ES module scope」，会让所有卡片模板加载失败 → 接到 lucide 上
+  { prefix: '@phosphor-icons/react', target: 'compat/phosphor-icons', exact: true },
   { prefix: '@/', target: 'karin', exact: false }
 ]
 

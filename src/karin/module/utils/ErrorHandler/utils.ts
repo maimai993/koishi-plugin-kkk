@@ -1,5 +1,5 @@
 import type { ApiErrorData } from '@template/template/other/handlerError/components/types'
-import type { AdapterType, Message } from 'node-karin'
+import { logger, type AdapterType, type Message } from 'node-karin'
 import karin from 'node-karin'
 
 import { resolveUsableBot } from '../bot'
@@ -91,6 +91,13 @@ export const injectBotToEventForPushTask = async (event: Message | undefined, bu
     ((preferredBotId ? karin.getBot(preferredBotId) : undefined) as AdapterType | undefined) ?? (await resolveUsableBot(preferredBotId))
 
   if (!bot) {
+    // 诊断：把「有哪些 bot 可用」直接打出来，便于定位是取不到 bot 还是配置里没写
+    logger.mark(
+      `[ErrorHandler] push 任务找不到可用 bot: ${businessName}` +
+      ` | preferredBotId=${JSON.stringify(preferredBotId)}` +
+      ` | getAllBotID=${JSON.stringify((karin as any).getAllBotID?.() ?? [])}` +
+      ` | pushlist=${JSON.stringify({ douyin: (Config.pushlist as any)?.douyin?.length ?? 0, bilibili: (Config.pushlist as any)?.bilibili?.length ?? 0 })}`
+    )
     throw new Error(`[ErrorHandler] push 任务缺少可用 bot 实例: ${businessName}`)
   }
 
