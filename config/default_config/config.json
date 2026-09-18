@@ -71,7 +71,7 @@
       "comment",
       "video"
     ],
-    "numcomment": 3,
+    "numcomment": 5,
     "subCommentLimit": 7,
     "commentImageCollection": false,
     "liveImageMergeMode": "continuous",
@@ -112,7 +112,7 @@
       "video",
       "comment"
     ],
-    "numcomment": 15,
+    "numcomment": 5,
     "realCommentCount": false,
     "commentImageCollection": false,
     "videoQuality": 127,

@@ -66,6 +66,10 @@ export interface Config {
   qqPanel: boolean
   /** QQ 面板里隐藏超过该体积（MB）的画质按钮 */
   qqFileLimitMB: number
+  /** 是否在图片过大/发送失败时自动切片（默认开） */
+  sliceImageOnDemand: boolean
+  /** 切片高度（像素） */
+  sliceImageHeight: number
   /** 卡片解析的 OCR 密钥（OCR.space） */
   ocrApiKey: string
   /** 操作后撤回上一条面板消息（默认开） */
@@ -98,6 +102,15 @@ export const Config: Schema<Config> = Schema.intersect([
     qqFileLimitMB: Schema.number().default(200).description(
       'QQ 面板里隐藏超过该体积（MB）的画质按钮。QQ 富媒体上传对视频的硬限制是 200MB（超过软限制 30MB 会降级成文件发送），' +
       '所以默认 200：点了也发不出去的档位干脆不显示。'
+    ),
+    sliceImageOnDemand: Schema.boolean().default(true).description(
+      '评论区卡片过大时**自动切片**发送（默认开启）。\n' +
+      '- 开：先按普通图片发一次；**超过 20MB** 或**发送失败（拿不到消息 ID）**时才切成多片，' +
+      '再用一条 markdown 无缝拼接发送，视觉上仍是一整张\n' +
+      '- 关：一律按普通图片发送（卡片太高时 QQ 会直接拒收）'
+    ),
+    sliceImageHeight: Schema.number().default(2000).description(
+      '切片高度（像素，默认 2000）。越小每片显示得越清晰、但片数越多；越大片数越少、字越小。'
     ),
     ocrApiKey: Schema.string().description('卡片解析用的 OCR 接口密钥（OCR.space，免费申请：https://ocr.space/ocrapi）。' +
       '群里转发的分享卡片没有链接，插件会 OCR 卡片封面拿标题/UP 主名，再搜索定位作品。' +
