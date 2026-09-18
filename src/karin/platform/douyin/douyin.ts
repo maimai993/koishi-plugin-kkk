@@ -263,21 +263,32 @@ export class DouYin extends Base {
                   processedImages.push(...tipImg)
                 }
 
+                /**
+ * 实况图/图集：**静态图合并成一条 markdown 消息**，实况视频单独发。
+ *
+ * 原来是整包走合并转发（makeForward + sendForwardMsg）—— 官方 bot 上转发经常发不出去，
+ * 表现就是「图集完全没反应」。md 里连续图片是紧贴渲染的，视觉上仍是一整套图。
+ * 视频没法塞进 markdown，所以挑出来单独发。
+ */
                 try {
                   if (processedImages.length === 0) {
                     logger.warn(`抖音图集解析未生成可发送内容，aweme_id=${VideoData.data.aweme_detail.aweme_id}`)
                   } else {
-                    const Element = common.makeForward(
-                      processedImages,
-                      Config.app.fakeForward ? this.e.sender.userId : this.e.bot.account.selfId,
-                      Config.app.fakeForward ? this.e.sender.nick : this.e.bot.account.name
+                    const imageSegments = processedImages.filter((item: any) => item?.type === 'image')
+                    const otherSegments = processedImages.filter((item: any) => item?.type !== 'image')
+                    // 静态图：一条 md 合并（图片地址从元素里取）
+                    const mdMessage = await buildMarkdownImageMessage(
+                      imageSegments.map((item: any) => String(item?.attrs?.src ?? '')).filter(Boolean)
                     )
-                    await this.e.bot.sendForwardMsg(this.e.contact, Element, {
-                      source: '图集内容',
-                      summary: `查看${Element.length}张图片/视频消息`,
-                      prompt: '抖音图集解析结果',
-                      news: [{ text: '点击查看解析结果' }]
-                    })
+                    if (mdMessage) {
+                      await this.e.reply(mdMessage)
+                    } else if (imageSegments.length) {
+                      await this.e.reply(imageSegments)
+                    }
+                    // 实况视频：md 塞不下，单独发
+                    for (const video of otherSegments) {
+                      await this.e.reply(video)
+                    }
                   }
                 } finally {
                   for (const item of temp) {
