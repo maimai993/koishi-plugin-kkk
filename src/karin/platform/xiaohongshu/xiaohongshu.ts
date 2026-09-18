@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import { sendParseTip } from '@/module/utils/QqPanel'
 
 import type { NoteComments, XiaohongshuEmojiListResponse } from '@ikenxuan/amagi'
 import type { RichTextEmojiDefinition } from '@kkk/richtext'
@@ -86,9 +87,7 @@ export class Xiaohongshu extends Base {
     if (Config.amagi.cookies.xiaohongshu === '') {
       throw new Error('我还没有小红书的 Cookies，暂时无法解析呢 ~')
     }
-    if (Config.app.parseTip) {
-      await this.e.reply('检测到小红书链接，开始解析')
-    }
+    await sendParseTip(this.e, '小红书')
     const NoteData = await this.amagi.xiaohongshu.fetcher.fetchNoteDetail({
       note_id: data.note_id,
       xsec_token: data.xsec_token

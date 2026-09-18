@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import { sendParseTip } from '@/module/utils/QqPanel'
 
 import { type DouyinEmojiListResponse, DouyinVideoWorkResponse } from '@ikenxuan/amagi'
 import type { RichTextEmojiDefinition } from '@kkk/richtext'
@@ -65,9 +66,7 @@ export class DouYin extends Base {
   }
 
   async DouyinHandler(data: DouyinIdData) {
-    if (Config.app.parseTip) {
-      this.e.reply('检测到抖音链接，开始解析')
-    }
+    await sendParseTip(this.e, '抖音')
     switch (this.type) {
       case 'one_work': {
         const VideoData = await this.amagi.douyin.fetcher.parseWork({

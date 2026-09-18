@@ -1,7 +1,7 @@
 import type { KuaishouVideoWorkResponse } from '@ikenxuan/amagi'
 import { logger, type Message } from 'node-karin'
 
-import { Base, downloadVideo, extractTotalBytesFromHeaders, Networks, Render } from '@/module'
+import { Base, downloadVideo, extractTotalBytesFromHeaders, Networks, Render, sendParseTip } from '@/module'
 import type { ParseWorkType } from '@/module/db'
 import { Config } from '@/module/utils/Config'
 import { kuaishouComments, type KuaishouDataResult, type KuaishouOneWorkPayload } from '@/platform/kuaishou'
@@ -86,9 +86,7 @@ export class Kuaishou extends Base {
       return true
     }
     this.workType = 'video'
-    if (Config.app.parseTip) {
-      this.e.reply('检测到快手链接，开始解析')
-    }
+    await sendParseTip(this.e, '快手')
     // 表情接口没换，还是 graphql 那条，`data.visionBaseEmoticons` 两层照旧
     const transformedData = Object.entries(payload.EmojiData.data.visionBaseEmoticons.iconUrls).map(([name, path]) => {
       return { name, url: `https:${path}` }

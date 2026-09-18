@@ -21,9 +21,13 @@
 import { isFfmpegAvailable, logger, segment, type Message } from 'node-karin'
 
 import { commandInvocation, tryGetRuntime } from '../../../compat/runtime'
+import { getParseOverride } from './ParseOverride'
+import { Config } from './Config'
 import { getDouyinQualityLevel } from '@/platform/douyin/videoQuality'
 import { getImageMetadata, Render } from '@/module/utils/Render'
 import { getHotDanmaku } from '@/platform/bilibili/danmaku'
+// 头像框 / 昵称颜色要从 UP 主页接口拿，和解析结果保持一致
+import { getUsernameMetadata } from '@/platform/bilibili/dynamic-text'
 // 抖音卡片复用推送那套构建器（保真度最高）
 import { renderWorkImage } from '@/platform/douyin/push/render'
 
@@ -482,6 +486,17 @@ async function uploadPanelCard (
       return { url: String(url), width: Number(meta.width) || 0, height: Number(meta.height) || 0 }
     }
 
+    /** UP 主页信息（头像框 / 昵称颜色），失败不影响面板 */
+    let ownerCard: any = null
+    if (request.platform === 'bilibili' && detail.owner?.mid) {
+      try {
+        const cardRes: any = await bilibiliFetcher.fetchUserCard({ host_mid: detail.owner.mid })
+        ownerCard = cardRes?.data?.data?.card ?? null
+      } catch (error: any) {
+        logger.debug('[QQ面板] 拉取 UP 主页失败（头像框/粉名会缺省）: ' + String(error?.message ?? error))
+      }
+    }
+
     const route = 'bilibili/videoInfo'
     const cardData: any = request.platform === 'bilibili'
       ? {
@@ -494,7 +509,16 @@ async function uploadPanelCard (
           pic: detail.pic,
           // 和解析结果一致：带热门弹幕，卡片顶部就有弹幕飘过
           hotDanmaku,
-          owner: detail.owner
+          /**
+           * 头像框和粉名都来自 UP 主页（userCard）—— 面板只拉了视频信息，
+           * 之前直接传 detail.owner 就少了 frame / usernameMeta 两个字段，
+           * 于是卡片上「没有头像框、名字也不是粉色」。这里和解析那边用同一份构造。
+           */
+          owner: {
+            ...detail.owner,
+            usernameMeta: ownerCard ? getUsernameMetadata(ownerCard) : undefined,
+            frame: ownerCard?.pendant?.image || ''
+          }
         }
       : {
           // 抖音卡片的数据结构由模板决定，这里先不做卡片，交给兜底面板
@@ -734,3 +758,20 @@ export async function sendQqParsePanel (e: Message, request: PanelRequest, optio
 }
 
 export default sendQqParsePanel
+
+/**
+ * 解析开始时的提示语 —— 两种来源说两句话：
+ *   - **面板按钮点出来的**：画质面板刚发过，这里只回「收到请求，开始下载」
+ *   - 手工发链接的：仍然是「检测到 XX 链接，开始解析」
+ * 两种情况都会先用 replyReplacing 撤掉上一条机器人消息，群里始终只留最新一条。
+ */
+export const sendParseTip = async (e: Message, platformName: string): Promise<void> => {
+  const fromPanel = getParseOverride()?.fromPanel === true
+  if (fromPanel) {
+    await replyReplacing(e, '收到请求，开始下载')
+    return
+  }
+  if (Config.app.parseTip) {
+    await replyReplacing(e, '检测到' + platformName + '链接，开始解析')
+  }
+}

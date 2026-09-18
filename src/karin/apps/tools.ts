@@ -165,7 +165,18 @@ const handleDouyin = wrapWithErrorHandler(
       return
     }
     const douyin = new DouYin(e, iddata, { forceBurnDanmaku })
-    await runWithParseOverride(flags.override, () => douyin.DouyinHandler(iddata))
+    await runWithParseOverride(
+      {
+        ...flags.override,
+        /**
+         * 面板按钮点出来的要单独标记：这时画质面板已经发过了，
+         * 只该回一句「收到请求，开始下载」，不再走「检测到链接，开始解析」。
+         * 判据是面板专有参数：--p（画质按钮令牌）、--panel（选集）、--bgp（翻页）。
+         */
+        fromPanel: flags.panelToken !== undefined || flags.panel !== undefined || flags.bangumiPage !== undefined
+      },
+      () => douyin.DouyinHandler(iddata)
+    )
 
     // 记录解析统计
     await recordParseStat(e, 'douyin', { workType: douyin.workType, durationMs: Date.now() - startedAt })
@@ -273,10 +284,19 @@ const handleKuaishou = wrapWithErrorHandler(
   async (e) => {
     const kuaishouUrl = e.msg.replaceAll('\\', '').match(/(https:\/\/v\.kuaishou\.com\/\w+|https:\/\/www\.kuaishou\.com\/f\/[a-zA-Z0-9]+)/g)
     const startedAt = Date.now()
+    // 解析参数（--q= 画质等）：之前这个分支没解析参数，面板选的画质从来没生效过
+    const flags = parseParseFlags(e)
     const iddata = await getKuaishouID(String(kuaishouUrl))
     const WorkData = await fetchKuaishouData(iddata.type, iddata)
     const kuaishou = new Kuaishou(e, iddata)
-    await kuaishou.KuaishouHandler(WorkData)
+    await runWithParseOverride(
+      {
+        ...flags.override,
+        /** 面板按钮点出来的：只回「收到请求，开始下载」，不再发「检测到链接，开始解析」 */
+        fromPanel: flags.panelToken !== undefined || flags.panel !== undefined
+      },
+      () => kuaishou.KuaishouHandler(WorkData)
+    )
 
     // 记录解析统计
     await recordParseStat(e, 'kuaishou', { workType: kuaishou.workType, durationMs: Date.now() - startedAt })
@@ -297,9 +317,17 @@ const handleXiaohongshu = wrapWithErrorHandler(
       return next()
     }
     const startedAt = Date.now()
+    // 同上：补上解析参数与面板标记
+    const flags = parseParseFlags(e)
     const iddata = await getXiaohongshuID(url)
     const xiaohongshu = new Xiaohongshu(e, iddata)
-    await xiaohongshu.XiaohongshuHandler(iddata)
+    await runWithParseOverride(
+      {
+        ...flags.override,
+        fromPanel: flags.panelToken !== undefined || flags.panel !== undefined
+      },
+      () => xiaohongshu.XiaohongshuHandler(iddata)
+    )
 
     // 记录解析统计
     await recordParseStat(e, 'xiaohongshu', { workType: xiaohongshu.workType, durationMs: Date.now() - startedAt })
