@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import { sendSlicedImage } from '@/module/utils/ImageSlice'
 import { buildMarkdownImageMessage } from '@/module/utils/QqPanel'
 import { sendParseTip } from '@/module/utils/QqPanel'
 
@@ -694,7 +695,8 @@ export class DouYin extends Base {
                 news: [{ text: '点击查看解析结果' }]
               })
             }
-            this.e.reply(img)
+            // 评论卡可能极长（实测 2880x40000），交给切片+md 拼接发送，避免 QQ 拒收
+            await sendSlicedImage(this.e, img)
           }
         }
 

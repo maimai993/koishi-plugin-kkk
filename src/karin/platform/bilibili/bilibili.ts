@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import { sendSlicedImage } from '@/module/utils/ImageSlice'
 
 import {
   AmagiSuccess,
@@ -337,7 +338,8 @@ export class Bilibili extends Base {
                     ? null
                     : `${playUrlData.data.data.dash.video[0].width} x ${playUrlData.data.data.dash.video[0].height}`
               })
-              this.e.reply(img)
+              // 评论卡可能极长（实测 2880x40000），交给切片+md 拼接发送，避免 QQ 拒收
+              await sendSlicedImage(this.e, img)
             }
           }
         }
