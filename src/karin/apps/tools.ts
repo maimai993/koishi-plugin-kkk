@@ -429,7 +429,8 @@ const handleCardParse = wrapWithErrorHandler(
      * 两个图片链接，那样写会让所有卡片都在这行被挡回去（表现就是用户说的「没反应」）。
      * 有真实作品链接的消息不会带 `[卡片消息]` 前缀，自然走原流程。
      */
-    const looksCard = /\[卡片消息\]|卡片消息|"app"\s*:/.test(text)
+    // 卡片逻辑统一由 index.ts 的兜底中间件处理（那里才能改写文本继续匹配）——这里直接放行
+    const looksCard = false
     if (!looksCard) return next()
     logger.mark('[卡片解析] 收到卡片消息: ' + text.replace(/\s+/g, ' ').slice(0, 130))
 

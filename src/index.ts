@@ -66,6 +66,8 @@ export interface Config {
   qqPanel: boolean
   /** QQ 面板里隐藏超过该体积（MB）的画质按钮 */
   qqFileLimitMB: number
+  /** 卡片解析的 OCR 密钥（OCR.space） */
+  ocrApiKey: string
   /** 操作后撤回上一条面板消息（默认开） */
   recallPanel: boolean
   /** 番剧分集表格的列数（默认 5） */
@@ -97,6 +99,9 @@ export const Config: Schema<Config> = Schema.intersect([
       'QQ 面板里隐藏超过该体积（MB）的画质按钮。QQ 富媒体上传对视频的硬限制是 200MB（超过软限制 30MB 会降级成文件发送），' +
       '所以默认 200：点了也发不出去的档位干脆不显示。'
     ),
+    ocrApiKey: Schema.string().description('卡片解析用的 OCR 接口密钥（OCR.space，免费申请：https://ocr.space/ocrapi）。' +
+      '群里转发的分享卡片没有链接，插件会 OCR 卡片封面拿标题/UP 主名，再搜索定位作品。' +
+      '留空则使用公共测试 key（helloworld），它很容易被限流返回空结果。'),
     recallPanel: Schema.boolean().default(true).description(
       '面板操作后自动**撤回上一条面板消息**：选集 → 选清晰度 → 下载，每步都会撤掉上一步的面板，群里不会越堆越多。'
     ),
@@ -490,6 +495,52 @@ function registerCommands (
     const raw = session.content ?? ''
     if (!raw) return next()
     if (session.argv?.command) return next()
+    /**
+     * 卡片消息：**既没有链接、也不是指令**，平台正则和指令表都匹配不到，
+     * 所以必须兜在链路最后一环。
+     *
+     * 关键：定位到作品后**不能只 next()** —— 后面已经没有处理器了。
+     * 正确做法是把消息文本换成「解析 <链接>」重新跑一遍匹配，复用完整解析流程。
+     */
+    if (/卡片消息/.test(raw)) {
+      try {
+        const { resolveCardToUrl } = await import('./karin/module/utils/CardParser')
+        const send = async (content: any) => {
+          try {
+            await (session as any).send(content)
+          } catch (error: any) {
+            logger.debug('卡片解析回话失败: %s', String(error?.message ?? error))
+          }
+        }
+        // 提取 + OCR + 搜索要几秒，先给个反馈
+        await send('正在提取卡片信息…')
+        const resolved = await resolveCardToUrl(raw)
+        if (resolved && resolved.url) {
+          // 注意：这里的 logger 是 Koishi 的 ctx.logger，没有 mark 方法（只有 info/warn/debug）
+          logger.info('卡片解析命中，按链接重新解析: %s', resolved.url)
+          if (await runTextCommand(session, '#解析 ' + resolved.url)) return
+        }
+        if (resolved && resolved.candidates && resolved.candidates.length) {
+          const { cmdInput } = await import('./karin/module/utils/QqPanel')
+          const table = ['| # | 标题 | UP / 作者 | 操作 |', '| :---: | :--- | :--- | :---: |']
+          resolved.candidates.slice(0, 6).forEach((item: any, index: number) => {
+            const link = item.platform === 'bilibili'
+              ? 'https://www.bilibili.com/video/' + item.id
+              : 'https://www.douyin.com/video/' + item.id
+            const title = String(item.title || '（无标题）').replace(/[|\n]/g, ' ').slice(0, 26)
+            const author = String(item.author || '-').replace(/[|\n]/g, ' ').slice(0, 12)
+            table.push('| ' + (index + 1) + ' | ' + title + ' | ' + author + ' | ' + cmdInput('解析 ' + link, '解析') + ' |')
+          })
+          const tip = '没能唯一确定这个作品（识别到：' + ((resolved.upName) || '未知') + '），下面是候选，点按钮直接解析：'
+          await send([{ type: 'markdown', attrs: { content: tip + String.fromCharCode(10) + table.join(String.fromCharCode(10)) } }])
+          return
+        }
+        await send('没能从这张卡片里认出作品，直接发链接给我吧')
+        return
+      } catch (error: any) {
+        logger.warn('卡片解析失败: ' + String(error?.message ?? error))
+      }
+    }
     const text = raw.startsWith('#') ? raw : '#' + stripCommandPrefix(raw)
     if (await runTextCommand(session, text)) return
     return next()
@@ -627,6 +678,8 @@ export async function apply (ctx: Context, config: Config) {
     logger.warn('初始化临时目录失败: %s', error?.message ?? error)
   }
 
+  // 控制台里配的 OCR key 覆盖到上游配置上（CardParser 读的是 Config.app.ocrApiKey）
+  if (config.ocrApiKey) { try { (Config.app as any).ocrApiKey = config.ocrApiKey } catch { /* 忽略 */ } }
   registerCommands(ctx, logger, config.autoParse !== false)
   startScheduler(ctx, logger, taskQueue)
 

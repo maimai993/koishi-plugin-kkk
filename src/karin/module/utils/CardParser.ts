@@ -17,6 +17,7 @@ import { createHash } from 'node:crypto'
 
 import { logger } from 'node-karin'
 
+import { tryGetRuntime } from '../../../compat/runtime'
 import { douyinFetcher } from './amagiClient'
 import { Config } from './Config'
 
@@ -184,18 +185,46 @@ export const ocrImageText = async (imageUrl: string): Promise<string> => {
   if (!url) return ''
   if (ocrCache.has(url)) return ocrCache.get(url)!
 
-  const key = String((Config.app as any)?.ocrApiKey || 'helloworld').trim() || 'helloworld'
-  const api =
-    'https://api.ocr.space/parse/imageurl?apikey=' + encodeURIComponent(key) +
-    '&language=chs&isOverlayRequired=false&scale=true&url=' + encodeURIComponent(url)
-  try {
+  /**
+   * OCR 密钥的取值顺序：
+   *   1. Koishi 控制台里的插件配置项 ocrApiKey
+   *   2. 上游 config.json 的 app.ocrApiKey
+   *   3. 公共测试 key helloworld（极容易被限流、返回空结果，仅兜底）
+   */
+  const fromKoishi = String((tryGetRuntime()?.config as any)?.ocrApiKey ?? '').trim()
+  const key = String(fromKoishi || (Config.app as any)?.ocrApiKey || 'helloworld').trim() || 'helloworld'
+  logger.debug('[卡片解析] OCR key: ' + (key === 'helloworld' ? 'helloworld（公共测试 key）' : key.slice(0, 4) + '****'))
+  /**
+   * OCR.space 的免费 key（helloworld）**会被限流**：短时间连打几次就返回 200 但 ParsedText 为空
+   * （实测同一个 URL 单独调能识别出「UP主 / 粉丝 / 播放」那几行）。所以空结果要重试一次，
+   * 并把原始响应打进日志，避免下次又只能看到一行空的「OCR 结果:」。
+   */
+  const callOnce = async (): Promise<{ text: string; raw: any }> => {
+    const api =
+      'https://api.ocr.space/parse/imageurl?apikey=' + encodeURIComponent(key) +
+      '&language=chs&isOverlayRequired=false&scale=true&url=' + encodeURIComponent(url)
     const response = await fetch(api, { headers: { 'User-Agent': UA } })
     const json: any = await response.json()
     if (json?.IsErroredOnProcessing) throw new Error(String(json?.ErrorMessage || 'OCR 处理失败'))
     const text = String((json?.ParsedResults ?? []).map((item: any) => item?.ParsedText ?? '').join('\n')).trim()
+    return { text, raw: json }
+  }
+
+  try {
+    let { text, raw } = await callOnce()
+    if (!text) {
+      // 限流最常见：等一下再试一次
+      await new Promise((resolve) => setTimeout(resolve, 2500))
+      const retry = await callOnce()
+      text = retry.text
+      raw = retry.raw
+      if (!text) {
+        logger.warn('[卡片解析] OCR 两次都返回空，原始响应: ' + JSON.stringify(raw).slice(0, 300))
+      }
+    }
+    if (text) logger.mark('[卡片解析] OCR 结果: ' + text.replace(/\s+/g, ' ').slice(0, 120))
     if (ocrCache.size > 200) ocrCache.clear()
     ocrCache.set(url, text)
-    logger.mark('[卡片解析] OCR 结果: ' + text.replace(/\s+/g, ' ').slice(0, 100))
     return text
   } catch (error: any) {
     logger.warn('[卡片解析] OCR 失败: ' + String(error?.message ?? error))
