@@ -284,6 +284,12 @@ export class Bilibili extends Base {
           if (isSoftFailure(commentsData, SOFT_ERROR_CODES.BILIBILI_COMMENTS_DISABLED)) {
             this.e.reply('UP主已关闭评论区，无法获取评论')
           } else {
+            // 诊断：评论接口回来了但列表为空时，把真实结构打出来（历史上多次踩到「多包一层 data」）
+            logger.mark(
+              '[B站] 评论接口返回: 顶层键=' + JSON.stringify(Object.keys((commentsData as any)?.data ?? {}).slice(0, 8)) +
+              ' replies=' + ((commentsData as any)?.data?.replies?.length ?? (commentsData as any)?.data?.data?.replies?.length ?? 0) +
+              ' numcomment=' + Config.bilibili.numcomment
+            )
             const { comments: commentsdata, image_urls } = bilibiliComments(commentsData.data, infoData.data.data.owner.mid.toString())
             if (!commentsdata?.length) {
               this.e.reply('这个视频没有评论 ~')
