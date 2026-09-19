@@ -830,7 +830,23 @@ export const toMarkdownImage = async (url: string, maxWidth = 420): Promise<stri
       buffer = Buffer.from(await res.arrayBuffer())
       mime = String(res.headers.get('content-type') ?? 'image/jpeg').split(';')[0]
     }
+    /**
+     * 尺寸必须尽量取到**真实值** —— 原来取不到就用 maxWidth 兜底，
+     * 结果 width/height 相等 → 图片被拉成**正方形**（用户反馈「比例不对」）。
+     * 这里补一层 ffprobe（webp/avif 这类 getImageMetadata 认不出的格式也能拿到）。
+     */
     const meta = getImageMetadata(buffer)
+    let realWidth = Number(meta.width) || 0
+    let realHeight = Number(meta.height) || 0
+    if (!realWidth || !realHeight) {
+      try {
+        const { spawnSync } = await import('node:child_process')
+        const probe = spawnSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=p=0', '-'], { input: buffer })
+        const parts = String(probe.stdout ?? '').trim().split(',')
+        realWidth = Number(parts[0]) || 0
+        realHeight = Number(parts[1]) || 0
+      } catch { /* 兜底失败 */ }
+    }
     const uploaded: any = await assets.upload('data:' + mime + ';base64,' + buffer.toString('base64'), 'kkk-md.png')
     const finalUrl = typeof uploaded === 'string' ? uploaded : uploaded?.url
     if (!finalUrl || !/^https?:\/\//i.test(String(finalUrl))) {
@@ -838,10 +854,13 @@ export const toMarkdownImage = async (url: string, maxWidth = 420): Promise<stri
       logger.mark('[QQ面板] assets 上传没有返回公网地址，md 图片改用原始链接')
       return /^https?:\/\//i.test(url) ? '![#' + maxWidth + 'px #' + Math.round(maxWidth * 1.3) + 'px](' + url + ')' : null
     }
-    const width = Number(meta.width) || maxWidth
-    const height = Number(meta.height) || maxWidth
-    const w = Math.min(width, maxWidth)
-    const h = Math.max(1, Math.round((height * w) / width))
+    if (!realWidth || !realHeight) {
+      // 真的拿不到：宁可不写尺寸让客户端按原图比例显示，也别硬套成正方形
+      logger.mark('[QQ面板] 图片尺寸未知，改用原始尺寸显示: ' + url.slice(0, 50))
+      return '![](' + finalUrl + ')'
+    }
+    const w = Math.min(realWidth, maxWidth)
+    const h = Math.max(1, Math.round((realHeight * w) / realWidth))
     return '![#' + w + 'px #' + h + 'px](' + finalUrl + ')'
   } catch (error: any) {
     logger.mark('[QQ面板] 图片转 markdown 失败: ' + String(error?.message ?? error).slice(0, 120))
