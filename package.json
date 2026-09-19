@@ -12,6 +12,7 @@
     "config",
     "assets",
     "client",
+    "docs",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
@@ -41,6 +42,7 @@
     "postinstall": "node scripts/patch-deps.mjs",
     "patch-deps": "node scripts/patch-deps.mjs",
     "smoke": "node scripts/smoke-parse.cjs",
+    "placeholders": "node scripts/make-demo-placeholders.mjs",
     "smoke:render": "node scripts/smoke-render.cjs",
     "check-types": "tsc -p tsconfig.json"
   },

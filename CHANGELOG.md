@@ -1,6 +1,22 @@
 # 更新日志
 
-## 1.0.0
+## Unreleased
+
+### 新增
+- **QQ 适配器分组**：面板、自动撤回、画质档体积、番剧选集表格、图片切片、卡片识别密钥集中成一组，
+  字段定义只有一份（`src/qqFields.json`），Koishi 控制台表单和 WebUI 共用，两边永远同步
+- **WebUI 增加「QQ 适配器」分类**：`/kkk` 里除了原版那几个分类，多出一个 QQ 专属分类；保存时 QQ 部分写回插件配置、其余写回 `config.json`
+- 配置面板自动登录：直接调 `/kkk/api/v1/login` 写入登录态，不用再手点登录框
+- 演示图占位与清单：`docs/images/`（`node scripts/make-demo-placeholders.mjs` 可重新生成）
+
+### 修复
+- **控制台入口页被侧边栏遮挡**：控制台把自定义页面直接挂在 `#app` 下，改成按侧边栏与状态栏的实际尺寸定位 iframe，并随窗口变化校准
+- **侧边栏图标空白**：`icon` 用了不在控制台图标集里的名字，改用内置的 `activity:plugin`
+- **旧配置被默认值吃掉**：`masters` / `debug` / `ocrApiKey` 原来在配置顶层，收进分组后 schema 默认值会覆盖用户原值
+  （表现为 masters 变空、debug 变 false、OCR 密钥丢失）；现在顶层旧值优先，并在启动后自动迁移进分组并写回 `koishi.yml`
+- 摊平时漏掉 `upstream`，导致 WebUI 拿到空配置
+- 图片切片、合并发送仅对 QQ 生效，其它平台恢复普通图片发送
+
 
 首个公开版本：**karin-plugin-kkk 的 Koishi 移植版**，把上游的解析 / 推送 / 面板能力完整搬到 Koishi 生态。
 
