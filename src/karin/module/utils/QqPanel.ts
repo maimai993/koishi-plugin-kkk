@@ -19,6 +19,7 @@
  * 好处是重启、多实例、按钮点两次都不会串状态。
  */
 import { isFfmpegAvailable, logger, segment, type Message } from 'node-karin'
+import fs from 'node:fs'
 
 import { commandInvocation, tryGetRuntime } from '../../../compat/runtime'
 import { getParseOverride } from './ParseOverride'
@@ -789,32 +790,63 @@ export const toMarkdownImage = async (url: string, maxWidth = 420): Promise<stri
   try {
     const ctx: any = tryGetRuntime()?.ctx
     const assets: any = ctx?.assets
-    if (!assets?.upload) return null
-    // data URI（卡片/提示图就是这种）直接上传，不用再下载一遍
+    if (!assets?.upload) {
+      // 没有 assets 服务就只能用原始链接（QQ 大概率取不到，但比直接放弃强）
+      logger.mark('[QQ面板] 宿主没有 assets 服务，md 图片改用原始链接')
+      return /^https?:\/\//i.test(url) ? '![#' + maxWidth + 'px #' + Math.round(maxWidth * 1.3) + 'px](' + url + ')' : null
+    }
+    /**
+     * 三种图片来源都要认：
+     *   1. **data URI**（卡片、提示图 ✓）
+     *   2. **本地文件路径 / file://**（实况图的 Motion Photo 封面就是这种！
+     *      之前只处理远程 URL，这里 fetch 一个本地路径必然失败 →
+     *      md 生成不出来 → 整条图集退化成「一张一张发」）
+     *   3. 远程 https 图片
+     */
     let buffer: Buffer
     let mime = 'image/jpeg'
-    if (url.startsWith('data:')) {
+    const localPath = url.startsWith('file://') ? decodeURIComponent(url.replace(/^file:\/\//, '')) : url
+    /**
+     * **base64:// 必须认** —— 抖音的图片地址就是这种（processImageUrl 的产物）。
+     * 少了这条会让 md 生成失败，整条图集退化成「一张一张发」
+     * （诊断日志表现为「准备发送图集: md=无 视频=9 段」）。
+     */
+    if (url.startsWith('base64://')) {
+      buffer = Buffer.from(url.slice('base64://'.length), 'base64')
+      mime = 'image/jpeg'
+    } else if (!url.startsWith('data:') && !/^https?:\/\//i.test(url) && fs.existsSync(localPath)) {
+      buffer = fs.readFileSync(localPath)
+      mime = localPath.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg'
+    } else if (url.startsWith('data:')) {
       const comma = url.indexOf(',')
       mime = url.slice(5, url.indexOf(';')) || 'image/jpeg'
       buffer = Buffer.from(url.slice(comma + 1), 'base64')
     } else {
       const res = await fetch(url)
-      if (!res.ok) return null
+      if (!res.ok) {
+        logger.mark('[QQ面板] md 图片下载失败 HTTP ' + res.status + '，改用原始链接: ' + url.slice(0, 60))
+        return '![#' + maxWidth + 'px #' + Math.round(maxWidth * 1.3) + 'px](' + url + ')'
+      }
       buffer = Buffer.from(await res.arrayBuffer())
       mime = String(res.headers.get('content-type') ?? 'image/jpeg').split(';')[0]
     }
     const meta = getImageMetadata(buffer)
     const uploaded: any = await assets.upload('data:' + mime + ';base64,' + buffer.toString('base64'), 'kkk-md.png')
     const finalUrl = typeof uploaded === 'string' ? uploaded : uploaded?.url
-    if (!finalUrl || !/^https?:\/\//i.test(String(finalUrl))) return null
+    if (!finalUrl || !/^https?:\/\//i.test(String(finalUrl))) {
+      // 上传拿不到公网地址：退回原始链接，至少图片还能显示
+      logger.mark('[QQ面板] assets 上传没有返回公网地址，md 图片改用原始链接')
+      return /^https?:\/\//i.test(url) ? '![#' + maxWidth + 'px #' + Math.round(maxWidth * 1.3) + 'px](' + url + ')' : null
+    }
     const width = Number(meta.width) || maxWidth
     const height = Number(meta.height) || maxWidth
     const w = Math.min(width, maxWidth)
     const h = Math.max(1, Math.round((height * w) / width))
     return '![#' + w + 'px #' + h + 'px](' + finalUrl + ')'
   } catch (error: any) {
-    logger.debug('[QQ面板] 图片转 markdown 失败: ' + String(error?.message ?? error))
-    return null
+    logger.mark('[QQ面板] 图片转 markdown 失败: ' + String(error?.message ?? error).slice(0, 120))
+    // 兜底：直接用原始链接（QQ 取不到就取不到，总比整条图集退化成逐张发好）
+    return /^https?:\/\//i.test(url) ? '![#' + maxWidth + 'px #' + Math.round(maxWidth * 1.3) + 'px](' + url + ')' : null
   }
 }
 

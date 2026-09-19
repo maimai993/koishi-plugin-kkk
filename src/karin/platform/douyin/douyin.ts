@@ -54,6 +54,8 @@ export class DouYin extends Base {
   pendingGalleryMd: string | null
   /** 实况视频（md 塞不下，最后单独发） */
   pendingGalleryVideos: any[]
+  /** 待发送的 BGM 本地路径（推迟到图集之后发） */
+  pendingBgmPath: string | null
 
   /** 标记是否已处理 live 图（用于判断是否需要发送音频） */
   hasProcessedLiveImage: boolean
@@ -505,17 +507,37 @@ export class DouYin extends Base {
                 if (images.length === 0) {
                   logger.warn(`抖音合辑解析未生成可发送内容，aweme_id=${VideoData.data.aweme_detail.aweme_id}`)
                 } else {
-                  const Element = common.makeForward(
-                    images,
-                    Config.app.fakeForward ? this.e.sender.userId : this.e.bot.account.selfId,
-                    Config.app.fakeForward ? this.e.sender.nick : this.e.bot.account.name
-                  )
-                  await this.e.bot.sendForwardMsg(this.e.contact, Element, {
-                    source: '合辑内容',
-                    summary: `查看${Element.length}张图片/视频消息`,
-                    prompt: '抖音合辑解析结果',
-                    news: [{ text: '点击查看解析结果' }]
-                  })
+                  /**
+                   * **实况照片/合辑走的就是这个分支**（is_slides === true）。
+                   * 原来是整包丢给合并转发 —— 官方 bot 上转发发不出去，就退化成
+                   * 「一条一条发」，表现就是用户看到的「还是一条一条」。
+                   *
+                   * 改成和信息卡一样的处理：图片攒起来，等信息卡、评论区都发完，
+                   * 再用**一条 markdown** 发出（提示图也一起放进去，排在最后）；
+                   * 实况视频 md 塞不下，紧随其后单独发。
+                   */
+                  const mergeSources: string[] = []
+                  const mergeVideos: any[] = []
+                  for (const item of images as any[]) {
+                    if (item?.type === 'image') {
+                      const itemSrc = String(item?.attrs?.src ?? '')
+                      // 诊断：把每张图地址的「开头」打出来，直接看出是 base64:// / file:// / http / 本地路径
+                      logger.mark('[抖音] 图集图片地址[' + mergeSources.length + ']: ' + itemSrc.slice(0, 40) + ' … 长度 ' + itemSrc.length)
+                      if (itemSrc) mergeSources.push(itemSrc)
+                    } else {
+                      mergeVideos.push(item)
+                    }
+                  }
+                  if (mergeSources.length) {
+                    const mdMessage = await buildMarkdownImageMessage(mergeSources)
+                    if (mdMessage) {
+                      this.pendingGalleryMd = mdMessage
+                    } else {
+                      this.pendingGalleryVideos.push(...(images as any[]))
+                    }
+                  } else {
+                    this.pendingGalleryVideos.push(...mergeVideos)
+                  }
                 }
               } finally {
                 for (const item of temp) {
@@ -547,7 +569,10 @@ export class DouYin extends Base {
               console.log(error)
             }
           }
-          // 图集、合辑、文章都发送BGM
+          /**
+           * 图集、合辑、文章都发送BGM —— **但推迟到最后发**（用户要求语音排在图片之后）。
+           * 这里只下载好放进待发队列，真正的发送在下方 flush 之后。
+           */
           const haspath = music_url && !isVideo && music_url !== undefined && !this.hasProcessedLiveImage
           if (haspath) {
             const audioFile = await downloadFile(music_url, {
@@ -555,9 +580,7 @@ export class DouYin extends Base {
               headers: this.headers
             })
             if (audioFile.filepath) {
-              const audioBase64 = `base64://${fs.readFileSync(audioFile.filepath).toString('base64')}`
-              await this.e.reply(segment.record(audioBase64, false))
-              await Common.removeFile(audioFile.filepath, true)
+              this.pendingBgmPath = audioFile.filepath
             }
           }
         }
@@ -725,6 +748,7 @@ export class DouYin extends Base {
          * 图集图片（+保存提示）→ **一条 markdown**，实况视频紧随其后。
          * 放在这里是因为：信息卡、评论区都已经发完了（用户指定顺序）。
          */
+        logger.mark('[抖音] 准备发送图集: md=' + (this.pendingGalleryMd ? '有' : '无') + ' 视频=' + this.pendingGalleryVideos.length + ' 段')
         if (this.pendingGalleryMd) {
           try {
             await this.e.reply(this.pendingGalleryMd)
@@ -738,6 +762,19 @@ export class DouYin extends Base {
           await this.e.reply(galleryVideo)
         }
         this.pendingGalleryVideos = []
+
+        // BGM（语音）：排在图集图片之后发
+        if (this.pendingBgmPath) {
+          try {
+            const audioBase64 = 'base64://' + fs.readFileSync(this.pendingBgmPath).toString('base64')
+            await this.e.reply(segment.record(audioBase64, false))
+          } catch (error: any) {
+            logger.debug('[抖音] BGM 发送失败: ' + String(error?.message ?? error))
+          } finally {
+            await Common.removeFile(this.pendingBgmPath, true).catch(() => undefined)
+            this.pendingBgmPath = null
+          }
+        }
 
         /** 发送视频 */
         if (sendvideofile && isVideo && !isArticle && Config.douyin.sendContent.includes('video')) {
