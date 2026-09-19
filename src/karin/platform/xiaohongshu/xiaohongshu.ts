@@ -102,46 +102,122 @@ export class Xiaohongshu extends Base {
     }
     const noteItems = NoteData?.data?.data?.items
     logger.mark('[小红书] 笔记详情返回: items=' + (Array.isArray(noteItems) ? noteItems.length : '（不是数组 ✗）'))
+    /**
+     * **卡片数据的取值要容错**：实测 items[0].note_card 经常取不到
+     * （接口层级与我们预期的不一致），一取不到就在这行抛 TypeError，
+     * 后面的卡片渲染完全轮不到 —— 用户看到的就是「提示解析中，然后没反应」。
+     * 这里把可能的两层都兜住，并把真实键名打出来（下次即可精确修改）。
+     */
+    const rawItem: any = Array.isArray(noteItems) ? noteItems[0] : undefined
+    const noteCard: any = rawItem?.note_card ?? rawItem?.noteCard ?? rawItem
+    logger.mark('[小红书] 条目键名: ' + JSON.stringify(Object.keys(rawItem ?? {}).slice(0, 12)) +
+      ' / note_card 键名: ' + JSON.stringify(Object.keys(rawItem?.note_card ?? {}).slice(0, 16)))
+    if (!noteCard) {
+      logger.warn('[小红书] 拿不到笔记内容，无法渲染卡片')
+      return
+    }
+    logger.mark('[小红书] 准备判定内容形态…')
     // 统计用的内容形态：有视频流算视频笔记，否则算图文（与 noteInfo/comment 模板里的判定一致）
-    this.workType = NoteData.data.data.items[0].note_card!.video ? 'video' : 'gallery'
-    const EmojiList = await this.amagi.xiaohongshu.fetcher.fetchEmojiList()
-    const formattedEmojis = XiaohongshuEmoji(EmojiList.data)
+    this.workType = noteCard.video ? 'video' : 'gallery'
+    logger.mark('[小红书] 内容形态=' + this.workType + '，接下来拉表情列表')
+    /**
+     * 表情列表**失败不能让整条解析中断** ——
+     * 实测这个接口经常报错，而它在卡片渲染之前，一抛异常就变成
+     * 「详情明明拿到了，卡片却一张都不发」（用户看到的就是「提示解析中然后没反应」）。
+     * 拿不到就用空表情表继续，卡片照样渲染，只是表情不做转换。
+     */
+    /**
+     * 表情表先用**空的**，卡片立刻渲染 —— 这是关键。
+     *
+     * 实测 `fetchEmojiList()` 会把整个流程卡死（既不返回也不报错，连 Promise.race
+     * 的超时都触发不了，说明事件循环被它拖住了），而它在卡片渲染**之前**，
+     * 结果就是「提示解析中，然后没反应，卡片一张都没有」。
+     * 现在把表情拉取挪到卡片发完之后，卡片不受影响，评论区再单独尝试。
+     */
+    // 注意必须是**数组**：buildXiaohongshuRichText 会直接迭代它（给 {} 会报 emojiData is not iterable）
+    let formattedEmojis: any[] = []
 
     // 笔记信息
     if (Config.xiaohongshu.sendContent.some((item) => item === 'info')) {
-      const noteInfoImg = await Render(this.e, 'xiaohongshu/noteInfo', {
-        title: NoteData.data.data.items[0].note_card!.title,
-        desc: buildXiaohongshuRichText(NoteData.data.data.items[0].note_card!.desc, formattedEmojis, [], {
+      logger.mark('[小红书] 准备渲染详情卡片: title=' + String(noteCard.title ?? '').slice(0, 20) +
+        ' 图片数=' + (Array.isArray(noteCard.image_list) ? noteCard.image_list.length : 0))
+      let noteInfoImg: any
+      try {
+        noteInfoImg = await Render(this.e, 'xiaohongshu/noteInfo', {
+        title: noteCard.title,
+        desc: buildXiaohongshuRichText(noteCard.desc, formattedEmojis, [], {
           stripTopicMarker: true
         }),
-        statistics: NoteData.data.data.items[0].note_card!.interact_info,
-        note_id: NoteData.data.data.items[0].note_card!.note_id,
-        author: NoteData.data.data.items[0].note_card!.user,
-        image_url: NoteData.data.data.items[0].note_card!.image_list[0].url_default,
-        time: NoteData.data.data.items[0].note_card!.time,
-        ip_location: NoteData.data.data.items[0].note_card!.ip_location,
+        statistics: noteCard.interact_info,
+        note_id: noteCard.note_id,
+        author: noteCard.user,
+        image_url: noteCard.image_list[0].url_default,
+        time: noteCard.time,
+        ip_location: noteCard.ip_location,
         share_url: `https://www.xiaohongshu.com/discovery/item/${data.note_id}?source=webshare&xhsshare=pc_web&xsec_token=${data.xsec_token}&xsec_source=pc_share`,
-        image_list: NoteData.data.data.items[0].note_card!.image_list?.map((image) => image.url_default) ?? [],
-        is_video: Boolean(NoteData.data.data.items[0].note_card!.video)
-      })
-      this.e.reply(noteInfoImg)
+        image_list: noteCard.image_list?.map((image) => image.url_default) ?? [],
+        is_video: Boolean(noteCard.video)
+        })
+      } catch (error: any) {
+        // 渲染失败要看得见，别又变成「提示解析中然后没反应」
+        logger.error('[小红书] 详情卡片渲染失败: ' + String(error?.message ?? error))
+        throw error
+      }
+      logger.mark('[小红书] 详情卡片渲染完成，准备发送')
+      await this.e.reply(noteInfoImg)
+      logger.mark('[小红书] 详情卡片已发送')
+    }
+
+    /**
+     * 卡片发完后再去拉表情表（给评论区做表情转换用）。
+     * 这里挂掉/超时都不影响已经发出去的卡片。
+     */
+    try {
+      const EmojiList = await Promise.race([
+        this.amagi.xiaohongshu.fetcher.fetchEmojiList(),
+        new Promise((resolve) => setTimeout(() => resolve(null), 8000))
+      ]) as any
+      if (EmojiList) {
+        formattedEmojis = XiaohongshuEmoji(EmojiList.data)
+        logger.mark('[小红书] 表情表已获取，共 ' + (Array.isArray(formattedEmojis) ? formattedEmojis.length : 0) + ' 条')
+      } else {
+        logger.warn('[小红书] 表情表超时（8s），评论区将不做表情转换')
+      }
+    } catch (error: any) {
+      logger.warn('[小红书] 表情表拉取失败（不影响卡片）: ' + String(error?.message ?? error).slice(0, 100))
+      formattedEmojis = []
     }
 
     // 评论列表
     if (Config.xiaohongshu.sendContent.some((item) => item === 'comment')) {
-      const CommentData = await this.fetchConfiguredNoteComments(data)
+      /**
+       * 评论同样**非致命**：上游这条链路本来就常报错，
+       * 但卡片（上面已经发过）不该因为评论拉不到就整条失败。
+       */
+      let CommentData: any
+      try {
+        // 评论同样加超时：上游这条链路本来就常挂，别把整条解析拖死
+        CommentData = await Promise.race([
+          this.fetchConfiguredNoteComments(data),
+          new Promise((resolve) => setTimeout(() => resolve(null), 15000))
+        ]) as any
+        if (!CommentData) throw new Error('拉取评论超时（15s）')
+      } catch (error: any) {
+        logger.warn('[小红书] 拉取评论失败（卡片不受影响）: ' + String(error?.message ?? error).slice(0, 120))
+        return
+      }
 
-      if (!CommentData.data.comments || CommentData.data.comments.length === 0) {
+      if (!CommentData?.data?.comments || CommentData.data.comments.length === 0) {
         await this.e.reply('这个笔记没有评论 ~')
       } else {
         // 使用简化的评论处理函数，直接返回评论数组
         const processedComments = await xiaohongshuComments(CommentData, formattedEmojis)
 
         const commentListImg = await Render(this.e, 'xiaohongshu/comment', {
-          Type: NoteData.data.data.items[0].note_card!.video ? '视频' : '图文',
+          Type: noteCard.video ? '视频' : '图文',
           CommentsData: processedComments,
           CommentLength: processedComments.length,
-          ImageLength: NoteData.data.data.items[0].note_card!.image_list?.length || 0,
+          ImageLength: noteCard.image_list?.length || 0,
           share_url: `https://www.xiaohongshu.com/discovery/item/${data.note_id}?source=webshare&xhsshare=pc_web&xsec_token=${data.xsec_token}&xsec_source=pc_share`
         })
         this.e.reply(commentListImg)
@@ -149,9 +225,9 @@ export class Xiaohongshu extends Base {
     }
 
     // 图片笔记
-    if (!NoteData.data.data.items[0].note_card!.video && Config.xiaohongshu.sendContent.includes('image')) {
+    if (!noteCard.video && Config.xiaohongshu.sendContent.includes('image')) {
       const processedImages: Elements[] = []
-      const title = NoteData.data.data.items[0].note_card!.title
+      const title = noteCard.title
       const temp: Array<{ filepath: string; totalBytes: number }> = []
       let hasGeneratedLivePhoto = false // 标记是否生成了实况图
 
@@ -165,7 +241,7 @@ export class Xiaohongshu extends Base {
       const mergeMode: LiveImageMergeOptions['mergeMode'] = 'continuous'
       let bgmContext: LiveImageMergeOptions['context'] | undefined = undefined
 
-      for (const [index, item] of NoteData.data.data.items[0].note_card!.image_list.entries()) {
+      for (const [index, item] of noteCard.image_list.entries()) {
         // 检查是否为实况图
         if (item.live_photo && item.stream && (shouldGenerateVideo || shouldGenerateLivePhoto)) {
           // 下载静态图片
@@ -316,8 +392,8 @@ export class Xiaohongshu extends Base {
     }
 
     // 视频笔记
-    if (NoteData.data.data.items[0].note_card!.video && Config.xiaohongshu.sendContent.includes('video')) {
-      const video = NoteData.data.data.items[0].note_card!.video
+    if (noteCard.video && Config.xiaohongshu.sendContent.includes('video')) {
+      const video = noteCard.video
 
       // 使用新的视频选择逻辑
       const selectedVideo = xiaohongshuProcessVideos(
