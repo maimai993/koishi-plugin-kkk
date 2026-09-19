@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import { buildMarkdownImageMessage } from '@/module/utils/QqPanel'
 import { sendSlicedImage } from '@/module/utils/ImageSlice'
 
 import {
@@ -305,17 +306,28 @@ export class Bilibili extends Base {
                   const imageUrl = await processImageUrl(v, infoData.data.data.title, index)
                   messageElements.push(segment.image(imageUrl))
                 }
-                const res = common.makeForward(
-                  messageElements,
-                  Config.app.fakeForward ? this.e.sender.userId : this.e.bot.account.selfId,
-                  Config.app.fakeForward ? this.e.sender.nick : this.e.bot.account.name
+                /**
+                 * 评论图片收集：**合并成一条 markdown**（QQ 官方 bot 上合并转发经常发不出去）。
+                 * md 里连续图片紧贴渲染，一条消息装完整套图；失败再退回转发。
+                 */
+                const mdMessage = await buildMarkdownImageMessage(
+                  messageElements.map((item: any) => String(item?.attrs?.src ?? '')).filter(Boolean)
                 )
-                await this.e.bot.sendForwardMsg(this.e.contact, res, {
-                  source: '评论图片收集',
-                  summary: `查看${messageElements.length}张图片`,
-                  prompt: 'B站评论解析结果',
-                  news: [{ text: '点击查看解析结果' }]
-                })
+                if (mdMessage) {
+                  await this.e.reply(mdMessage)
+                } else {
+                  const res = common.makeForward(
+                    messageElements,
+                    Config.app.fakeForward ? this.e.sender.userId : this.e.bot.account.selfId,
+                    Config.app.fakeForward ? this.e.sender.nick : this.e.bot.account.name
+                  )
+                  await this.e.bot.sendForwardMsg(this.e.contact, res, {
+                    source: '评论图片收集',
+                    summary: `查看${messageElements.length}张图片`,
+                    prompt: 'B站评论解析结果',
+                    news: [{ text: '点击查看解析结果' }]
+                  })
+                }
               }
 
               img = await Render(this.e, 'bilibili/comment', {
@@ -1156,17 +1168,28 @@ export class Bilibili extends Base {
                   const imageUrl = await processImageUrl(v, title, index)
                   messageElements.push(segment.image(imageUrl))
                 }
-                const res = common.makeForward(
-                  messageElements,
-                  Config.app.fakeForward ? this.e.sender.userId : this.e.bot.account.selfId,
-                  Config.app.fakeForward ? this.e.sender.nick : this.e.bot.account.name
+                /**
+                 * 评论图片收集：**合并成一条 markdown**（QQ 官方 bot 上合并转发经常发不出去）。
+                 * md 里连续图片紧贴渲染，一条消息装完整套图；失败再退回转发。
+                 */
+                const mdMessage = await buildMarkdownImageMessage(
+                  messageElements.map((item: any) => String(item?.attrs?.src ?? '')).filter(Boolean)
                 )
-                await this.e.bot.sendForwardMsg(this.e.contact, res, {
-                  source: '评论图片收集',
-                  summary: `查看${messageElements.length}张图片`,
-                  prompt: 'B站评论解析结果',
-                  news: [{ text: '点击查看解析结果' }]
-                })
+                if (mdMessage) {
+                  await this.e.reply(mdMessage)
+                } else {
+                  const res = common.makeForward(
+                    messageElements,
+                    Config.app.fakeForward ? this.e.sender.userId : this.e.bot.account.selfId,
+                    Config.app.fakeForward ? this.e.sender.nick : this.e.bot.account.name
+                  )
+                  await this.e.bot.sendForwardMsg(this.e.contact, res, {
+                    source: '评论图片收集',
+                    summary: `查看${messageElements.length}张图片`,
+                    prompt: 'B站评论解析结果',
+                    news: [{ text: '点击查看解析结果' }]
+                  })
+                }
               }
 
               // 渲染评论图

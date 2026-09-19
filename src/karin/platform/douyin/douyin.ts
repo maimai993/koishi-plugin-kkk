@@ -734,17 +734,30 @@ export class DouYin extends Base {
                 const imageUrl = await processImageUrl(v, VideoData.data.aweme_detail.desc, index)
                 messageElements.push(segment.image(imageUrl))
               }
-              const res = common.makeForward(
-                messageElements,
-                Config.app.fakeForward ? this.e.sender.userId : this.e.bot.account.selfId,
-                Config.app.fakeForward ? this.e.sender.nick : this.e.bot.account.name
+              /**
+               * 评论图片收集：**合并成一条 markdown** 发送。
+               *
+               * 原来是合并转发 —— 官方 bot 上转发经常发不出去，会退化成一张图一条消息。
+               * md 里连续图片是紧贴渲染的，一条消息就能装完整套图。
+               */
+              const mdMessage = await buildMarkdownImageMessage(
+                messageElements.map((item: any) => String(item?.attrs?.src ?? '')).filter(Boolean)
               )
-              await this.e.bot.sendForwardMsg(this.e.contact, res, {
-                source: '评论图片收集',
-                summary: `查看${messageElements.length}张图片`,
-                prompt: '抖音评论解析结果',
-                news: [{ text: '点击查看解析结果' }]
-              })
+              if (mdMessage) {
+                await this.e.reply(mdMessage)
+              } else {
+                const res = common.makeForward(
+                  messageElements,
+                  Config.app.fakeForward ? this.e.sender.userId : this.e.bot.account.selfId,
+                  Config.app.fakeForward ? this.e.sender.nick : this.e.bot.account.name
+                )
+                await this.e.bot.sendForwardMsg(this.e.contact, res, {
+                  source: '评论图片收集',
+                  summary: `查看${messageElements.length}张图片`,
+                  prompt: '抖音评论解析结果',
+                  news: [{ text: '点击查看解析结果' }]
+                })
+              }
             }
             // 评论卡可能极长（实测 2880x40000），交给切片+md 拼接发送，避免 QQ 拒收
             await sendSlicedImage(this.e, img)
