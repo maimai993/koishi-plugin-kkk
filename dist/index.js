@@ -1,0 +1,1 @@
+import{defineComponent as o,h as n}from"vue";const k="kkk-console";function r(e){e.page({name:"kkk 配置",path:"/kkk-config",desc:"解析面板 / 画质 / 番剧表格 / 图片切片等设置（保存写回 koishi.yml）",authority:4,icon:"settings",component:o({setup(){return()=>n("iframe",{src:"/kkk",style:"width:100%;height:calc(100vh - 120px);border:0;border-radius:8px;background:#fff"})}})})}export{r as apply,k as name};

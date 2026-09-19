@@ -649,7 +649,11 @@ export async function apply (ctx: Context, rawConfig: Config) {
   try {
     const consoleService: any = (ctx as any).console
     if (consoleService && typeof consoleService.addEntry === 'function') {
-      consoleService.addEntry({ prod: path.resolve(pluginRootDir, 'client') })
+      /**
+       * 指向 **dist**：官方工具 `koishi-console build .` 把浏览器端产物打到 dist/index.js。
+       * 之前指向 client，加载到的是源码 TS，浏览器解析不了 —— 侧边栏就一直看不到入口。
+       */
+      consoleService.addEntry({ prod: path.resolve(pluginRootDir, 'dist') })
     }
   } catch (error) {
     logger.debug('[kkk] 注册控制台入口失败: ' + String(error))

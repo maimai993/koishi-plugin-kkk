@@ -25,7 +25,7 @@ const target = targetIndex >= 0
 /** 运行时需要的文件/目录 */
 // assets：配置页模板（assets/webui.html）；
 // client：控制台入口（ctx.console.addEntry 会去这个目录找 index.js）
-const ENTRIES = ['package.json', 'lib', 'config', 'resources', 'assets', 'client', 'CHANGELOG.md', 'LICENSE']
+const ENTRIES = ['package.json', 'lib', 'config', 'resources', 'assets', 'client', 'CHANGELOG.md', 'LICENSE', 'dist']
 
 if (!existsSync(path.join(root, 'lib', 'index.js'))) {
   console.error('还没有构建产物，请先执行：node scripts/build.mjs')
