@@ -1,5 +1,5 @@
 import fs from 'node:fs'
-import { sendParseTip } from '@/module/utils/QqPanel'
+import { buildMarkdownImageMessage, sendParseTip } from '@/module/utils/QqPanel'
 
 import type { NoteComments, XiaohongshuEmojiListResponse } from '@ikenxuan/amagi'
 import type { RichTextEmojiDefinition } from '@kkk/richtext'
@@ -166,6 +166,32 @@ export class Xiaohongshu extends Base {
       logger.mark('[小红书] 详情卡片渲染完成，准备发送')
       await this.e.reply(noteInfoImg)
       logger.mark('[小红书] 详情卡片已发送')
+    }
+
+    /**
+     * **图文笔记的图片要发出来**（用户要求）。
+     *
+     * 之前只发了详情卡片，正文里的图片一张都没发 —— 用户看到的就是
+     * 「解析出来了图文，但图呢？」。这里和抖音图集一样：合并成**一条 markdown**
+     * （图片紧贴渲染，一条消息装完整套图）。
+     */
+    const noteImages: string[] = (noteCard.image_list ?? [])
+      .map((image: any) => String(image?.url_default ?? image?.url ?? ''))
+      .filter(Boolean)
+    if (!noteCard.video && noteImages.length) {
+      try {
+        const mdMessage = await buildMarkdownImageMessage(noteImages)
+        if (mdMessage) {
+          await this.e.reply(mdMessage)
+          logger.mark('[小红书] 图文图片已用一条 markdown 发送，共 ' + noteImages.length + ' 张')
+        } else {
+          // md 生成失败就逐张发，总比一张不发好
+          for (const imageUrl of noteImages) await this.e.reply(segment.image(imageUrl))
+          logger.mark('[小红书] md 生成失败，图文图片改为逐张发送，共 ' + noteImages.length + ' 张')
+        }
+      } catch (error: any) {
+        logger.warn('[小红书] 发送图文图片失败: ' + String(error?.message ?? error).slice(0, 120))
+      }
     }
 
     /**
