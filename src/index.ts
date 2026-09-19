@@ -91,6 +91,12 @@ export interface Config {
  */
 export const Config: Schema<Config> = Schema.intersect([
   Schema.object({
+    webuiGuide: Schema.const('').description(
+      '这里只放基础项和上游配置。**解析相关的设置（面板、画质、番剧表格、图片切片、OCR 等）请到 WebUI 修改**：' +
+      '浏览器打开 **/kkk**（免登录，改完直接写回 koishi.yml），或点左侧边栏的「kkk 配置」。' +
+      '下面的「高级设置」默认折叠，一般不用动。'
+    ),
+    advanced: Schema.object({
     masters: Schema.array(Schema.string()).default([]).description('主人账号，用于接收报错通知等'),
     dataPath: Schema.string().default('data').description('数据目录（配置、数据库、临时文件）'),
     debug: Schema.boolean().default(false).description('输出调试日志'),
@@ -124,6 +130,7 @@ export const Config: Schema<Config> = Schema.intersect([
     bangumiPanelRows: Schema.number().default(4).description(
       '番剧分集表格的**行数**（默认 4，含第一行表头）。一行 5 × 一页 4 行 = 每页 20 集。'
     )
+    }).description('高级设置（一般不用改；解析相关设置建议用 WebUI）'),
   }),
   Schema.object({
     upstream: buildUpstreamSchema(pluginRootDir).description(
@@ -622,9 +629,17 @@ function registerCommands (
   })
 }
 
-export async function apply (ctx: Context, config: Config) {
+export async function apply (ctx: Context, rawConfig: Config) {
   const logger = ctx.logger('kkk')
   setLogger(logger)
+
+  /**
+   * 控制台里把选项包在「高级设置」里（折叠起来，避免一屏全是开关），
+   * 这里统一摊平回顶层 —— 代码里照旧读 config.qqPanel / config.sliceImageOnDemand 等。
+   * 同时把引导项（webuiGuide）丢掉，它只是个提示。
+   */
+  const { webuiGuide: _guide, advanced, ...rest } = rawConfig as any
+  const config = { ...rest, ...(advanced ?? {}) } as Config
 
   /**
    * 配置 WebUI：一个独立小页面（/kkk，口令见 webUiPassword，默认 131425），

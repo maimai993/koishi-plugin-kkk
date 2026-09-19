@@ -141,6 +141,18 @@ export const sendSlicedImage = async (e: Message, input: any): Promise<boolean> 
    * 关掉开关就一律普通发送（超高的卡会被 QQ 拒收，但这是用户的选择）。
    */
   const runtimeConfig: any = (tryGetRuntime()?.config as any) ?? {}
+  /**
+   * **切片只在 QQ 适配器上生效**（用户要求）。
+   *
+   * 切片是为了绕开 QQ 官方 bot 的图片上传限制（单图体积/像素上限），
+   * 其它平台没这个问题，硬切只会增加消息条数、破坏观感。
+   */
+  const platform = String((e as any)?.bot?.bot?.platform ?? (e as any)?.platform ?? (e as any)?.bot?.platform ?? '')
+  if (platform && !/qq/i.test(platform)) {
+    logger.debug('[图片切片] 当前平台 ' + platform + ' 不是 QQ，按普通图片发送')
+    await e.reply(segment.image(source))
+    return true
+  }
   const onDemand = runtimeConfig.sliceImageOnDemand !== false
   const sliceHeight = Math.max(300, Number(runtimeConfig.sliceImageHeight) || SLICE_HEIGHT)
   const IMAGE_SIZE_LIMIT = 20 * 1024 * 1024
@@ -311,6 +323,12 @@ export const sliceImageToMarkdown = async (input: any): Promise<any | null> => {
     : String(first?.attrs?.src ?? first?.data?.file ?? first?.data?.url ?? '')
   if (!source) return null
   const runtimeConfig: any = (tryGetRuntime()?.config as any) ?? {}
+  // 合并成一条 markdown 也是 QQ 专属优化（绕过图片上传限制）：其它平台逐张发即可
+  const platform = String((e as any)?.bot?.bot?.platform ?? (e as any)?.platform ?? (e as any)?.bot?.platform ?? '')
+  if (platform && !/qq/i.test(platform)) {
+    for (const one of valid) await e.reply(segment.image(one))
+    return true
+  }
   const sliceHeight = Math.max(300, Number(runtimeConfig.sliceImageHeight) || SLICE_HEIGHT)
   const tmpDir = path.join(os.tmpdir(), 'kkk-sliceonly-' + Date.now())
   try {

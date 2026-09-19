@@ -18,9 +18,9 @@
       "kuaishou": "",
       "xiaohongshu": ""
     },
-    "APIServer": false,
+    "APIServer": true,
     "APIServerMount": true,
-    "APIServerPort": 4568
+    "APIServerPort": 4567
   },
   "app": {
     "videoTool": true,
@@ -35,11 +35,10 @@
     },
     "RenderWaitTime": 120,
     "EmojiReply": true,
-    "parseTip": false,
+    "parseTip": true,
     "fakeForward": true,
     "errorLogSendTo": [
-      "trigger",
-      "admin"
+      "trigger"
     ],
     "multiPageRender": true,
     "multiPageHeight": 12000,
@@ -47,14 +46,14 @@
     "livePhotoMode": "video_and_livephoto",
     "qrLoginAddrType": "lan",
     "qrLoginExternalAddr": "",
-    "videoSendMode": "base64",
-    "usefilelimit": false,
-    "filelimit": 2000,
+    "videoSendMode": "file",
+    "usefilelimit": true,
+    "filelimit": 200,
     "compress": false,
     "compresstrigger": 200,
     "compressvalue": 100,
-    "usegroupfile": false,
-    "groupfilevalue": 200,
+    "usegroupfile": true,
+    "groupfilevalue": 100,
     "imageSendMode": "base64",
     "downloadThrottle": false,
     "downloadMaxSpeed": 10,
@@ -62,7 +61,8 @@
     "downloadMinSpeed": 1,
     "APIServer": true,
     "APIServerPort": 4567,
-    "APIServerMount": true
+    "APIServerMount": true,
+    "ocrApiKey": ""
   },
   "douyin": {
     "switch": true,
@@ -79,13 +79,7 @@
     "maxAutoVideoSize": 1000,
     "loginPerm": "master",
     "videoInfoMode": "image",
-    "displayContent": [
-      "author",
-      "desc",
-      "stats",
-      "cover",
-      "title"
-    ],
+    "displayContent": [],
     "burnDanmaku": false,
     "danmakuArea": 0.5,
     "danmakuFontSize": "medium",
@@ -120,30 +114,20 @@
     "loginPerm": "master",
     "imageLayout": "auto",
     "videoInfoMode": "image",
-    "displayContent": [
-      "author",
-      "stats",
-      "cover",
-      "title",
-      "desc"
-    ],
+    "displayContent": [],
     "showDanmakuInVideoInfo": true,
     "burnDanmaku": false,
     "danmakuArea": 0.5,
     "danmakuFontSize": "medium",
     "danmakuOpacity": 70,
-    "verticalMode": "standard",
+    "verticalMode": "off",
     "videoCodec": "h265",
     "push": {
       "switch": true,
       "permission": "all",
       "cron": "*/10 * * * *",
       "parsedynamic": true,
-      "parseDynamicTypes": [
-        "DYNAMIC_TYPE_AV",
-        "DYNAMIC_TYPE_DRAW",
-        "DYNAMIC_TYPE_ARTICLE"
-      ],
+      "parseDynamicTypes": [],
       "pushVideoQuality": 120,
       "pushMaxAutoVideoSize": 1000
     }
@@ -157,8 +141,8 @@
     "switch": true,
     "watermark": false,
     "sendContent": [
-      "comment",
       "info",
+      "comment",
       "video",
       "image"
     ],
