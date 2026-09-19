@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./assets/readme/banner-d-render-gallery.svg" width="100%" alt="koishi-plugin-kkk 的视频详情、抖音评论、B站动态推送和解析统计动画成果墙">
+  <img src="./banner-d-render-gallery.svg" width="100%" alt="koishi-plugin-kkk 的视频详情、抖音评论、B站动态推送和解析统计动画成果墙">
 </p>
 
 <p align="center">
