@@ -84,14 +84,24 @@ export class Xiaohongshu extends Base {
   }
 
   async XiaohongshuHandler(data: XiaohongshuIdData) {
+    // 诊断：把入参和每一步的结果打出来，定位「只提示不解析」卡在哪
+    logger.mark('[小红书] 开始解析: note_id=' + String(data?.note_id ?? '（空）') + ' xsec_token=' + (data?.xsec_token ? '有' : '（空）') + ' type=' + String(this.type))
     if (Config.amagi.cookies.xiaohongshu === '') {
       throw new Error('我还没有小红书的 Cookies，暂时无法解析呢 ~')
     }
     await sendParseTip(this.e, '小红书')
-    const NoteData = await this.amagi.xiaohongshu.fetcher.fetchNoteDetail({
-      note_id: data.note_id,
-      xsec_token: data.xsec_token
-    })
+    let NoteData: any
+    try {
+      NoteData = await this.amagi.xiaohongshu.fetcher.fetchNoteDetail({
+        note_id: data.note_id,
+        xsec_token: data.xsec_token
+      })
+    } catch (error: any) {
+      logger.error('[小红书] 拉取笔记详情失败: ' + String(error?.message ?? error))
+      throw error
+    }
+    const noteItems = NoteData?.data?.data?.items
+    logger.mark('[小红书] 笔记详情返回: items=' + (Array.isArray(noteItems) ? noteItems.length : '（不是数组 ✗）'))
     // 统计用的内容形态：有视频流算视频笔记，否则算图文（与 noteInfo/comment 模板里的判定一致）
     this.workType = NoteData.data.data.items[0].note_card!.video ? 'video' : 'gallery'
     const EmojiList = await this.amagi.xiaohongshu.fetcher.fetchEmojiList()
