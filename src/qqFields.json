@@ -1,0 +1,75 @@
+[
+  {
+    "key": "qqPanel",
+    "group": "解析面板",
+    "type": "boolean",
+    "default": true,
+    "label": "链接解析面板",
+    "description": "QQ 里收到链接时先回一条带按钮的面板，让用户自己挑解析内容和画质，点一下才开始下载。关掉就直接按默认配置解析。"
+  },
+  {
+    "key": "recallPanel",
+    "group": "解析面板",
+    "type": "boolean",
+    "default": true,
+    "label": "自动撤回面板",
+    "description": "用户在面板上点完按钮后，自动把上一条面板消息撤回，群里不会堆着一排旧面板。"
+  },
+  {
+    "key": "qqFileLimitMB",
+    "group": "解析面板",
+    "type": "number",
+    "default": 200,
+    "min": 1,
+    "max": 2000,
+    "label": "画质档体积上限（MB）",
+    "description": "面板里体积超过这个值的画质档直接不显示。QQ 单个视频上限 200MB，选了也发不出去，所以默认 200。"
+  },
+  {
+    "key": "bangumiPanelCols",
+    "group": "番剧选集面板",
+    "type": "number",
+    "default": 5,
+    "min": 1,
+    "max": 10,
+    "label": "表格列数",
+    "description": "番剧分集面板每行放几个集数，默认 5。"
+  },
+  {
+    "key": "bangumiPanelRows",
+    "group": "番剧选集面板",
+    "type": "number",
+    "default": 4,
+    "min": 1,
+    "max": 10,
+    "label": "表格行数",
+    "description": "番剧分集面板每页几行（含表头那一行），默认 4 行。列数 × 行数就是每页的集数。"
+  },
+  {
+    "key": "sliceImageOnDemand",
+    "group": "图片发送",
+    "type": "boolean",
+    "default": true,
+    "label": "超大图片自动切片",
+    "description": "长图（评论区那种）默认按普通图片发；只有超过 20MB 或者发送失败（拿不到消息 ID）时才自动切成几片，再用一条 markdown 拼回一整张。关掉就一律按普通图片发。"
+  },
+  {
+    "key": "sliceImageHeight",
+    "group": "图片发送",
+    "type": "number",
+    "default": 2000,
+    "min": 500,
+    "max": 4000,
+    "label": "切片高度（像素）",
+    "description": "切片时每片的高度，默认 2000。越大片数越少、字越小；越小越清晰、片数越多。"
+  },
+  {
+    "key": "ocrApiKey",
+    "group": "卡片识别",
+    "type": "string",
+    "default": "",
+    "label": "卡片文字识别密钥",
+    "secret": true,
+    "description": "群里转发过来的分享卡片没有链接，只能靠截图识别出标题和作者再去搜索。填自己的免费密钥更稳定：https://ocr.space/ocrapi 。留空会用公共测试密钥，容易被限流。"
+  }
+]

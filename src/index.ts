@@ -17,6 +17,7 @@ import { startScheduler } from './compat/cron'
 import { setLogger } from './compat/logger'
 import { Message, NEXT } from './compat/node-karin'
 import { bindRuntime, commandPrefixes, commandQueue, eventQueue, taskQueue, tryGetRuntime } from './compat/runtime'
+import { buildQqSchema, QQ_KEYS, readQqOptions } from './qqOptions'
 import { registerWebUi } from './webui'
 import { applyUpstreamOverrides } from './configBridge'
 import { resolveQqCardContent } from './karin/module/utils/QqCardResolve'
@@ -89,48 +90,22 @@ export interface Config {
  * 发送内容（\`*.sendContent\`）、渲染（\`app.renderScale\`）、推送（\`pushlist\`）等上游选项都会出现在控制台里。
  * 这里能改的项会被写回数据目录的 config.json（见 configBridge），在那之前 config.json 仍是权威来源。
  */
+/** 摊平后由「Koishi 原生设置」分组提供的字段 */
+const NATIVE_KEYS = ['masters', 'dataPath', 'debug', 'autoParse']
+
 export const Config: Schema<Config> = Schema.intersect([
   Schema.object({
     webuiGuide: Schema.const('').description(
-      '这里只放基础项和上游配置。**解析相关的设置（面板、画质、番剧表格、图片切片、OCR 等）请到 WebUI 修改**：' +
-      '浏览器打开 **/kkk**（免登录，改完直接写回 koishi.yml），或点左侧边栏的「kkk 配置」。' +
-      '下面的「高级设置」默认折叠，一般不用动。'
+      '**QQ 相关的开关都在下面的「QQ 适配器」分组里**（解析面板、画质档、图片切片、番剧选集表格、卡片识别）。' +
+      '也可以直接在浏览器打开 **/kkk** 改 —— 左侧边栏「kkk 配置」就是它，免登录、改完立即生效。'
     ),
+    qq: buildQqSchema(Schema).description('QQ 适配器（只对 QQ 平台生效）'),
     advanced: Schema.object({
-    masters: Schema.array(Schema.string()).default([]).description('主人账号，用于接收报错通知等'),
-    dataPath: Schema.string().default('data').description('数据目录（配置、数据库、临时文件）'),
-    debug: Schema.boolean().default(false).description('输出调试日志'),
-    autoParse: Schema.boolean().default(true).description('消息中的链接自动解析'),
-    qqPanel: Schema.boolean().default(true).description(
-      'QQ 平台解析前先发交互面板：用原生 Markdown + 按钮让用户选「纯视频 / 视频＋弹幕」和画质，点按钮才开始解析。' +
-      '其它平台不受影响。'
-    ),
-    qqFileLimitMB: Schema.number().default(200).description(
-      'QQ 面板里隐藏超过该体积（MB）的画质按钮。QQ 富媒体上传对视频的硬限制是 200MB（超过软限制 30MB 会降级成文件发送），' +
-      '所以默认 200：点了也发不出去的档位干脆不显示。'
-    ),
-    sliceImageOnDemand: Schema.boolean().default(true).description(
-      '评论区卡片过大时**自动切片**发送（默认开启）。\n' +
-      '- 开：先按普通图片发一次；**超过 20MB** 或**发送失败（拿不到消息 ID）**时才切成多片，' +
-      '再用一条 markdown 无缝拼接发送，视觉上仍是一整张\n' +
-      '- 关：一律按普通图片发送（卡片太高时 QQ 会直接拒收）'
-    ),
-    sliceImageHeight: Schema.number().default(2000).description(
-      '切片高度（像素，默认 2000）。越小每片显示得越清晰、但片数越多；越大片数越少、字越小。'
-    ),
-    ocrApiKey: Schema.string().description('卡片解析用的 OCR 接口密钥（OCR.space，免费申请：https://ocr.space/ocrapi）。' +
-      '群里转发的分享卡片没有链接，插件会 OCR 卡片封面拿标题/UP 主名，再搜索定位作品。' +
-      '留空则使用公共测试 key（helloworld），它很容易被限流返回空结果。'),
-    recallPanel: Schema.boolean().default(true).description(
-      '面板操作后自动**撤回上一条面板消息**：选集 → 选清晰度 → 下载，每步都会撤掉上一步的面板，群里不会越堆越多。'
-    ),
-    bangumiPanelCols: Schema.number().default(5).description(
-      '番剧分集表格的**列数**（默认 5）。分集按倒序排列，整页格子都是可选集数，翻页在表格下方。'
-    ),
-    bangumiPanelRows: Schema.number().default(4).description(
-      '番剧分集表格的**行数**（默认 4，含第一行表头）。一行 5 × 一页 4 行 = 每页 20 集。'
-    )
-    }).description('高级设置（一般不用改；解析相关设置建议用 WebUI）'),
+    masters: Schema.array(Schema.string()).default([]).description('主人账号（QQ 号）：接收报错通知，以及执行只有主人能用的指令'),
+    dataPath: Schema.string().default('data').description('数据目录：配置、数据库、临时文件都放在这里'),
+    debug: Schema.boolean().default(false).description('在日志里输出调试信息，排查问题时才需要打开'),
+    autoParse: Schema.boolean().default(true).description('群里有人发链接（或回复一条带链接的消息）就自动解析，不用打指令'),
+    }).collapse().description('Koishi 原生设置（一般不用改，已折叠）'),
   }),
   Schema.object({
     upstream: buildUpstreamSchema(pluginRootDir).description(
@@ -153,12 +128,17 @@ export const usage = `
 在 QQ 平台，解析前会先回一条 Markdown + 按钮的面板，按钮点的就是上面这些指令
 （\`解析 <链接> --qn=80\` 之类），可选解析内容（纯视频 / 弹幕）与画质，见 \`qqPanel\`。
 
-配置分两块：
+配置分三块（控制台表单里就是三个分组）：
 
-1. **集成选项**（上面几项）：主人账号、数据目录、调试日志等 Koishi 侧设置，存在 koishi.yml；
-2. **\`upstream\`**：与 Karin 版 \`config.json\` 同构的全部业务配置（清晰度、发送内容、渲染、推送列表…），
+1. **QQ 适配器**：只对 QQ 平台生效的开关 —— 解析面板、自动撤回、画质档体积、番剧选集表格、图片切片、卡片识别密钥；
+2. **Koishi 原生设置**（默认折叠）：主人账号、数据目录、调试日志、链接自动解析；
+3. **\`upstream\`**：与 Karin 版 \`config.json\` 同构的全部业务配置（清晰度、发送内容、渲染、推送列表…），
    每个字段的说明都来自上游 Karin 版的字段注释，**默认值也来自上游那份默认配置**（所以表单里不会是空白），
    枚举型字段（清晰度、发送内容、权限 all/admin/master/group.owner/group.admin 等）是从注释里解析出来的下拉框。
+
+三块都能在浏览器面板 **/kkk** 里改（左侧边栏「kkk 配置」打开的也是它，免登录，改完立即生效、不用重启）：
+面板里除了原版那几个分类，还多了一个「QQ 适配器」分类 —— 它和上面第 1 组共用同一份字段定义（\`src/qqFields.json\`），
+保存时 QQ 适配器写回插件配置、其余写回 config.json。
 
 **改过的项**（与上游默认值不同）会在启动时写回数据目录下的 \`config/config.json\`；
 保持默认值的项一律不写，所以你也可以直接编辑那个文件，不会被表单里的默认值覆盖。
@@ -634,18 +614,61 @@ export async function apply (ctx: Context, rawConfig: Config) {
   setLogger(logger)
 
   /**
-   * 控制台里把选项包在「高级设置」里（折叠起来，避免一屏全是开关），
+   * 控制台表单把选项分成两个折叠组（「QQ 适配器」和「Koishi 原生设置」），
    * 这里统一摊平回顶层 —— 代码里照旧读 config.qqPanel / config.sliceImageOnDemand 等。
    * 同时把引导项（webuiGuide）丢掉，它只是个提示。
+   * qq 组放最后：它优先于早期直接写在顶层的同名字段。
    */
-  const { webuiGuide: _guide, advanced, ...rest } = rawConfig as any
-  const config = { ...rest, ...(advanced ?? {}) } as Config
+  const raw = (rawConfig ?? {}) as any
+  const { webuiGuide: _guide, advanced, qq, upstream, ...rest } = raw
+
+  /**
+   * 早期的版本把这些开关直接写在配置顶层（`masters` / `qqPanel` …），
+   * 现在它们分别在「Koishi 原生设置」和「QQ 适配器」分组里。
+   * 顶层的旧值要**压过**分组里的默认值 —— 否则 schema 的 default 会把用户原来的设置盖掉
+   * （踩过一次：masters / debug / ocrApiKey 被默认值吃掉了）。
+   */
+  const legacy: any = {}
+  for (const key of [...NATIVE_KEYS, ...QQ_KEYS]) {
+    if (raw[key] !== undefined) legacy[key] = raw[key]
+  }
+  const groupQq: any = { ...(qq ?? {}) }
+  const groupNative: any = { ...(advanced ?? {}) }
+  for (const key of QQ_KEYS) if (legacy[key] !== undefined) groupQq[key] = legacy[key]
+  for (const key of NATIVE_KEYS) if (legacy[key] !== undefined) groupNative[key] = legacy[key]
+
+  // 注意 upstream 要放回去：它被解构出来了，漏掉的话 WebUI / configBridge 就拿不到上游配置了
+  const config = { ...rest, upstream, ...groupNative, ...groupQq } as Config
+
+  /**
+   * 顺手把顶层遗留项搬进分组并写回 koishi.yml（只做一次：写回后顶层就没有这些键了）。
+   * 不搬的话，控制台表单里显示的是默认值、和实际生效的值不一致，很容易改错。
+   */
+  if (Object.keys(legacy).length) {
+    // 放到 ready 之后再写：scope.update 会热重载本插件，在 apply 里直接写会和本次启动抢注册
+    // （踩过：控制台报 duplicate option name "qn" for command "解析"）
+    const migrate = async () => {
+      const scope: any = (ctx as any).scope
+      if (typeof scope?.update !== 'function') return
+      const next: any = { ...rest, upstream }
+      for (const key of [...NATIVE_KEYS, ...QQ_KEYS]) delete next[key]
+      if (Object.keys(groupQq).length) next.qq = groupQq
+      if (Object.keys(groupNative).length) next.advanced = groupNative
+      try {
+        await scope.update(next)
+        logger.info('[kkk] 已把配置文件顶层的旧选项迁移到「QQ 适配器」/「Koishi 原生设置」分组')
+      } catch (error: any) {
+        logger.warn('[kkk] 迁移旧配置项失败（不影响本次运行）: ' + String(error?.message ?? error))
+      }
+    }
+    ctx.on('ready', () => { ctx.setTimeout(() => { void migrate() }, 2000) })
+  }
 
   /**
    * 配置 WebUI：一个独立小页面（/kkk，口令见 webUiPassword，默认 131425），
    * 保存时走 ctx.scope.update 写回 koishi.yml 并热重载；控制台里也注册了入口页面（见 client/index.js）。
    */
-  registerWebUi({ ctx, config, logger, pluginRoot: pluginRootDir })
+  registerWebUi({ ctx, config, rawConfig: rawConfig as any, logger, pluginRoot: pluginRootDir })
   try {
     const consoleService: any = (ctx as any).console
     if (consoleService && typeof consoleService.addEntry === 'function') {

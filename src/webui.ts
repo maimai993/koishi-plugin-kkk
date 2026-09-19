@@ -24,17 +24,21 @@ import path from 'node:path'
 
 import type { Context } from 'koishi'
 
+import { QQ_KEYS, readQqOptions } from './qqOptions'
+
 const COOKIE_NAME = 'kkk_config_token'
 const TOKEN_TTL = 7 * 24 * 60 * 60 * 1000
 
 export interface WebUiDeps {
   ctx: Context
   config: any
+  /** 控制台表单里那份「分组」配置（qq / advanced / upstream），保存时照它写回去，保持 koishi.yml 整齐 */
+  rawConfig?: any
   logger: any
   pluginRoot: string
 }
 
-export function registerWebUi ({ ctx, config, logger, pluginRoot }: WebUiDeps) {
+export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: WebUiDeps) {
   const server: any = (ctx as any).server
   if (!server || typeof server.get !== 'function') {
     logger.debug('[kkk] 没有 server 服务，跳过配置 WebUI')
@@ -70,22 +74,25 @@ export function registerWebUi ({ ctx, config, logger, pluginRoot }: WebUiDeps) {
    */
   const autoLoginScript = `<script>
 (function () {
-  var tries = 0;
-  var timer = setInterval(function () {
-    if (++tries > 80) { clearInterval(timer); return; }
-    var input = document.querySelector('input[type=password], input[type=text]');
-    var button = document.querySelector('button[type=submit], form button, button');
-    if (!input || !button) return;
-    clearInterval(timer);
-    try {
-      // React 受控组件：直接改 value 不会触发 onChange，必须走原生 setter + 派发 input 事件
-      var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-      setter.call(input, 'koishi');
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.dispatchEvent(new Event('change', { bubbles: true }));
-    } catch (e) { input.value = 'koishi'; }
-    setTimeout(function () { try { button.click(); } catch (e) { } }, 400);
-  }, 400);
+  // 面板把登录态存在 localStorage 的 accessToken / userId / refreshToken 三个键里，
+  // 登录页只是个表单壳子 —— 与其去点 DOM（React 受控组件很脆），不如直接调登录接口把凭据写进去再刷新。
+  try {
+    if (localStorage.getItem('accessToken')) return;
+    // 防呆：万一接口一直不给凭据，也别在这里无限刷新
+    if (sessionStorage.getItem('kkk-autologin') === '1') return;
+    sessionStorage.setItem('kkk-autologin', '1');
+    fetch('/kkk/api/v1/login', { credentials: 'include' })
+      .then(function (res) { return res.json() })
+      .then(function (res) {
+        var data = res && res.data;
+        if (!data || !data.accessToken) return;
+        localStorage.setItem('userId', String(data.userId || 'kkk'));
+        localStorage.setItem('accessToken', data.accessToken);
+        localStorage.setItem('refreshToken', data.refreshToken || '');
+        location.reload();
+      })
+      .catch(function () {});
+  } catch (e) { /* 无痕模式可能禁用 localStorage，那就让用户自己登 */ }
 })();
 </script>`
 
@@ -116,6 +123,26 @@ export function registerWebUi ({ ctx, config, logger, pluginRoot }: WebUiDeps) {
       } catch { /* 试下一个 cookie */ }
     }
     return false
+  }
+
+  /**
+   * 整理写回 koishi.yml 的那份配置：QQ 适配器的字段统一收进 `qq` 分组。
+   *
+   * 早期版本这些开关直接写在顶层，摊平时 `qq` 优先，清掉顶层那份免得两边数值打架
+   * （用户会看到表单和实际生效值不一致）。
+   */
+  const normalize = (source: any) => {
+    const next: any = { ...source }
+    const group = { ...readQqOptions(source), ...(next.qq ?? {}) }
+    let used = !!next.qq
+    for (const key of QQ_KEYS) {
+      if (next[key] !== undefined) {
+        used = true
+        delete next[key]
+      }
+    }
+    if (used) next.qq = group
+    return next
   }
 
   const tokens = new Map<string, number>()
@@ -193,8 +220,10 @@ export function registerWebUi ({ ctx, config, logger, pluginRoot }: WebUiDeps) {
   server.get('/kkk/v1/config', (response: any) => {
     if (!authed(response)) return fail(response, 401, '鉴权失败: 缺少authorization')
     // 面板面向的是 karin 那份 config.json（画质 / 发送内容 / 推送 / 渲染…），
-    // 在 Koishi 这边它就存在 `upstream` 里，启动时同步进 config.json
-    ok(response, config?.upstream ?? {}, '')
+    // 在 Koishi 这边它就存在 `upstream` 里，启动时同步进 config.json。
+    // 另外附一份 `qq`（「QQ 适配器」分类）：面板/切片/番剧选集/卡片识别这些是 Koishi 侧才有的开关，
+    // 面板里作为独立分类显示，保存时由下面的 POST 拆出来写回 koishi.yml。
+    ok(response, { ...(config?.upstream ?? {}), qq: readQqOptions(config) }, '')
   })
 
   server.post('/kkk/v1/config', async (response: any) => {
@@ -202,10 +231,17 @@ export function registerWebUi ({ ctx, config, logger, pluginRoot }: WebUiDeps) {
     try {
       const body: any = response.request?.body
       if (!body || typeof body !== 'object') throw new Error('请求体不是配置对象')
-      // 原版面板发过来的是整份配置；这里把它整体写进 upstream，
-      // 保存会走 scope.update → 落盘 koishi.yml → 热重载 → 启动时同步回 config.json
-      await (ctx as any).scope.update({ ...config, upstream: body })
-      logger.info('[kkk] 配置面板已保存 upstream 配置（写回 koishi.yml）')
+      // 原版面板发过来的是整份配置：
+      //   - `qq`（面板里的「QQ 适配器」分类）→ 写回插件自己的配置（koishi.yml）
+      //   - 其余整份 → upstream（Karin 版的 config.json 形状）
+      // 保存都走 scope.update → 落盘 koishi.yml → 热重载 → 启动时同步回 config.json
+      const { qq, ...upstream } = body
+      await (ctx as any).scope.update(normalize({
+        ...(rawConfig ?? config),
+        ...(qq && typeof qq === 'object' ? { qq: { ...readQqOptions(config), ...qq } } : {}),
+        upstream
+      }))
+      logger.info('[kkk] 配置面板已保存（QQ 适配器 → 插件配置，其余 → upstream，写回 koishi.yml）')
       ok(response, null, '已保存')
     } catch (error: any) {
       logger.warn('[kkk] 配置面板保存失败: ' + String(error?.message ?? error))
@@ -300,7 +336,7 @@ export function registerWebUi ({ ctx, config, logger, pluginRoot }: WebUiDeps) {
     try {
       const body: any = response.request?.body || {}
       const patch: any = { ...(body.options || {}) }
-      const next: any = { ...config, ...patch }
+      const next: any = normalize({ ...config, ...patch })
       if (body.upstream && typeof body.upstream === 'object') next.upstream = body.upstream
       if (typeof (ctx as any).scope?.update !== 'function') throw new Error('当前上下文不支持 scope.update')
       await (ctx as any).scope.update(next)
