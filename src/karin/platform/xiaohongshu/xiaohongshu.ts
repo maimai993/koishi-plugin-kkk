@@ -1,5 +1,6 @@
 import fs from 'node:fs'
-import { buildMarkdownImageMessage, sendParseTip } from '@/module/utils/QqPanel'
+import { buildMarkdownImageMessage } from '@/module/utils/QqPanel'
+import { sendParseTip } from '@/module/utils/parseTip'
 
 import type { NoteComments, XiaohongshuEmojiListResponse } from '@ikenxuan/amagi'
 import type { RichTextEmojiDefinition } from '@kkk/richtext'

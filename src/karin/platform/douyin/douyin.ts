@@ -1,7 +1,8 @@
 import fs from 'node:fs'
 import { sendSlicedImage } from '@/module/utils/ImageSlice'
 import { buildMarkdownImageMessage } from '@/module/utils/QqPanel'
-import { sendParseTip } from '@/module/utils/QqPanel'
+import { sendParseTip } from '@/module/utils/parseTip'
+import { sendParseTip } from '@/module/utils/parseTip'
 
 import { type DouyinEmojiListResponse, DouyinVideoWorkResponse } from '@ikenxuan/amagi'
 import type { RichTextEmojiDefinition } from '@kkk/richtext'

@@ -1,7 +1,9 @@
 import type { KuaishouVideoWorkResponse } from '@ikenxuan/amagi'
 import { logger, type Message } from 'node-karin'
 
-import { Base, downloadVideo, extractTotalBytesFromHeaders, Networks, Render, sendParseTip } from '@/module'
+import { Base, downloadVideo, extractTotalBytesFromHeaders, Networks, Render } from '@/module'
+// sendParseTip 单独导入：它在一个无依赖的叶子模块里，避免和平台模块形成循环 import
+import { sendParseTip } from '@/module/utils/parseTip'
 import type { ParseWorkType } from '@/module/db'
 import { Config } from '@/module/utils/Config'
 import { kuaishouComments, type KuaishouDataResult, type KuaishouOneWorkPayload } from '@/platform/kuaishou'
@@ -70,6 +72,16 @@ export class Kuaishou extends Base {
       : (work?.result === 1 || work?.status === 1 || work?.status === true || work?.status === 'ok')
     if (!video_url && !statusOk) {
       await this.e.reply('接口没有返回视频直链，稍后再试试')
+      return true
+    }
+    /**
+     * **风控/验证码要单独说清楚**：快手有时直接返回带 `captcha` 的响应而不是作品数据
+     * （本次诊断日志里就能看到 顶层键=["visionVideoDetail","captcha"]）。
+     * 这种情况拿去当「不支持解析的视频」会让人以为链接有问题，其实等一会儿/换网络就好。
+     */
+    if (work?.captcha !== undefined || rawWork?.captcha !== undefined) {
+      logger.warn('[快手] 接口返回了验证码（风控），本次无法解析')
+      await this.e.reply('快手这次返回了验证码（风控拦截），过一会儿或换个网络再试试 ~')
       return true
     }
     if (!video_url) {
