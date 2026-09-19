@@ -14,6 +14,12 @@ export interface XiaohongshuCommentData {
   share_url: string
   /** 评论数据 - 简化为直接的评论数组 */
   CommentsData: XiaohongshuCommentItem[]
+  /**
+   * 取不到评论数据时显示在卡片里的提示文案。
+   * 接口报错时不该只显示干巴巴的「暂无评论」，也不该让机器人另外发一条文字 ——
+   * 直接把原因写进卡片，看起来仍然是一张完整的评论卡。
+   */
+  ErrorText?: string
 }
 
 /** xiaohongshu板块共享类型（跨模板复用 / core 引用）。 */

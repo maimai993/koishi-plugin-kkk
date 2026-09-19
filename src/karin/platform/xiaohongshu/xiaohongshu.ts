@@ -263,6 +263,8 @@ export class Xiaohongshu extends Base {
               CommentsData: [],
               CommentLength: 0,
               ImageLength: noteCard.image_list?.length || 0,
+              // 提示直接写进卡片（模板的 ErrorText），不再单独发文字、也不带 emoji
+              ErrorText: '评论数据获取失败，稍后再试试',
               share_url: 'https://www.xiaohongshu.com/discovery/item/' + data.note_id
             })
             await this.e.reply(emptyCommentCard)
@@ -270,7 +272,7 @@ export class Xiaohongshu extends Base {
           } catch (renderError: any) {
             logger.warn('[小红书] 空评论卡渲染失败: ' + String(renderError?.message ?? renderError).slice(0, 100))
           }
-          await this.e.reply('⚠️ 无法获取评论数据（小红书接口返回错误），稍后再试试 ~')
+          // 提示已经在卡片里了，不再另发文字
         }
       } else if (!CommentData?.data?.comments || CommentData.data.comments.length === 0) {
         await this.e.reply('这个笔记没有评论 ~')

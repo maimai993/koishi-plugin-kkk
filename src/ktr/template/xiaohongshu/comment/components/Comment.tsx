@@ -253,7 +253,7 @@ export const XiaohongshuComment: React.FC<PosterProps<XiaohongshuCommentData>> =
           </div>
         ) : (
           <div className="flex justify-center items-center py-20">
-            <p className="text-[60px] text-muted">暂无评论</p>
+            <p className="text-[60px] text-muted">{props.data.ErrorText ?? '暂无评论'}</p>
           </div>
         )}
       </div>
