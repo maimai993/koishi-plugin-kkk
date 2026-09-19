@@ -152,7 +152,15 @@ export class Xiaohongshu extends Base {
         statistics: noteCard.interact_info,
         note_id: noteCard.note_id,
         author: noteCard.user,
-        image_url: noteCard.image_list[0].url_default,
+        /**
+         * 封面要**容错**：视频笔记的 image_list 可能是空数组，
+         * 取 [0].url_default 会抛 TypeError（卡片整张都没了）。
+         * 退而求其次用视频首帧，再不行给空串（模板能接受空值）。
+         */
+        image_url: noteCard.image_list?.[0]?.url_default
+          ?? noteCard.video?.image?.first_frame
+          ?? noteCard.video?.cover
+          ?? '',
         time: noteCard.time,
         ip_location: noteCard.ip_location,
         share_url: `https://www.xiaohongshu.com/discovery/item/${data.note_id}?source=webshare&xhsshare=pc_web&xsec_token=${data.xsec_token}&xsec_source=pc_share`,
@@ -222,6 +230,8 @@ export class Xiaohongshu extends Base {
        * 但卡片（上面已经发过）不该因为评论拉不到就整条失败。
        */
       let CommentData: any
+      /** 评论是否拉取失败 —— 失败也要把评论卡渲染出来（只是内容为空 + 一句提示） */
+      let commentFailed = false
       try {
         // 评论同样加超时：上游这条链路本来就常挂，别把整条解析拖死
         CommentData = await Promise.race([
@@ -230,11 +240,39 @@ export class Xiaohongshu extends Base {
         ]) as any
         if (!CommentData) throw new Error('拉取评论超时（15s）')
       } catch (error: any) {
-        logger.warn('[小红书] 拉取评论失败（卡片不受影响）: ' + String(error?.message ?? error).slice(0, 120))
-        return
+        /**
+         * **这里绝对不能 return** —— 视频分支在这个代码块之后，
+         * 一 return 就等于「评论拉不到 → 视频也不发了」。
+         * 只跳过评论区，继续往下走。
+         */
+        logger.warn('[小红书] 拉取评论失败（跳过评论区，继续后面的视频）: ' + String(error?.message ?? error).slice(0, 120))
+        CommentData = null
+        commentFailed = true
       }
 
-      if (!CommentData?.data?.comments || CommentData.data.comments.length === 0) {
+      if (!CommentData) {
+        /**
+         * 评论接口拿不到数据时，**仍然渲染一张评论卡**（内容为空），
+         * 并明确提示「无法获取评论数据」—— 用户要求：
+         * 与其什么都不发，不如让人看到「这里本该有评论，只是接口失败了」。
+         */
+        if (commentFailed) {
+          try {
+            const emptyCommentCard = await Render(this.e, 'xiaohongshu/comment', {
+              Type: noteCard.video ? '视频' : '图文',
+              CommentsData: [],
+              CommentLength: 0,
+              ImageLength: noteCard.image_list?.length || 0,
+              share_url: 'https://www.xiaohongshu.com/discovery/item/' + data.note_id
+            })
+            await this.e.reply(emptyCommentCard)
+            logger.mark('[小红书] 已发出空的评论卡片（占位）')
+          } catch (renderError: any) {
+            logger.warn('[小红书] 空评论卡渲染失败: ' + String(renderError?.message ?? renderError).slice(0, 100))
+          }
+          await this.e.reply('⚠️ 无法获取评论数据（小红书接口返回错误），稍后再试试 ~')
+        }
+      } else if (!CommentData?.data?.comments || CommentData.data.comments.length === 0) {
         await this.e.reply('这个笔记没有评论 ~')
       } else {
         // 使用简化的评论处理函数，直接返回评论数组
@@ -422,9 +460,33 @@ export class Xiaohongshu extends Base {
     if (noteCard.video && Config.xiaohongshu.sendContent.includes('video')) {
       const video = noteCard.video
 
+      /**
+       * 诊断：把视频流结构打出来（小红书这几版接口字段一直在变）。
+       * 结构：video.media.stream = { h264: [...], h265: [...], av1: [...] }
+       */
+      const stream = video.media?.stream ?? video.stream
+      logger.mark('[小红书] 视频结构: video键=' + JSON.stringify(Object.keys(video ?? {}).slice(0, 10)) +
+        ' media键=' + JSON.stringify(Object.keys(video?.media ?? {}).slice(0, 8)) +
+        ' stream键=' + JSON.stringify(Object.keys(stream ?? {}).slice(0, 8)) +
+        ' h264数=' + (Array.isArray(stream?.h264) ? stream.h264.length : 0) +
+        ' h265数=' + (Array.isArray(stream?.h265) ? stream.h265.length : 0))
+      /**
+       * **不再按字段名找流**：小红书现在把这些数组放在 EF4/EF5/EF6/EF7 之类的键下，
+       * 老代码只认 h264/h265，自然一个都选不出来（诊断日志里 h264数=0 h265数=0）。
+       * 这里把 stream 下**所有数组**拍平，按码率从低到高排序后交给选择逻辑。
+       */
+      const allStreams: XhsVideoStream[] = Object.values(stream ?? {})
+        .flat()
+        .filter((item: any) => item && typeof item === 'object' && (item.master_url || item.url))
+      logger.mark('[小红书] 可用视频流: ' + allStreams.length + ' 条' +
+        (allStreams.length ? '（码率 ' + allStreams.map((s: any) => s.video_bitrate ?? s.bitrate ?? '?').join('/') + '）' : ''))
+      const streamForSelect: any = {
+        h264: allStreams.filter((s: any) => !/h265|hevc/i.test(String(s.video_codec ?? ''))),
+        h265: allStreams.filter((s: any) => /h265|hevc/i.test(String(s.video_codec ?? '')))
+      }
       // 使用新的视频选择逻辑
       const selectedVideo = xiaohongshuProcessVideos(
-        video.media?.stream,
+        allStreams.length ? streamForSelect : stream,
         Config.xiaohongshu.videoQuality,
         Config.xiaohongshu.maxAutoVideoSize
       )
@@ -449,8 +511,25 @@ export class Xiaohongshu extends Base {
           }
         )
       } else {
-        // 如果没有找到合适的视频，使用原来的逻辑作为备选
-        await this.e.reply(segment.video(video.url_default))
+        /**
+         * 兜底：按几种已知字段顺序找视频地址。
+         * 原来只取 video.url_default，取不到就 segment.video(undefined)，
+         * 直接在 Satori 里抛 `Cannot read properties of undefined (reading 'startsWith')`。
+         */
+        const fallbackUrl =
+          video.url_default ??
+          allStreams[allStreams.length - 1]?.master_url ??
+          allStreams[0]?.master_url ??
+          video.media?.video?.url ??
+          ''
+        if (fallbackUrl) {
+          logger.mark('[小红书] 视频流选择失败，改用兜底地址发送')
+          await this.e.reply(segment.video(fallbackUrl))
+        } else {
+          // 实在拿不到地址就明确报错（用户要求：拿不到就直接报错，别静默）
+          logger.warn('[小红书] 找不到任何可用的视频地址')
+          await this.e.reply('这条小红书视频没能取到可下载的地址，稍后再试试 ~')
+        }
       }
     }
     return true
