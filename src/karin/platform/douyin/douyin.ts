@@ -286,8 +286,8 @@ export class DouYin extends Base {
                   if (processedImages.length === 0) {
                     logger.warn(`抖音图集解析未生成可发送内容，aweme_id=${VideoData.data.aweme_detail.aweme_id}`)
                   } else {
-                    const imageSegments = processedImages.filter((item: any) => item?.type === 'image')
-                    const otherSegments = processedImages.filter((item: any) => item?.type !== 'image')
+                    const imageSegments = processedImages.filter((item: any) => item?.type === 'image' || item?.type === 'img' || Boolean(item?.attrs?.src))
+                    const otherSegments = processedImages.filter((item: any) => !(item?.type === 'image' || item?.type === 'img' || Boolean(item?.attrs?.src)))
                     // 静态图：一条 md 合并（图片地址从元素里取）
                     const mdMessage = await buildMarkdownImageMessage(
                       imageSegments.map((item: any) => String(item?.attrs?.src ?? '')).filter(Boolean)
@@ -519,7 +519,7 @@ export class DouYin extends Base {
                   const mergeSources: string[] = []
                   const mergeVideos: any[] = []
                   for (const item of images as any[]) {
-                    if (item?.type === 'image') {
+                    if (item?.type === 'image' || item?.type === 'img' || item?.attrs?.src) {
                       const itemSrc = String(item?.attrs?.src ?? '')
                       // 诊断：把每张图地址的「开头」打出来，直接看出是 base64:// / file:// / http / 本地路径
                       logger.mark('[抖音] 图集图片地址[' + mergeSources.length + ']: ' + itemSrc.slice(0, 40) + ' … 长度 ' + itemSrc.length)
