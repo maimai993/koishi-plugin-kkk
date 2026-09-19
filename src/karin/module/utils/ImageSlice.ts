@@ -83,7 +83,20 @@ const cropWithFfmpeg = async (
 }
 
 /** 上传到宿主 assets，拿到 QQ 能访问的 https 地址 */
-const uploadSlice = async (buffer: Buffer, name: string): Promise<string | null> => {
+const uploadSlice = async (buffer: Buffer, name: string, attempts = 3): Promise<string | null> => {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const url = await uploadSliceOnce(buffer, name)
+    if (url) return url
+    if (attempt < attempts) {
+      logger.mark('[图片切片] 上传第 ' + attempt + ' 次失败，' + attempt * 1000 + 'ms 后重试')
+      await new Promise((resolve) => setTimeout(resolve, attempt * 1000))
+    }
+  }
+  return null
+}
+
+/** 单次上传（重试逻辑在外面） */
+const uploadSliceOnce = async (buffer: Buffer, name: string): Promise<string | null> => {
   try {
     const assets: any = (tryGetRuntime() as any)?.ctx?.assets
     if (!assets?.upload) return null
@@ -152,7 +165,9 @@ export const sendSlicedImage = async (e: Message, input: any): Promise<boolean> 
    * 另外加了超时 —— 超高图片（实测 2880×15520）上传时适配器会**长时间卡住不返回**，
    * 不加超时整条流程就停在这里，用户看到的就是「没反应」。15 秒没结果就当作失败去切片。
    */
-  const tryNormalSend = async (): Promise<boolean> => {
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+  const tryNormalSendOnce = async (): Promise<boolean> => {
     const sendPromise = (async () => {
       try {
         const result: any = await e.reply(segment.image(source))
@@ -178,6 +193,24 @@ export const sendSlicedImage = async (e: Message, input: any): Promise<boolean> 
       timer.unref?.()
     })
     return await Promise.race([sendPromise, timeoutPromise])
+  }
+
+  /**
+   * 带**重试**的普通发送（用户要求）。
+   *
+   * 实测失败大多是**瞬时**的：DNS 抖动、连接被重置、TLS 证书对不上
+   * （你环境里就有把 COS 域名解析到错服务器、返回「只有 IP 的证书」的情况）。
+   * 这种一失败就切片属于过度反应，先退避重试几次，成功就不切。
+   */
+  const tryNormalSend = async (attempts = 3): Promise<boolean> => {
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      if (await tryNormalSendOnce()) return true
+      if (attempt < attempts) {
+        logger.mark('[图片切片] 普通发送第 ' + attempt + ' 次失败，' + attempt * 800 + 'ms 后重试')
+        await sleep(attempt * 800)
+      }
+    }
+    return false
   }
 
   // 开关关闭 → 永远普通发送
