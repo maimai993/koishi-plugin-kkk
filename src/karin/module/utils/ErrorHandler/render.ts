@@ -97,10 +97,26 @@ const dumpOf = (error: Error): string | undefined => {
  * @param override - 调用方显式指定的堆栈文本
  * @returns 纯文本堆栈；非 amagi 异常且确有 message / name 之外的自有属性时，附带转储
  */
+/**
+ * 堆栈和转储都**截断**。
+ *
+ * 实测：不截断时错误卡片能渲染成 2880×40000（45MB）—— 光渲染要 20 秒，
+ * 而这么大的图 QQ 必然拒收，等于「报错本身也发不出来」，用户什么都看不到。
+ * 卡片只需要让人一眼看出错在哪，前几千字符足够，完整内容仍在日志里。
+ */
+const MAX_STACK_CHARS = 4000
+const MAX_DUMP_CHARS = 4000
+
+const truncateText = (text: string | undefined, limit: number): string => {
+  const value = String(text ?? '')
+  if (value.length <= limit) return value
+  return value.slice(0, limit) + '\n…（已截断，完整内容见日志；原文共 ' + value.length + ' 字符）'
+}
+
 const stackPartsOf = (error: Error, override?: string): { stack: string; dump?: string } => {
-  if (override) return { stack: override }
-  if (error instanceof AmagiError) return { stack: error.stack ?? error.message }
-  return { stack: error.stack ?? error.message, dump: dumpOf(error) }
+  if (override) return { stack: truncateText(override, MAX_STACK_CHARS) }
+  if (error instanceof AmagiError) return { stack: truncateText(error.stack ?? error.message, MAX_STACK_CHARS) }
+  return { stack: truncateText(error.stack ?? error.message, MAX_STACK_CHARS), dump: truncateText(dumpOf(error), MAX_DUMP_CHARS) }
 }
 
 /**

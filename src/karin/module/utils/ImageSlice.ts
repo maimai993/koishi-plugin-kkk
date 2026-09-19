@@ -297,3 +297,69 @@ export const sendSlicedImage = async (e: Message, input: any): Promise<boolean> 
     try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch { /* 清理失败无所谓 */ }
   }
 }
+
+/**
+ * 只切片、不发送：把可能超长的图片变成**一个 markdown 元素**（调用方自己决定怎么发）。
+ *
+ * 错误卡片就用它 —— 实测错误卡片能到 2880x40000 / 45MB（堆栈越长越夸张），
+ * 直接发必然被 QQ 拒收，等于「报错本身也发不出来」。
+ */
+export const sliceImageToMarkdown = async (input: any): Promise<any | null> => {
+  const first = Array.isArray(input) ? input[0] : input
+  const source: string = typeof first === 'string'
+    ? first
+    : String(first?.attrs?.src ?? first?.data?.file ?? first?.data?.url ?? '')
+  if (!source) return null
+  const runtimeConfig: any = (tryGetRuntime()?.config as any) ?? {}
+  const sliceHeight = Math.max(300, Number(runtimeConfig.sliceImageHeight) || SLICE_HEIGHT)
+  const tmpDir = path.join(os.tmpdir(), 'kkk-sliceonly-' + Date.now())
+  try {
+    fs.mkdirSync(tmpDir, { recursive: true })
+    const buffer = readImage(source)
+    if (!buffer) return null
+    const meta = getImageMetadata(buffer)
+    let width = Number(meta.width) || 0
+    let height = Number(meta.height) || 0
+    if (!width || !height) {
+      try {
+        const { spawnSync } = await import('node:child_process')
+        const probe = spawnSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=p=0', '-'], { input: buffer })
+        const ps = String(probe.stdout ?? '').trim().split(',')
+        width = Number(ps[0]) || 0
+        height = Number(ps[1]) || 0
+      } catch { /* 忽略 */ }
+    }
+    if (!width || !height) return null
+    // 不高就直接一段
+    if (height <= sliceHeight) {
+      const url = await uploadSlice(buffer, 'kkk-one.jpg')
+      return url ? segment.markdown('![#' + width + 'px #' + height + 'px](' + url + ')') : null
+    }
+    // 超高：先缩放再等分切片
+    const original = path.join(tmpDir, 'full.jpg')
+    fs.writeFileSync(original, buffer)
+    const scaleWidth = Math.min(width, SLICE_WIDTH)
+    const small = path.join(tmpDir, 'small.jpg')
+    const scaled = scaleWidth < width ? await cropWithFfmpeg(original, small, 0, 0, 0, 'scale=' + scaleWidth + ':-1') : false
+    const useInput = scaled && fs.existsSync(small) ? small : original
+    const useWidth = scaled ? scaleWidth : width
+    const useHeight = scaled ? Math.round((height * scaleWidth) / width) : height
+    const total = Math.max(1, Math.ceil(useHeight / sliceHeight))
+    const each = Math.ceil(useHeight / total)
+    const parts: string[] = []
+    for (let index = 0; index < total; index++) {
+      const offset = index === total - 1 ? Math.max(0, useHeight - each) : index * each
+      const output = path.join(tmpDir, 'slice-' + index + '.jpg')
+      const ok = await cropWithFfmpeg(useInput, output, useWidth, each, offset)
+      if (!ok || !fs.existsSync(output)) break
+      const url = await uploadSlice(fs.readFileSync(output), 'kkk-slice-' + index + '.jpg')
+      if (!url) break
+      parts.push('![#' + useWidth + 'px #' + each + 'px](' + url + ')')
+    }
+    if (!parts.length) return null
+    logger.mark('[图片切片] 错误卡片等超长图已切成 ' + parts.length + ' 段（markdown）')
+    return segment.markdown(parts.join(String.fromCharCode(10)))
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch { /* 忽略 */ }
+  }
+}
