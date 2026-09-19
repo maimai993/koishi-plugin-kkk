@@ -286,8 +286,9 @@ export class DouYin extends Base {
                   if (processedImages.length === 0) {
                     logger.warn(`抖音图集解析未生成可发送内容，aweme_id=${VideoData.data.aweme_detail.aweme_id}`)
                   } else {
-                    const imageSegments = processedImages.filter((item: any) => item?.type === 'image' || item?.type === 'img' || Boolean(item?.attrs?.src))
-                    const otherSegments = processedImages.filter((item: any) => !(item?.type === 'image' || item?.type === 'img' || Boolean(item?.attrs?.src)))
+                    const imageSegments = processedImages.filter(/** 只认图片元素：Satori 里是 img/image；**不能**用 attrs.src 兜底，视频元素也有 src！ */
+  (item: any) => (item?.type === 'img' || item?.type === 'image') && !String(item?.attrs?.src ?? '').startsWith('base64://video'))
+                    const otherSegments = processedImages.filter((item: any) => !((item?.type === 'img' || item?.type === 'image') && !String(item?.attrs?.src ?? '').startsWith('base64://video')))
                     // 静态图：一条 md 合并（图片地址从元素里取）
                     const mdMessage = await buildMarkdownImageMessage(
                       imageSegments.map((item: any) => String(item?.attrs?.src ?? '')).filter(Boolean)
@@ -519,7 +520,8 @@ export class DouYin extends Base {
                   const mergeSources: string[] = []
                   const mergeVideos: any[] = []
                   for (const item of images as any[]) {
-                    if (item?.type === 'image' || item?.type === 'img' || item?.attrs?.src) {
+                    // 同上：只认图片，视频要单独发（md 里放视频客户端不显示）
+                    if (item?.type === 'img' || item?.type === 'image') {
                       const itemSrc = String(item?.attrs?.src ?? '')
                       // 诊断：把每张图地址的「开头」打出来，直接看出是 base64:// / file:// / http / 本地路径
                       logger.mark('[抖音] 图集图片地址[' + mergeSources.length + ']: ' + itemSrc.slice(0, 40) + ' … 长度 ' + itemSrc.length)
@@ -533,11 +535,16 @@ export class DouYin extends Base {
                     if (mdMessage) {
                       this.pendingGalleryMd = mdMessage
                     } else {
+                      // md 生成失败：图片退回逐张发（连同视频一起排队）
                       this.pendingGalleryVideos.push(...(images as any[]))
                     }
-                  } else {
-                    this.pendingGalleryVideos.push(...mergeVideos)
                   }
+                  /**
+                   * **视频无论如何都要排队** —— md 里放不了视频（客户端不显示），
+                   * 之前写在 else 分支里，md 成功时视频就被整段丢掉了，
+                   * 表现就是「图集只有 md，视频一个都没有」。
+                   */
+                  this.pendingGalleryVideos.push(...mergeVideos)
                 }
               } finally {
                 for (const item of temp) {
