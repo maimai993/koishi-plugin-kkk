@@ -47,6 +47,14 @@ export class DouYin extends Base {
   is_slides: boolean
   /** 强制烧录弹幕（用于 #弹幕解析 命令） */
   forceBurnDanmaku: boolean
+  /**
+   * 图集/实况的图片 md 与视频**先攒着**，不在分支里立刻发 ——
+   * 这样顺序才是：信息卡 -> 评论区 -> 图集图片(+提示) -> 实况视频（用户指定）。
+   */
+  pendingGalleryMd: string | null
+  /** 实况视频（md 塞不下，最后单独发） */
+  pendingGalleryVideos: any[]
+
   /** 标记是否已处理 live 图（用于判断是否需要发送音频） */
   hasProcessedLiveImage: boolean
   /**
@@ -65,6 +73,8 @@ export class DouYin extends Base {
     this.is_slides = false
     this.forceBurnDanmaku = options?.forceBurnDanmaku ?? false
     this.hasProcessedLiveImage = false
+    this.pendingGalleryMd = null
+    this.pendingGalleryVideos = []
   }
 
   async DouyinHandler(data: DouyinIdData) {
@@ -281,14 +291,13 @@ export class DouYin extends Base {
                       imageSegments.map((item: any) => String(item?.attrs?.src ?? '')).filter(Boolean)
                     )
                     if (mdMessage) {
-                      await this.e.reply(mdMessage)
+                      // 存起来，等信息卡和评论区发完再发（用户指定顺序）
+                      this.pendingGalleryMd = mdMessage
                     } else if (imageSegments.length) {
                       await this.e.reply(imageSegments)
                     }
-                    // 实况视频：md 塞不下，单独发
-                    for (const video of otherSegments) {
-                      await this.e.reply(video)
-                    }
+                    // 实况视频：md 塞不下，排在图片之后单独发
+                    this.pendingGalleryVideos.push(...otherSegments)
                   }
                 } finally {
                   for (const item of temp) {
@@ -338,7 +347,8 @@ export class DouYin extends Base {
                   images.map((item: any) => item.url_list[2] || item.url_list[1]).filter(Boolean)
                 )
                 if (mdMessage) {
-                  await this.e.reply(mdMessage)
+                  // 存起来，等信息卡和评论区发完再发（用户指定顺序）
+                  this.pendingGalleryMd = mdMessage
                 } else if (imageres.length === 1) {
                   await this.e.reply(imageres[0])
                 } else {
@@ -710,6 +720,24 @@ export class DouYin extends Base {
             await sendSlicedImage(this.e, img)
           }
         }
+
+        /**
+         * 图集图片（+保存提示）→ **一条 markdown**，实况视频紧随其后。
+         * 放在这里是因为：信息卡、评论区都已经发完了（用户指定顺序）。
+         */
+        if (this.pendingGalleryMd) {
+          try {
+            await this.e.reply(this.pendingGalleryMd)
+            logger.mark('[抖音] 图集已用一条 markdown 发送（信息卡 -> 评论区 -> 图片）')
+          } catch (error: any) {
+            logger.warn('[抖音] 图集 md 发送失败: ' + String(error?.message ?? error))
+          }
+          this.pendingGalleryMd = null
+        }
+        for (const galleryVideo of this.pendingGalleryVideos) {
+          await this.e.reply(galleryVideo)
+        }
+        this.pendingGalleryVideos = []
 
         /** 发送视频 */
         if (sendvideofile && isVideo && !isArticle && Config.douyin.sendContent.includes('video')) {
