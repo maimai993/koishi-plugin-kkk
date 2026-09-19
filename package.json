@@ -12,6 +12,7 @@
     "config",
     "assets",
     "client",
+    "dist",
     "docs",
     "README.md",
     "CHANGELOG.md",
