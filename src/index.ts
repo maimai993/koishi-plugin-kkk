@@ -517,7 +517,19 @@ function registerCommands (
      */
     if (/卡片消息/.test(raw)) {
       try {
-        const { resolveCardToUrl } = await import('./karin/module/utils/CardParser')
+        const { extractCardInfo, resolveCardToUrl } = await import('./karin/module/utils/CardParser')
+        /**
+         * **只处理 B站卡片。**
+         *
+         * 卡片摘要里自带平台名（实测 source: 哔哩哔哩），网易云音乐、QQ音乐、淘宝之类的卡片
+         * 也会被这段逻辑接住，白白跑一遍 OCR + 搜索，还会发「正在提取卡片信息…」打扰用户。
+         * 认不出平台、或者不是 B站，直接放行（那些卡片本来也不该由我们解析）。
+         */
+        const cardPlatform = String(extractCardInfo(raw)?.source ?? '')
+        if (!/哔哩|bilibili|B站/i.test(cardPlatform)) {
+          logger.debug('卡片来源不是 B站（%s），跳过卡片解析', cardPlatform || '未知')
+          return next()
+        }
         const send = async (content: any) => {
           try {
             await (session as any).send(content)
