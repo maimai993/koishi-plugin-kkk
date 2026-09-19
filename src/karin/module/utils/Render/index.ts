@@ -184,7 +184,7 @@ export function buildFallbackHtml (route: string, data: any, dark: boolean, scal
  * 于是卡片页脚只剩下一个裂图（alt 文字 `logo`）。这里直接内联成 data URI。
  */
 let frameLogoCache: string | null = null
-function resolveFrameLogo (): string {
+export function resolveFrameLogo (): string {
   if (frameLogoCache !== null) return frameLogoCache
   /**
    * 页脚 logo：用 **Koishi 自己的图标**（@koishijs/plugin-console 里那张，

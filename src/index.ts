@@ -468,6 +468,8 @@ function registerCommands (
       const formatMB = (bytes: number) => (bytes / 1024 / 1024).toFixed(1)
       const lines = tasks.length
         ? tasks.map((task: any) => {
+            // 「还没开始传输字节」的阶段（获取下载链接 / 合并音轨）直接显示阶段文案
+            if (task.stage) return '• ' + task.name + '　' + task.stage
             const percent = task.total > 0 ? Math.floor((task.bytes / task.total) * 100) + '%' : '?'
             return '• ' + task.name + '　' + formatMB(task.bytes) + (task.total > 0 ? '/' + formatMB(task.total) + ' MB' : ' MB') + '（' + percent + '）'
           })

@@ -1,4 +1,5 @@
 import util from 'node:util'
+import { resolveFrameLogo } from '@/module/utils/Render'
 
 import { formatBuildTime, Render, Root } from '@/module'
 import { AmagiError } from '@/module/utils/amagiClient'
@@ -165,6 +166,8 @@ export const renderErrorImage = async (ctx: ErrorContext, opts: RenderErrorOptio
     logs: logs?.slice().reverse(),
     triggerCommand: event?.msg || '未知命令或处于非消息环境',
     frameworkVersion: Root.karinVersion,
+    // 和主布局用同一份 logo（跨模块导入以免又出现「旧头像」）
+    frameworkLogo: resolveFrameLogo(),
     pluginVersion: Root.pluginVersion,
     buildTime: buildMetadata?.buildTime ? formatBuildTime(buildMetadata.buildTime) : undefined,
     commitHash: buildMetadata?.commitHash,

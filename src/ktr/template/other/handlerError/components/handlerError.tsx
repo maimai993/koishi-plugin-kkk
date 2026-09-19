@@ -941,151 +941,41 @@ export const handlerError: React.FC<PosterProps<ApiErrorData>> = (props) => {
 
         {/* 底部版本信息 */}
         <div className="mt-auto pt-12" style={{ borderTop: `2px solid ${dark ? 'rgba(248,113,113,0.15)' : 'rgba(252,165,165,0.3)'}` }}>
-          {/* 版本信息网格 */}
-          <div className="grid grid-cols-2 gap-10 mb-12">
+          {/* 版本信息：框架版本 / 插件版本 / 适配器 —— 合并成一行，适配器只显示名称 */}
+          <div className="flex items-center flex-wrap gap-x-16 gap-y-6 mb-12">
             <div className="flex items-center gap-6">
-              <img src="/image/frame-logo.png" className="h-16 w-auto" alt="Framework" />
+              <img src={(data as any).frameworkLogo ?? '/image/frame-logo.png'} className="h-16 w-auto" alt="Framework" />
               <div>
-                <p className="text-xl" style={{ color: mutedColor }}>
-                  Framework / 框架版本
-                </p>
-                <p className="text-3xl font-bold" style={{ color: accentColor }}>
-                  {data.frameworkVersion}
-                </p>
+                <p className="text-xl" style={{ color: mutedColor }}>Framework / 框架版本</p>
+                <p className="text-3xl font-bold" style={{ color: accentColor }}>{data.frameworkVersion}</p>
               </div>
             </div>
-
             <div className="flex items-center gap-6">
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 230 221" className="h-16 w-auto" style={{ color: accentColor }}>
-                <path
-                  d="M132.75,87.37l-53.72-53.37c-4.66-4.63-1.38-12.58,5.18-12.58h115.13c6.57,0,9.84,7.95,5.18,12.58l-53.72,53.37c-4.99,4.96-13.06,4.96-18.05,0Z"
-                  fill="currentColor"
-                />
-                <path
-                  d="M28.49,186.89l.03-51.42c-.02-6.57,7.92-9.87,12.56-5.23l57.02,57.02c4.64,4.64,1.34,12.41-5.23,12.39h-51.42c-7.04-.02-12.94-5.72-12.96-12.76Z"
-                  fill="currentColor"
-                />
-                <path
-                  d="M41.54,23.68l163.04,163.05c4.78,4.78,1.39,12.95-5.36,12.94h-47.88c-9.69,0-18.99-3.86-25.84-10.71L39.3,102.75c-6.85-6.85-10.7-16.15-10.7-25.84V29.04c0-6.76,8.16-10.14,12.94-5.36Z"
-                  fill="currentColor"
-                />
+              <path
+              d="M132.75,87.37l-53.72-53.37c-4.66-4.63-1.38-12.58,5.18-12.58h115.13c6.57,0,9.84,7.95,5.18,12.58l-53.72,53.37c-4.99,4.96-13.06,4.96-18.05,0Z"
+              fill="currentColor"
+              />
+              <path
+              d="M28.49,186.89l.03-51.42c-.02-6.57,7.92-9.87,12.56-5.23l57.02,57.02c4.64,4.64,1.34,12.41-5.23,12.39h-51.42c-7.04-.02-12.94-5.72-12.96-12.76Z"
+              fill="currentColor"
+              />
+              <path
+              d="M41.54,23.68l163.04,163.05c4.78,4.78,1.39,12.95-5.36,12.94h-47.88c-9.69,0-18.99-3.86-25.84-10.71L39.3,102.75c-6.85-6.85-10.7-16.15-10.7-25.84V29.04c0-6.76,8.16-10.14,12.94-5.36Z"
+              fill="currentColor"
+              />
               </svg>
               <div>
-                <p className="text-xl" style={{ color: mutedColor }}>
-                  Plugin / 插件版本
-                </p>
-                <p className="text-3xl font-bold" style={{ color: accentColor }}>
-                  {data.pluginVersion}
-                </p>
+                <p className="text-xl" style={{ color: mutedColor }}>Plugin / 插件版本</p>
+                <p className="text-3xl font-bold" style={{ color: accentColor }}>{data.pluginVersion}</p>
               </div>
             </div>
-
             {data.adapterInfo && (
-              <div
-                className="col-span-2 p-8 rounded-3xl"
-                style={{
-                  backgroundColor: dark ? 'rgba(0,0,0,0.18)' : 'rgba(255,255,255,0.52)',
-                  border: `1px solid ${dark ? 'rgba(248,113,113,0.22)' : 'rgba(220,38,38,0.14)'}`
-                }}
-              >
-                <div className="flex items-start justify-between gap-8 mb-6">
-                  <div className="flex items-center gap-6 min-w-0">
-                    {getAdapterLogo(data.adapterInfo.name)}
-                    <div className="min-w-0">
-                      <p className="text-xl mb-1" style={{ color: mutedColor }}>
-                        Adapter / 适配器
-                      </p>
-                      <div className="flex items-center gap-4 flex-wrap">
-                        <p className="text-3xl font-bold truncate" style={{ color: accentColor }}>
-                          {data.adapterInfo.name}
-                        </p>
-                        {data.adapterInfo?.version
-                          ? (
-                            <Chip size="lg" variant="soft" color="danger" className="h-8 text-lg">
-                              {String(data.adapterInfo.version).startsWith('v')
-                                ? data.adapterInfo.version
-                                : `v${data.adapterInfo.version}`}
-                            </Chip>
-                          )
-                          : null}
-                      </div>
-                    </div>
-                  </div>
-                  <p className="text-xl font-medium mb-4" style={{ color: mutedColor }}>
-                    事件信息来源
-                  </p>
-                </div>
-                <div className="grid grid-cols-4 gap-4 text-lg" style={{ color: secondaryColor }}>
-                  <div
-                    className="rounded-2xl px-4 py-3"
-                    style={{ backgroundColor: dark ? 'rgba(248,113,113,0.08)' : 'rgba(220,38,38,0.05)' }}
-                  >
-                    <p className="text-sm mb-1 opacity-75">Platform / 对接平台</p>
-                    <p className="font-semibold break-all text-2xl">{String(data.adapterInfo.platform)}</p>
-                  </div>
-                  <div
-                    className="rounded-2xl px-4 py-3 relative overflow-hidden"
-                    style={{ backgroundColor: dark ? 'rgba(248,113,113,0.08)' : 'rgba(220,38,38,0.05)' }}
-                  >
-                    <p className="text-sm mb-1 opacity-75">Standard / 协议标准</p>
-                    <p className="font-semibold break-all text-2xl">{_.upperFirst(_.camelCase(String(data.adapterInfo.standard)))}</p>
-                    {String(data.adapterInfo.standard).toLowerCase() === 'milky' && (
-                      <div className="absolute inset-0 pointer-events-none">
-                        <img
-                          src="/image/other/handlerError/Milky.png"
-                          alt="Milky"
-                          className="absolute -right-2 -bottom-3 w-24 h-24 object-contain"
-                          style={{
-                            WebkitMaskImage: 'linear-gradient(to top left, transparent 0%, rgba(0,0,0,1) 60%)',
-                            maskImage: 'linear-gradient(to top left, transparent 0%, rgba(0,0,0,1) 60%)',
-                            opacity: 1
-                          }}
-                        />
-                      </div>
-                    )}
-                    {String(data.adapterInfo.standard).toLowerCase() === 'satori' && (
-                      <div className="absolute inset-0 pointer-events-none">
-                        <img
-                          src="/image/other/handlerError/satori.png"
-                          alt="Satori"
-                          className="absolute -right-2 -bottom-3 w-24 h-24 object-contain"
-                          style={{
-                            WebkitMaskImage: 'linear-gradient(to top left, transparent 0%, rgba(0,0,0,1) 60%)',
-                            maskImage: 'linear-gradient(to top left, transparent 0%, rgba(0,0,0,1) 60%)',
-                            opacity: 1
-                          }}
-                        />
-                      </div>
-                    )}
-                    {String(data.adapterInfo.standard).includes('onebot') && (
-                      <div className="absolute inset-0 pointer-events-none">
-                        <img
-                          src="/image/other/handlerError/onebot.png"
-                          alt="OneBot"
-                          className="absolute -right-2 -bottom-3 w-24 h-24 object-contain"
-                          style={{
-                            WebkitMaskImage: 'linear-gradient(to top left, transparent 0%, rgba(0,0,0,1) 60%)',
-                            maskImage: 'linear-gradient(to top left, transparent 0%, rgba(0,0,0,1) 60%)',
-                            opacity: 1
-                          }}
-                        />
-                      </div>
-                    )}
-                  </div>
-                  <div
-                    className="rounded-2xl px-4 py-3"
-                    style={{ backgroundColor: dark ? 'rgba(248,113,113,0.08)' : 'rgba(220,38,38,0.05)' }}
-                  >
-                    <p className="text-sm mb-1 opacity-75">Protocol / 协议实现</p>
-                    <p className="font-semibold break-all text-2xl">{String(data.adapterInfo.protocol)}</p>
-                  </div>
-                  <div
-                    className="rounded-2xl px-4 py-3"
-                    style={{ backgroundColor: dark ? 'rgba(248,113,113,0.08)' : 'rgba(220,38,38,0.05)' }}
-                  >
-                    <p className="text-sm mb-1 opacity-75">Communication / 通信方式</p>
-                    <p className="font-semibold break-all text-2xl">{String(data.adapterInfo.communication)}</p>
-                  </div>
+              <div className="flex items-center gap-6">
+                {getAdapterLogo(data.adapterInfo.name)}
+                <div>
+                  <p className="text-xl" style={{ color: mutedColor }}>Adapter / 适配器</p>
+                  <p className="text-3xl font-bold truncate" style={{ color: accentColor }}>{data.adapterInfo.name}</p>
                 </div>
               </div>
             )}

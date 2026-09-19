@@ -171,7 +171,12 @@ export class Bilibilipush extends Base {
     const filteredPushList = this.filterPushListByRegisteredBots(Config.pushlist.bilibili, registeredBotIds)
 
     if (filteredPushList.length === 0) {
-      logger.warn('没有已注册的 bot 可用于B站推送')
+      // 推送列表本来就是空的属正常情况，别刷 warn（用户反馈日志一直被它刷屏）
+      if ((Config.pushlist as any).bilibili?.length) {
+        logger.warn('推送列表里的机器人都不在线，本次跳过B站推送')
+      } else {
+        logger.debug('B站推送列表为空，跳过')
+      }
       return true
     }
 

@@ -77,6 +77,17 @@ export async function loopVideo(inputPath: string, outputPath: string, loopCount
 export const loopVideoWithTransition = async (
   options: LiveImageMergeOptions
 ): Promise<{ success: boolean; context?: LiveImageMergeOptions['context'] }> => {
+  /**
+   * 登记「正在合并音轨」阶段：这一步要跑 ffmpeg 重编码 + BGM 混流，
+   * 期间没有任何字节级别的进度，「查询下载进度」以前只会显示「未正在下载」。
+   * 结束时清掉（成功失败都清）。
+   */
+  const { reportDownloadStage, clearDownloadStage } = await import('./Network/Downloader').catch(
+    () => ({ reportDownloadStage: null, clearDownloadStage: null }) as any
+  )
+  try {
+    reportDownloadStage?.('merge', '音视频合成', '正在合并音轨')
+  } catch { /* 观测失败不影响合成 */ }
   /** 步骤 1：解析参数与基础配置 */
   const {
     inputPath,
@@ -238,6 +249,10 @@ export const loopVideoWithTransition = async (
   } else {
     logger.error('Live Photo 效果视频重放失败', result)
   }
+
+  try {
+    clearDownloadStage?.('merge')
+  } catch { /* 观测失败不影响合成 */ }
 
   return {
     success: result.status

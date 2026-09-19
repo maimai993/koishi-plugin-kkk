@@ -34,17 +34,50 @@ export interface DownloadProgressEntry {
   total: number
   /** 最近一次更新的时间戳 */
   at: number
+  /**
+   * 阶段说明。有它就能显示「正在获取下载链接」「正在合并音轨」这类
+   * **还没开始传输字节**的状态 —— 否则用户刚点完就查进度，只会看到「未正在下载」，很误导。
+   */
+  stage?: string
 }
 
 const activeDownloads = new Map<string, DownloadProgressEntry>()
 
+/** 清掉所有「阶段」条目（真正开始传字节时调用，避免和真实进度同时显示） */
+const clearStages = () => {
+  for (const key of [...activeDownloads.keys()]) {
+    if (key.startsWith('stage:')) activeDownloads.delete(key)
+  }
+}
+
 /** 登记一次进度（由下载器内部调用） */
 export function reportDownloadProgress (filepath: string, bytes: number, total: number) {
   try {
+    // 开始真正传字节了：收掉「获取下载链接」这类阶段条目，避免和真实进度同时显示
+    clearStages()
     const name = String(filepath ?? '').split(/[\\/]/).pop() || '未知文件'
     activeDownloads.set(filepath, { name, bytes, total, at: Date.now() })
     if (activeDownloads.size > 64) activeDownloads.delete(activeDownloads.keys().next().value as string)
   } catch { /* 观测失败不影响下载 */ }
+}
+
+/**
+ * 登记一个「还没开始下载」的阶段（获取下载链接 / 合并音轨等）。
+ *
+ * @param key 任务标识（用任务名即可，避免和真实下载的文件路径冲突）
+ * @param name 给用户看的名字
+ * @param stage 阶段说明
+ */
+export function reportDownloadStage (key: string, name: string, stage: string) {
+  try {
+    activeDownloads.set('stage:' + key, { name, bytes: 0, total: 0, at: Date.now(), stage })
+    if (activeDownloads.size > 64) activeDownloads.delete(activeDownloads.keys().next().value as string)
+  } catch { /* 观测失败不影响流程 */ }
+}
+
+/** 结束阶段登记（进入真正下载或流程结束时调用） */
+export function clearDownloadStage (key: string) {
+  activeDownloads.delete('stage:' + key)
 }
 
 /** 结束一次下载（成功/失败都要清掉，否则按钮会一直显示已完成的任务） */

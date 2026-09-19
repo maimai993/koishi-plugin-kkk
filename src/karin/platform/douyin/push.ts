@@ -97,7 +97,12 @@ export class DouYinpush extends Base {
     const filteredPushList = this.filterPushListByRegisteredBots(Config.pushlist.douyin, registeredBotIds)
 
     if (filteredPushList.length === 0) {
-      logger.warn('没有已注册的 bot 可用于抖音推送')
+      // 推送列表本来就是空的属正常情况，别刷 warn（用户反馈日志一直被它刷屏）
+      if ((Config.pushlist as any).douyin?.length) {
+        logger.warn('推送列表里的机器人都不在线，本次跳过抖音推送')
+      } else {
+        logger.debug('抖音推送列表为空，跳过')
+      }
       return true
     }
 
