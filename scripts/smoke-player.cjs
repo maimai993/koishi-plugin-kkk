@@ -11,7 +11,9 @@
  *   6. 令牌校验：随机令牌 404、路径穿越 404；
  *   7. 过期清理：把时间推到有效期之后 → 视频文件被删、链接变 404（页面提示「链接已过期」）；
  *   8. 手动删除会话同样会删文件；总开关关掉时不做任何事；
- *   9. 面板文案随开关动态选：默认（播放器开启）写「弹幕」，关掉后写「烧录弹幕」。
+ *   9. 面板文案随开关动态选：默认（播放器开启）写「弹幕」，关掉后写「烧录弹幕」；
+ *  10. 「在线播放最大文件」留空跟随全局、超限拒绝且文件不动；「超限转在线播放」的判定与覆盖项标记；
+ *  11. 端到端：视频超过全局上限 + 开着转播开关 → 真的被转到在线播放（B站链路，视频源是本机小服务）。
  *
  * 用独立端口 15200（不占 Koishi 的 5200），所以「播放器端口」这条链路也一并验证了。
  *
@@ -32,6 +34,29 @@ const PLAYER_DIR = path.join(dataRoot, 'koishi-plugin-kkk', 'player')
 fs.rmSync(dataRoot, { recursive: true, force: true })
 fs.mkdirSync(dataRoot, { recursive: true })
 
+/**
+ * 上游那份 config.json（全局「文件大小限制」等）。
+ *
+ * 上游 `Config` / `Common.tempDri` 用的是 `node-karin/root` 里的模块级常量 `karinPathBase`：
+ * 运行时已绑定时等于 `dataPath`，没绑定时退化成 `<当前工作目录>/data`。
+ * 本脚本用的是后者之外的正常路径 —— 也就是自己的 `data-smoke-player` 目录，
+ * 所以这里先把配置写进去（Config 发现文件不存在时会拷一份打包默认值，会盖住测试要的数值）。
+ */
+const upstreamCfgDir = path.join(dataRoot, 'koishi-plugin-kkk', 'config')
+fs.mkdirSync(upstreamCfgDir, { recursive: true })
+const upstreamConfig = JSON.parse(fs.readFileSync(path.join(pluginRoot, 'config/default_config/config.json'), 'utf8'))
+upstreamConfig.app.parseTip = false
+upstreamConfig.app.removeCache = true
+// 全局上限压到 1MB：下面第 [11] 节那条 5MB 的视频必然「超限」
+upstreamConfig.app.usefilelimit = true
+upstreamConfig.app.filelimit = 1
+upstreamConfig.bilibili.sendContent = ['video']
+upstreamConfig.bilibili.videoQuality = 32
+upstreamConfig.douyin.sendContent = ['info', 'video']
+upstreamConfig.douyin.switch = true
+upstreamConfig.pushlist = { douyin: [], bilibili: [] }
+fs.writeFileSync(path.join(upstreamCfgDir, 'config.json'), JSON.stringify(upstreamConfig, null, 2))
+
 const results = []
 const check = (name, ok, detail) => {
   results.push({ name, ok })
@@ -51,6 +76,43 @@ const resolveDep = (name) => {
     return require(name)
   }
 }
+/**
+ * 本机「视频源」：第 [11] 节的下载直接从本机拿，不依赖任何外网
+ * （其它冒烟脚本是去 w3schools 下测试片，这里为了稳定改成自建小服务）。
+ */
+const VIDEO_SOURCE_PORT = 15201
+const VIDEO_SOURCE_URL = 'http://127.0.0.1:' + VIDEO_SOURCE_PORT + '/video.mp4'
+const VIDEO_SOURCE_BYTES = Buffer.alloc(4096)
+for (let i = 0; i < VIDEO_SOURCE_BYTES.length; i++) VIDEO_SOURCE_BYTES[i] = i % 251
+const VIDEO_SOURCE_SIZE_MB = 5
+const videoSourceServer = http.createServer((req, res) => {
+  const headers = { 'Content-Type': 'video/mp4', 'Content-Length': String(VIDEO_SOURCE_BYTES.length) }
+  if (String(req.method).toUpperCase() === 'HEAD') {
+    res.writeHead(200, headers)
+    res.end()
+    return
+  }
+  res.writeHead(200, headers)
+  res.end(VIDEO_SOURCE_BYTES)
+})
+videoSourceServer.listen(VIDEO_SOURCE_PORT)
+
+/** B站 info 接口的固定数据（第 [11] 节用） */
+const biliInfoFixture = {
+  aid: 12345,
+  bvid: 'BV1xx411c7mD',
+  cid: 67890,
+  title: '【超限转播验证】B站视频',
+  desc: '这里是简介',
+  desc_v2: [],
+  pic: 'https://www.w3schools.com/html/pic_trulli.jpg',
+  ctime: Math.floor(Date.now() / 1000) - 3600,
+  duration: 15,
+  pages: [{ cid: 67890, duration: 15 }],
+  owner: { mid: 1, name: '测试UP', face: 'https://www.w3schools.com/html/pic_trulli.jpg' },
+  stat: { view: 1, danmaku: 2, reply: 3, like: 4, coin: 5, share: 6, favorite: 7 }
+}
+
 const amagi = resolveDep('@ikenxuan/amagi')
 const realFactory = amagi.default
 const makeBitRate = (definition, sizeMB) => ({
@@ -91,6 +153,24 @@ amagi.default = function (options) {
       }
     }
   })
+  /**
+   * B站那条链路（第 [11] 节「超限转在线播放」）用的接口。
+   * 免登录分支不会走 amagi 取流，真正决定「解析到的体积」的是下面第 [11] 节里
+   * 对 `Networks.getData` 的打桩（html5 直链接口），这里只把 info 接口固定住。
+   */
+  client.bilibili.fetcher.fetchVideoInfo = async () => ({ code: 0, message: 'OK', data: { code: 0, data: biliInfoFixture } })
+  client.bilibili.fetcher.fetchVideoStreamUrl = async () => ({
+    code: 0,
+    message: 'OK',
+    data: { code: 0, data: { accept_description: ['360P'], accept_quality: [16], durl: [{ order: 1, length: 15000, size: 5 * 1024 * 1024, url: VIDEO_SOURCE_URL }] } }
+  })
+  client.bilibili.fetcher.fetchVideoDanmaku = async () => ({
+    code: 0,
+    message: 'OK',
+    data: { data: { elems: [{ progress: 800, mode: 1, fontsize: 25, color: 16777215, content: '超限转播弹幕' }] } }
+  })
+  client.bilibili.fetcher.fetchComments = async () => ({ code: 0, message: 'OK', data: { replies: [], cursor: {} } })
+  client.bilibili.fetcher.fetchUserCard = async () => ({ code: 0, message: 'OK', data: { code: 0, data: { card: { mid: 1, name: '测试UP' } } } })
   return client
 }
 
@@ -345,10 +425,12 @@ setTimeout(async () => {
     const { QQ_FIELDS } = require(path.join(pluginRoot, 'lib/qqOptions.js'))
     const playerFields = QQ_FIELDS.filter((field) => field.key.startsWith('player'))
     check('播放器那组字段都要求先开启弹幕功能才能编辑（editableWhen=danmaku）',
-      playerFields.length === 5 && playerFields.every((field) => field.editableWhen === 'danmaku'),
+      playerFields.length === 6 && playerFields.every((field) => field.editableWhen === 'danmaku'),
       playerFields.map((field) => field.key + ':' + field.editableWhen).join(' | '))
     check('「在线播放最大文件」默认 0 = 跟随全局', QQ_DEFAULTS.playerMaxFileMB === 0,
       'default=' + QQ_DEFAULTS.playerMaxFileMB)
+    check('「超限转在线播放」默认关', QQ_DEFAULTS.playerOnOversize === false,
+      'default=' + QQ_DEFAULTS.playerOnOversize)
 
     const savedMax = runtime.config.playerMaxFileMB
     runtime.config.playerMaxFileMB = 0
@@ -379,6 +461,102 @@ setTimeout(async () => {
       fs.existsSync(overVideo) && store.listPlayerSessions().length === 0,
       'sessions=' + store.listPlayerSessions().length)
     runtime.config.playerMaxFileMB = savedMax
+
+    console.log('\n[10b] 超限转在线播放开关：判定与覆盖项标记')
+    const savedOnOversize = runtime.config.playerOnOversize
+    const savedEnabledFlag = runtime.config.playerEnabled
+    runtime.config.playerOnOversize = false
+    check('开关关着时不转播（维持原来的「太大了」）', store.shouldRedirectOversizeToPlayer() === false)
+    runtime.config.playerOnOversize = true
+    check('开关打开 + 播放器可用时才转播', store.shouldRedirectOversizeToPlayer() === true)
+    runtime.config.playerEnabled = false
+    check('播放器总开关关掉后即使开了转播也不生效', store.shouldRedirectOversizeToPlayer() === false)
+    runtime.config.playerEnabled = savedEnabledFlag
+    runtime.config.playerOnOversize = true
+    runtime.config.playerMaxFileMB = 0
+    check('开了转播后，「跟随全局」按不限制处理（否则超限视频会被上限拦回去）',
+      store.effectivePlayerSizeLimitMB(200) === 0, 'effective=' + store.effectivePlayerSizeLimitMB(200))
+    runtime.config.playerMaxFileMB = 50
+    check('显式填了上限时仍然以上限为准', store.effectivePlayerSizeLimitMB(200) === 50)
+    runtime.config.playerMaxFileMB = 0
+    // markOnlinePlayerOverride 的链路：下载那一步标记之后，handler 这边就该按在线播放处理
+    const { runWithParseOverride } = require(path.join(pluginRoot, 'lib/karin/module/utils/ParseOverride.js'))
+    // 注意：runWithParseOverride 传**空对象**会直接执行（不进 ALS 作用域），这里给个真实键
+    const insideFlags = await runWithParseOverride({ fromPanel: false }, async () => {
+      const before = store.isOnlinePlayerRequest()
+      store.markOnlinePlayerOverride()
+      return { before, after: store.isOnlinePlayerRequest() }
+    })
+    check('markOnlinePlayerOverride 能把本次解析改成在线播放',
+      insideFlags.before === false && insideFlags.after === true, JSON.stringify(insideFlags))
+    check('标记只作用于本次解析（作用域外不受影响）', store.isOnlinePlayerRequest() === false)
+    runtime.config.playerOnOversize = savedOnOversize
+
+    console.log('\n[11] 端到端：超过全局上限的视频真的被转到在线播放（B站链路）')
+    const { Networks } = require(path.join(pluginRoot, 'lib/karin/module/utils/Network/index.js'))
+    /**
+     * 免登录分支的体积和直链都来自 html5 直链接口，这里把它打桩到**本机**视频源：
+     * 声明 5MB（超过第 [10] 节写进配置的 1MB 全局上限），实际下载的是本机那 4KB 小文件 —— 整段不碰外网。
+     */
+    Networks.prototype.getData = async () => ({
+      data: {
+        durl: [{ order: 1, length: 15000, size: VIDEO_SOURCE_SIZE_MB * 1024 * 1024, url: VIDEO_SOURCE_URL }],
+        quality: 16,
+        accept_description: ['360P']
+      }
+    })
+    Networks.prototype.getHeaders = async () => ({
+      'content-length': String(VIDEO_SOURCE_BYTES.length),
+      'content-type': 'video/mp4'
+    })
+    const { commandQueue } = require(path.join(pluginRoot, 'lib/compat/runtime.js'))
+    const { Message: CompatMessage } = require(path.join(pluginRoot, 'lib/compat/node-karin.js'))
+    const biliReg = commandQueue.find((item) => String(item.options?.name ?? '').includes('B站'))
+    const savedQqPanelFlag = runtime.config.qqPanel
+    runtime.config.qqPanel = false // 直接跑解析，不要先发面板
+    runtime.config.playerOnOversize = true
+    const biliSent = []
+    const biliBot = {
+      selfId: '10000', platform: 'qqguild', status: 1, user: { id: '10000', name: 'smoke' }, ctx,
+      sendMessage: async (channel, payload) => { biliSent.push(payload); return ['msg-1'] },
+      getGuild: async () => ({ name: 'smoke-guild' })
+    }
+    const biliSession = {
+      content: 'https://www.bilibili.com/video/BV1xx411c7mD',
+      selfId: '10000', userId: '12345', guildId: '456', channelId: '456', messageId: 'm1',
+      bot: biliBot, author: { nick: 'smoke' }, username: 'smoke', event: {},
+      send: async (payload) => { biliSent.push(payload); return ['msg-2'] }
+    }
+    check('B站解析命令已注册', !!biliReg, biliReg ? String(biliReg.options?.name) : '（没找到）')
+    try {
+      await biliReg.handler(CompatMessage.fromSession(biliSession), () => Symbol('next'))
+    } catch (error) {
+      // 渲染类步骤在没装 puppeteer 的机器上会失败，流程最后按约定聚合成一个错误抛出；
+      // 这里只记一笔，判断仍然基于用户实际收到的消息。
+      console.log('     （解析流程最后聚合抛错，属预期：' + String(error && error.message).slice(0, 70) + '）')
+    }
+    const biliText = biliSent
+      .map((item) => (Array.isArray(item) ? item : [item])).flat()
+      .map((el) => (typeof el === 'string' ? el : JSON.stringify(el?.attrs ?? el)))
+      .join('\n')
+    const biliLink = /(https?:\/\/[^\s]+\/kkk\/player\/[0-9a-z]+)/.exec(biliText)
+    const biliToken = biliLink ? biliLink[1].split('/').pop() : ''
+    const biliPlayerSession = biliToken ? store.getPlayerSession(biliToken) : undefined
+    check('超限视频没有被拒绝（没有「视频太大了」）', !/太大了/.test(biliText), biliText.split('\n')[0].slice(0, 80))
+    check('超限视频没有走「已取消上传」', !/已取消上传/.test(biliText))
+    check('用户收到了在线播放链接', !!biliLink, biliLink ? biliLink[1] : '（没有链接）')
+    check('播放会话已登记、视频落在播放器目录', !!biliPlayerSession && fs.existsSync(biliPlayerSession.filePath),
+      biliPlayerSession ? biliPlayerSession.filePath : '（没有会话）')
+    check('弹幕也一起存了下来（这次用户并没有主动要弹幕）',
+      !!biliPlayerSession && biliPlayerSession.danmakuCount > 0,
+      biliPlayerSession ? biliPlayerSession.danmakuCount + ' 条' : '-')
+    const biliPage = biliToken ? await request('/kkk/player/' + biliToken) : { status: 0 }
+    check('这条链接可以直接打开（200）', biliPage.status === 200, 'status=' + biliPage.status)
+    if (biliToken) await store.deletePlayerSession(biliToken)
+    runtime.config.qqPanel = savedQqPanelFlag
+    runtime.config.playerOnOversize = savedOnOversize
+
+    videoSourceServer.close()
 
     const failed = results.filter((item) => !item.ok)
     console.log('\n=== ' + (results.length - failed.length) + '/' + results.length + ' 通过 ===')

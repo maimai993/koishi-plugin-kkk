@@ -3,7 +3,13 @@ import { buildMarkdownImageMessage } from '@/module/utils/QqPanel'
 // 弹幕策略（通用里的「强制不烧录弹幕」优先；「在线播放器」开着时是在线播放，不烧录）
 import { shouldBurnDanmaku, shouldFetchDanmaku } from '@/module/utils/DanmakuPolicy'
 // 在线播放：下载完之后登记播放会话并把链接回给用户（路径不能写 @/，那指向 karin/）
-import { effectivePlayerSizeLimitMB, isOnlinePlayerRequest, publishOnlinePlayer } from '../../../player'
+import {
+  effectivePlayerSizeLimitMB,
+  isOnlinePlayerRequest,
+  markOnlinePlayerOverride,
+  publishOnlinePlayer,
+  shouldRedirectOversizeToPlayer
+} from '../../../player'
 import { ParseSteps } from '@/module/utils/ParseSteps'
 import { sendSlicedImage } from '@/module/utils/ImageSlice'
 
@@ -299,19 +305,30 @@ export class Bilibili extends Base {
          * 下好的文件先存着，等卡片和评论区都发完再上传（见下面的「发送视频」）。
          */
         /**
-         * 体积检查。
-         *
-         * 在线播放模式下视频不下发到 QQ，判定换成**播放器自己的上限**
-         * （「在线播放最大文件」，留空跟随全局的「文件大小限制」）—— 免得一个几十 GB 的
-         * 视频被搬进播放器目录把磁盘塞满。关掉播放器时还是老规矩（全局上限 + 不压缩）。
+         * 体积检查。三种情形：
+         *   1. 用户点了带弹幕的那一档（在线播放请求）：视频不下发到 QQ，上限换成播放器自己的
+         *      （「在线播放最大文件」，留空跟随全局）—— 免得几十 GB 的视频把磁盘塞满；
+         *   2. 超过全局「文件大小限制」、而管理员开了「超限转在线播放」：**不拒绝**，
+         *      照常下载并改成在线播放 —— 用户至少还能点开看，而不是只收到一句「太大了」；
+         *   3. 其余情况：老规矩（全局上限 + 不压缩）。
          */
         const onlinePlayerNow = isOnlinePlayerRequest()
-        const playerLimitMB = onlinePlayerNow
+        /** 全局口径的「太大了」（原来的判定） */
+        const globalOversize = !!Config.app.usefilelimit && Number(videoSize) > Number(Config.app.filelimit) && !Config.app.compress
+        /** 超限转在线播放：这次真的超了全局上限，并且两个开关都开着 */
+        const redirectToPlayer = !onlinePlayerNow && globalOversize && shouldRedirectOversizeToPlayer()
+        if (redirectToPlayer) {
+          // 标记成在线播放：后面的取弹幕、下载、发送都会按播放器走
+          markOnlinePlayerOverride()
+          logger.mark('[在线播放] 视频 ' + Number(videoSize) + 'MB 超过全局上限 ' + Config.app.filelimit
+            + 'MB，按「超限转在线播放」改为在线播放')
+        }
+        const playerLimitMB = (onlinePlayerNow || redirectToPlayer)
           ? effectivePlayerSizeLimitMB(Config.app.usefilelimit ? Number(Config.app.filelimit) : 0)
           : 0
-        const videoOversize = onlinePlayerNow
+        const videoOversize = (onlinePlayerNow || redirectToPlayer)
           ? (playerLimitMB > 0 && Number(videoSize) > playerLimitMB)
-          : (Config.app.usefilelimit && Number(videoSize) > Number(Config.app.filelimit) && !Config.app.compress)
+          : globalOversize
         const willSendVideo = Config.bilibili.sendContent.some((content) => content === 'video')
         /** 本次要烧录的弹幕（烧录在下载那一步里完成，所以这里先拿到） */
         let danmakuList: BiliDanmakuElem[] = []
@@ -434,7 +451,7 @@ export class Bilibili extends Base {
         if (willSendVideo) {
           if (videoOversize) {
             // 在线播放模式下限制来自播放器自己，文案别再说「最大上传大小」（那个视频根本不上传）
-            const limitText = onlinePlayerNow
+            const limitText = (onlinePlayerNow || redirectToPlayer)
               ? `在线播放的体积上限为 ${playerLimitMB}MB`
               : `设定的最大上传大小为 ${Config.app.filelimit}MB`
             this.e.reply(

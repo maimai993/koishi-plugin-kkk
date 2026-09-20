@@ -13,6 +13,8 @@ import { AmagiBase } from './amagiClient'
 // 群文件阈值来自 Koishi 侧配置：Config 是上游 config.json 的 Proxy，
 // 取不到 qqGroupFileLimitMB 时会返回 {}，Number({}) 就是 NaN —— 阈值失效的元凶
 import { tryGetRuntime } from '../../../compat/runtime'
+// 超限转在线播放：视频超过全局体积上限时，不拒绝而是挂到播放页（见 src/player）
+import { markOnlinePlayerOverride, shouldRedirectOversizeToPlayer } from '../../../player'
 
 type uploadFileOptions = {
   /** 是否使用群文件上传 */
@@ -392,16 +394,27 @@ export const downloadVideoFile = async (event: Message, downloadOpt: downloadFil
   const fileSizeInMB = (fileSizeContent / (1024 * 1024)).toFixed(2)
   const fileSize = parseInt(parseFloat(fileSizeInMB).toFixed(2))
   if (fileSizeContent > 0 && Config.app.usefilelimit && fileSize > Config.app.filelimit) {
-    const message = segment.text(
-      `视频：「${
-        downloadOpt.title.originTitle ?? 'Error: 文件名获取失败'
-      }」大小 (${fileSizeInMB} MB) 超出最大限制（设定值：${Config.app.filelimit} MB），已取消上传`
-    )
-    const selfId = event.selfId || (uploadOpt?.activeOption?.uin as string)
-    const contact = event.contact || karin.contactGroup(uploadOpt?.activeOption?.group_id as string) || karin.contactFriend(selfId)
+    if (shouldRedirectOversizeToPlayer()) {
+      /**
+       * 「超限转在线播放」：视频还是**照常下载**（只是改由播放页提供，不再发到群里）。
+       *
+       * 这里只负责把本次解析标记成在线播放 —— 平台 handler 后面读 isOnlinePlayerRequest()
+       * 就知道该登记播放会话、回链接，而不是调 uploadFile。
+       */
+      markOnlinePlayerOverride()
+      logger.mark(`[在线播放] 视频 ${fileSizeInMB}MB 超过全局上限 ${Config.app.filelimit}MB，按「超限转在线播放」继续下载`)
+    } else {
+      const message = segment.text(
+        `视频：「${
+          downloadOpt.title.originTitle ?? 'Error: 文件名获取失败'
+        }」大小 (${fileSizeInMB} MB) 超出最大限制（设定值：${Config.app.filelimit} MB），已取消上传`
+      )
+      const selfId = event.selfId || (uploadOpt?.activeOption?.uin as string)
+      const contact = event.contact || karin.contactGroup(uploadOpt?.activeOption?.group_id as string) || karin.contactFriend(selfId)
 
-    await karin.sendMsg(selfId, contact, message)
-    return null
+      await karin.sendMsg(selfId, contact, message)
+      return null
+    }
   }
 
   // 下载文件，视频URL，标题和自定义headers

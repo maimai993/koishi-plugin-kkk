@@ -39,6 +39,8 @@ export interface KkkRuntimeConfig {
   playerExpireMinutes?: number
   /** 在线播放的体积上限（MB）：超过就不走在线播放；0 / 空 = 跟随全局的「文件大小限制」 */
   playerMaxFileMB?: number
+  /** 超限转在线播放（默认关）：视频超过全局体积上限时不拒绝，改为在线播放 */
+  playerOnOversize?: boolean
 }
 
 export interface KkkRuntime {

@@ -63,16 +63,51 @@ export function playerExpireMinutes (): number {
   return normalizeExpireMinutes((tryGetRuntime()?.config as any)?.playerExpireMinutes)
 }
 
+/** 「超限转在线播放」开关本身是否打开（默认关） */
+export function isPlayerOversizeRedirectOn (): boolean {
+  try {
+    return (tryGetRuntime()?.config as any)?.playerOnOversize === true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 现在要不要把「超过全局体积上限」的视频改成在线播放。
+ *
+ * 两个条件都要满足：播放器总开关开着（否则没有播放页可去）+ 这一项开关打开。
+ */
+export function shouldRedirectOversizeToPlayer (): boolean {
+  return isOnlinePlayerEnabled() && isPlayerOversizeRedirectOn()
+}
+
+/**
+ * 把「本次解析改成在线播放」写进当前解析的覆盖项（ParseOverride）。
+ *
+ * 用在**下载那一步**：Base.downloadVideoFile 发现视频超过全局上限、而管理员开着
+ * 「超限转在线播放」，就把这次解析标记成在线播放，继续下载；
+ * 平台 handler 后面读 isOnlinePlayerRequest() 就知道该发播放页而不是发文件。
+ *
+ * 覆盖项是 runWithParseOverride 里那个对象，只对本次解析的异步链路可见，不会串味。
+ */
+export function markOnlinePlayerOverride (): void {
+  const override = getParseOverride()
+  if (override) override.onlinePlayer = true
+}
+
 /**
  * 有效体积上限（MB）：0 表示不限制。
  *
  * 「在线播放最大文件」（playerMaxFileMB）留空 / 填 0 时就**跟随全局** ——
  * 用上游「文件大小限制」那一项（usefilelimit / filelimit）的值，由调用方读出来传进来。
+ * 例外：打开了「超限转在线播放」时，留空按**不限制**处理 ——
+ * 这个开关服务的就是「比全局上限还大」的视频，跟随全局等于刚转过来就被拦回去。
  * @param globalLimitMB 全局限制（MB），0 = 全局没开限制
  */
 export function effectivePlayerSizeLimitMB (globalLimitMB = 0): number {
   const configured = Number((tryGetRuntime()?.config as any)?.playerMaxFileMB)
   if (Number.isFinite(configured) && configured > 0) return configured
+  if (isPlayerOversizeRedirectOn()) return 0
   const global = Number(globalLimitMB)
   return Number.isFinite(global) && global > 0 ? global : 0
 }

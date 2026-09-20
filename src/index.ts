@@ -219,7 +219,11 @@ export const usage = `
   端口被占用时只记一条日志并退回 Koishi 端口，不影响解析。
 - **链接有效期（分钟）**：默认 60（1~1440）。到点自动删掉视频和弹幕，链接打开是「链接已过期」。
 - **在线播放最大文件（MB）**：超过这个体积的视频不走在线播放，改回原来的发送流程
-  （免得把机器磁盘塞满）。留空 / 填 0 = 跟随全局，用上游的「文件大小限制」（usefilelimit / filelimit）。
+  （免得把机器磁盘塞满）。留空 / 填 0 = 跟随全局，用上游的「文件大小限制」（usefilelimit / filelimit）；
+  如果打开了下面的「超限转在线播放」，留空就表示不限制。
+- **超限转在线播放**（默认关）：打开后，体积超过全局「文件大小限制」的视频不再被拒绝
+  （原来只回一句「视频太大了，还是去B站看吧」），而是照常下载并改成在线播放 ——
+  用户拿到一条播放链接，视频不发群、也不占群文件。
 
 播放页是自带的单文件页面（深色界面、手机也能看），有**弹幕开关 / 字号 / 透明度**三个控件，
 弹幕用 canvas 自己画，拖动进度条靠服务端的 HTTP Range 支持，页面不依赖任何外网 CDN。
@@ -829,6 +833,8 @@ export async function apply (ctx: Context, rawConfig: Config) {
         const num = Number(raw)
         return Number.isFinite(num) && num > 0 ? num : 0
       })(),
+      // 超限转在线播放：默认关（要管理员显式打开才会改变「视频太大了」的行为）
+      playerOnOversize: (config as any).playerOnOversize === true,
       qqGroupFileLimitMB: (() => {
         const raw = (config as any).qqGroupFileLimitMB
         if (raw === undefined || raw === null || raw === '') return 30
