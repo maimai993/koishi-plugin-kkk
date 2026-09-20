@@ -323,12 +323,13 @@ export const sliceImageToMarkdown = async (input: any): Promise<any | null> => {
     : String(first?.attrs?.src ?? first?.data?.file ?? first?.data?.url ?? '')
   if (!source) return null
   const runtimeConfig: any = (tryGetRuntime()?.config as any) ?? {}
-  // 合并成一条 markdown 也是 QQ 专属优化（绕过图片上传限制）：其它平台逐张发即可
-  const platform = String((e as any)?.bot?.bot?.platform ?? (e as any)?.platform ?? (e as any)?.bot?.platform ?? '')
-  if (platform && !/qq/i.test(platform)) {
-    for (const one of valid) await e.reply(segment.image(one))
-    return true
-  }
+  /**
+   * 注意：这里以前混进来一段**从 sendSlicedImage 复制过来的**非 QQ 分支，
+   * 里面用了这个函数根本没有的 `e` 和 `valid` —— 函数每次一调用就
+   * `ReferenceError: e is not defined`，错误卡片的切片永远失败，
+   * 最后那张 8.9MB 的长图直接原样发出去（还可能被 QQ 拒收）。
+   * 这个函数只负责「切片」，平台判断交给调用方，所以整段删掉。
+   */
   const sliceHeight = Math.max(300, Number(runtimeConfig.sliceImageHeight) || SLICE_HEIGHT)
   const tmpDir = path.join(os.tmpdir(), 'kkk-sliceonly-' + Date.now())
   try {

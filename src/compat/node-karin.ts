@@ -116,8 +116,19 @@ export class KkkBot {
    * 所以这里**不能抛错**，否则整条推送链路会断在第一步。
    */
   async getFriendList (): Promise<any[]> {
+    /**
+     * 先做能力判断再调用。
+     *
+     * 大部分适配器（比如 qq-crack）**没有实现 getFriendList**，直接调用会抛
+     * `TypeError: this.bot.getFriendList is not a function`；上游拿它来「找能给主人发消息的 bot」，
+     * 一轮推送会调好几次，日志里就刷成一片。这里没有这个方法就安静地返回空数组
+     * （空数组本来就会走到后面的 getAllBotID 兜底）。
+     */
+    const fn = (this.bot as any)?.getFriendList
+    if (typeof fn !== 'function') return []
     try {
-      return await (this.bot as any).getFriendList()
+      const list = await fn.call(this.bot)
+      return Array.isArray(list) ? list : []
     } catch (error) {
       logger.debug('getFriendList 失败: ' + String(error))
       return []

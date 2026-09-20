@@ -324,15 +324,21 @@ async function fetchPanelInfo (request: PanelRequest): Promise<PanelInfo | null>
 /**
  * QQ markdown 里「点一下就跳转」的链接。
  *
- * 普通外链（`[文字](https://…)`）在 QQ 的 markdown 消息里点不动，
- * 官方给的写法是 `mqqapi://forward/url?version=1&src_type=web&url_prefix=<编码后的地址>`
- * （推送那边一直用的就是这个）。空地址返回空串，调用方判空即可。
+ * **只能用普通 markdown 链接**：上游推送里写的是
+ * `mqqapi://forward/url?version=1&src_type=web&url_prefix=<编码后的地址>`，
+ * 但 QQ 官方接口会**直接拒收**这种自定义 scheme —— 这台部署实测报
+ * `[40034028] 请求参数不允许包含url mqqapi://forward/url`，
+ * 而且是**整条消息**都发不出去（不只是链接点不动），面板、解析全被连累。
+ * 同一条消息里的卡片图用的是 `![](https://…)`，说明 markdown 里的 https 链接是被接受的。
+ * 空地址返回空串，调用方判空即可。
  * @param label 用户看到的文字
  * @param url 目标地址
  */
 export function sourceLink (label: string, url: string): string {
   if (!url) return ''
-  return '[' + label + '](mqqapi://forward/url?version=1&src_type=web&url_prefix=' + encodeURIComponent(url) + ')'
+  // 括号和空白会破坏 markdown 链接语法，编码掉
+  const safe = String(url).replace(/[()\s]/g, (char) => encodeURIComponent(char))
+  return '[' + label + '](' + safe + ')'
 }
 
 export function cmdInput (command: string, show?: string): string {
@@ -401,6 +407,39 @@ async function showLoadingTip (e: Message): Promise<string | undefined> {
   } catch (error) {
     logger.debug('[QQ面板] 加载中提示失败: ' + String(error))
     return undefined
+  }
+}
+
+/**
+ * 面板里的「打开原站」链接行。
+ *
+ * 单独认出来是为了**发送失败时能摘掉它重发**：链接只是锦上添花，
+ * 不能因为它（不同 adapter / 版本的链接限制不一样）把整条面板甚至整个解析搞挂。
+ */
+const isSourceLinkLine = (line: string): boolean => /^\[[^\]]+\]\([^)]+\)\s*$/.test(line.trim())
+
+/**
+ * 发一条 markdown 面板；**带链接失败就摘掉链接行重发一次**。
+ *
+ * 背景：实测某个 QQ adapter 会因为消息里的链接形式直接拒收整条消息
+ * （`[40034028] 请求参数不允许包含url mqqapi://forward/url`），
+ * 面板发不出去 → 解析失败 → 最后只剩一张错误卡片。这里做一层兜底：
+ * 先照常发，失败且内容里确实有链接行时，去掉链接行再发一次，成功就当没事发生。
+ * @param lines 面板的 markdown 行
+ * @param send 真正发送的函数（第一次/重发都走它）
+ * @returns 最后一次发送的结果
+ */
+async function sendPanelMarkdown (
+  lines: string[],
+  send: (content: any) => Promise<any>
+): Promise<{ sent: any, droppedLink: boolean }> {
+  try {
+    return { sent: await send(segment.markdown(lines.join(String.fromCharCode(10)))), droppedLink: false }
+  } catch (error: any) {
+    const withoutLink = lines.filter((line) => !isSourceLinkLine(line))
+    if (withoutLink.length === lines.length) throw error
+    logger.warn('[QQ面板] 带链接的面板发送失败（' + String(error?.message ?? error).slice(0, 120) + '），去掉链接行重发一次')
+    return { sent: await send(segment.markdown(withoutLink.join(String.fromCharCode(10)))), droppedLink: true }
   }
 }
 
@@ -659,7 +698,8 @@ export async function sendBangumiPanelPage (e: Message, episodes: any[], cardDat
     if (tryGetRuntime()?.config.qqPanelSourceLink !== false && seasonUrl) lines.push(sourceLink('打开原站', seasonUrl))
 
     await recallLastPanel(e)
-    const sent: any = await e.reply(segment.markdown(lines.join('\n')))
+    // 带链接发不出去时自动去掉链接行重发（不同 adapter 对链接的限制不一样）
+    const { sent } = await sendPanelMarkdown(lines, (content) => e.reply(content))
     rememberPanelMessage(e, sent?.messageId)
     logger.debug('[QQ面板] 番剧面板 ' + current + '/' + pages + ' 页（' + ordered.length + ' 集，' + cols + '×' + rows + '）')
     return true
@@ -783,7 +823,8 @@ export async function sendQqParsePanel (e: Message, request: PanelRequest): Prom
    * 开关在 WebUI 的 QQ 适配器分组（qqPanelSourceLink，默认开）。
    */
   if (runtime.config.qqPanelSourceLink !== false && request.url) lines.push(sourceLink('打开原站', request.url))
-  await replaceLoadingTip(e, loadingId, segment.markdown(lines.join(String.fromCharCode(10))))
+  // 带链接发不出去时自动去掉链接行重发（不然整条面板、整个解析都会被一个链接拖死）
+  await sendPanelMarkdown(lines, (content) => replaceLoadingTip(e, loadingId, content))
   logger.debug('[QQ面板] 已发送解析面板: ' + request.platform + ' ' + request.id + '（' + shown.length + '/' + info.options.length + ' 档画质）')
   return true
 }

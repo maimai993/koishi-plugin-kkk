@@ -11,6 +11,7 @@
  *
  * 用法：node scripts/smoke-qqpanel.cjs
  */
+const fs = require('node:fs')
 const path = require('node:path')
 const { Context } = require('koishi')
 
@@ -95,23 +96,27 @@ const check = (name, ok, detail) => {
   console.log((ok ? '  ✅ ' : '  ❌ ') + name + (detail ? '  —— ' + detail : ''))
 }
 
-/** 直接跑某个已注册命令（不经过中间件，避免无关命令干扰） */
-const runCommand = async (namePart, content, platform = 'qqguild') => {
+/**
+ * 直接跑某个已注册命令（不经过中间件，避免无关命令干扰）
+ * @param hooks.sendHook 发送前调一次；抛错就等价于「适配器拒收这条消息」
+ */
+const runCommand = async (namePart, content, platform = 'qqguild', hooks = {}) => {
   const { commandQueue } = require(path.join(pluginRoot, 'lib/compat/runtime.js'))
   const { Message } = require(path.join(pluginRoot, 'lib/compat/node-karin.js'))
   const reg = commandQueue.find((item) => String(item.options?.name ?? '').includes(namePart))
   if (!reg) throw new Error('没有注册命令: ' + namePart)
 
   const sent = []
+  const beforeSend = (payload) => { if (hooks.sendHook) hooks.sendHook(payload) }
   const bot = {
     selfId: '10000', platform, status: 1, user: { id: '10000', name: 'smoke' }, ctx,
-    sendMessage: async (channel, payload) => { sent.push(payload); return ['msg-1'] },
+    sendMessage: async (channel, payload) => { beforeSend(payload); sent.push(payload); return ['msg-1'] },
     getGuild: async () => ({ name: 'smoke-guild' })
   }
   const session = {
     content, selfId: '10000', userId: '12345', guildId: '456', channelId: '456',
     messageId: 'm1', bot, author: { nick: 'smoke' }, username: 'smoke', event: {},
-    send: async (payload) => { sent.push(payload); return ['msg-2'] }
+    send: async (payload) => { beforeSend(payload); sent.push(payload); return ['msg-2'] }
   }
   await reg.handler(Message.fromSession(session), () => Symbol('next'))
   return sent
@@ -201,7 +206,8 @@ setTimeout(async () => {
     // 两个开关都满足才显示：通用里的「强制不烧录弹幕」关掉 + QQ 适配器里打开面板弹幕列
     liveRuntime.config.forceNoDanmaku = false
     liveRuntime.config.qqPanelDanmaku = true
-    check('面板下方带「打开原站」链接（默认开）', /打开原站]\(mqqapi:\/\/forward\/url\?version=1/.test(panel.markdown),
+    // 链接形式必须是普通 markdown：mqqapi:// 会被适配器/QQ 直接拒收（见第 [8] 节）
+    check('面板下方带「打开原站」链接（默认开）', /\[打开原站\]\(https:\/\//.test(panel.markdown),
       (panel.markdown.split('\n').find((l) => l.includes('打开原站')) || '（没有链接行）').slice(0, 120))
     liveRuntime.config.qqPanelSourceLink = false
     const noLink = readPanel(await runCommand('B站', target))
@@ -294,6 +300,73 @@ setTimeout(async () => {
     const disabled = await sendQqParsePanel(makeMessage('qqguild'), { platform: 'bilibili', url: target, id: 'BV1xx411c7mD' })
     runtime.config.qqPanel = true
     check('qqPanel=false 时不发面板', disabled === false)
+
+    console.log('\n[8] 「打开原站」链接：必须是能发出去的普通 markdown 链接 + 发送兜底')
+    /**
+     * 线上事故：链接原来写的是 `mqqapi://forward/url?...`，QQ 官方接口直接拒收
+     * （40034028 请求参数不允许包含url mqqapi://forward/url），**整条面板**都发不出去。
+     */
+    check('面板 markdown 不含 mqqapi:// 链接', !/mqqapi/i.test(panel.markdown),
+      (panel.markdown.match(/mqqapi[^\s)]*/) || ['（没有）'])[0])
+    check('「打开原站」是普通 markdown 链接', /\[打开原站\]\(https:\/\/www\.bilibili\.com\/video\/BV1xx411c7mD\)/.test(panel.markdown),
+      (panel.markdown.split('\n').find((line) => line.includes('打开原站')) || '（没有链接行）').slice(0, 80))
+
+    // 模拟适配器「带链接就拒收」：应当自动摘掉链接行重发，面板照常出来
+    const linkAttempts = []
+    const resilient = readPanel(await runCommand('B站', target, 'qqguild', {
+      sendHook: (payload) => {
+        const text = JSON.stringify(payload)
+        if (text.includes('打开原站')) {
+          linkAttempts.push(text.slice(0, 40))
+          throw new Error('QQ 消息发送失败 [40034028] 请求参数不允许包含url')
+        }
+      }
+    }))
+    check('带链接的那次被拒收（模拟生效）', linkAttempts.length >= 1, '拒收 ' + linkAttempts.length + ' 次')
+    check('去掉链接后整条面板仍然发出去了',
+      /\| 清晰度 \| 大小 \|/.test(resilient.markdown) && resilient.buttons.length > 0,
+      '表头 ' + (resilient.markdown.split('\n').find((line) => line.startsWith('| 清晰度')) || '（无）'))
+    check('重发的内容里没有链接行', !/打开原站/.test(resilient.markdown))
+    check('重发的面板仍然带画质按钮', resilient.buttons.length > 0 &&
+      resilient.buttons.every((b) => !b.label.startsWith('#')),
+      resilient.buttons.map((b) => b.label).join(' / '))
+    console.log('\n[9] 超长图切片（错误卡片那条链路）')
+    /**
+     * 线上事故：`sliceImageToMarkdown` 里混进了别的函数才有的变量（`e`/`valid`），
+     * 一调用就 `ReferenceError: e is not defined` —— 错误卡片永远切不了片，
+     * 8.9MB 的长图直接原样发出去。
+     */
+    const { sliceImageToMarkdown } = require(path.join(pluginRoot, 'lib/karin/module/utils/ImageSlice.js'))
+    // 切片要上传，宿主的 assets 服务这里没有，直接塞一个假的
+    ctx.assets = { upload: async (data, name) => ({ url: 'https://example.com/' + name }) }
+    const { execFileSync } = require('node:child_process')
+    const os = require('node:os')
+    const tallJpg = path.join(os.tmpdir(), 'kkk-panel-smoke-tall.jpg')
+    execFileSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=c=black:s=400x5000', '-frames:v', '1', tallJpg])
+    const tallDataUri = 'data:image/jpeg;base64,' + fs.readFileSync(tallJpg).toString('base64')
+    let sliced = null
+    let sliceError = null
+    try {
+      sliced = await sliceImageToMarkdown(tallDataUri)
+    } catch (error) {
+      sliceError = error
+    }
+    check('切片函数不抛错（ReferenceError 已修）', !sliceError, sliceError ? String(sliceError.message) : 'ok')
+    const slicedText = JSON.stringify(sliced?.children?.map((child) => child.attrs?.content ?? '').join('') ?? '')
+    check('长图被切成多片 markdown', /!\[#400px #/i.test(slicedText) && (slicedText.match(/!\[#/g) || []).length >= 2,
+      JSON.stringify(slicedText.slice(0, 90)))
+    let badThrown = null
+    let badResult = 'unset'
+    try {
+      badResult = await sliceImageToMarkdown('data:image/jpeg;base64,AAAA')
+    } catch (error) {
+      badThrown = error
+    }
+    check('坏输入不抛错（交给调用方按原图发）', !badThrown && (badResult === null),
+      badThrown ? String(badThrown.message) : String(badResult))
+    const handlerSource = fs.readFileSync(path.join(pluginRoot, 'lib/karin/module/utils/ErrorHandler/handler.js'), 'utf-8')
+    check('ErrorHandler 里仍有「切片失败按原图发送」的兜底',
+      handlerSource.includes('错误卡片切片失败，按原图发送') && /try\s*\{[\s\S]*sliceImageToMarkdown[\s\S]*?catch/.test(handlerSource))
 
     const failed = results.filter((item) => !item.ok)
     console.log('\n=== ' + (results.length - failed.length) + '/' + results.length + ' 通过 ===')
