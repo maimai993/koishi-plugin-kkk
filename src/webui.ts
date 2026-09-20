@@ -108,8 +108,9 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
   const indexHtml = (): Buffer => {
     const raw = readWebFile('index.html')
     if (!raw) return Buffer.from('<h1>KKK Config</h1><p>assets/web/index.html 缺失</p>')
-    // 只有「不需要登录」时才自动登录；开了 auth 插件就得让用户自己登控制台
-    if (authRequired()) return raw
+    // 面板自己的登录态（Karın 版那套 accessToken）由这里自动补上：
+    // 能走到这一步说明请求已经通过鉴权（免登录，或者带着控制台换来的面板 token），
+    // 所以直接帮用户登进去，不用再面对一个「请输入 HTTP 鉴权密钥」的表单。
     const text = raw.toString('utf-8')
     return Buffer.from(text.includes('</body>') ? text.replace('</body>', autoLoginScript + '</body>') : text + autoLoginScript)
   }
@@ -119,24 +120,67 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
   /**
    * 面板（/kkk）是否需要登录。
    *
-   * 默认**免登录**：装了 auth 插件的生产环境也会直接进界面（否则用户要先登控制台才能改配置，很别扭）。
-   * 要恢复成「必须登录控制台」，把配置里的 `webUiAuth` 打开即可。
+   * 默认**要求登录**：装了 auth 插件的部署，只有登录 Koishi 控制台后
+   * （由控制台页面通过 RPC 换取面板 token）才能打开面板；
+   * 没装 auth 插件的部署本来就没有登录这回事，这里不生效。
+   * 想改成完全公开，把配置里的 `webUiAuth` 关掉即可。
    */
-  const authRequired = () => (config as any)?.webUiAuth === true
+  const authRequired = () => (config as any)?.webUiAuth !== false && !!(ctx as any).get?.('auth')
 
-  /** 控制台登录态：auth 插件的 cookie 形如 name=id:token，用它查 token 表 */
-  const consoleAuthed = async (request: any): Promise<boolean> => {
-    if (!authRequired()) return true
+  /** 打开面板时控制台会把登录 token 一起带过来，用它换一个面板自己的 cookie */
+  const tokenAuthed = async (id: unknown, token: unknown): Promise<boolean> => {
+    const aid = Number(id)
+    const value = String(token || '')
+    if (!Number.isFinite(aid) || !value) return false
     const database: any = (ctx as any).get?.('database')
     if (!database?.get) return false
+    try {
+      const rows = await database.get('token', { id: aid, token: value }, ['expiredAt'])
+      return !!(rows?.[0] && Number(rows[0].expiredAt) > Date.now())
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * 控制台登录态。
+   *
+   * 两条路：
+   *   1. 控制台页面（左侧边栏「kkk 配置」）会带上 `?uid=&token=`，校验通过后落到面板自己的 cookie；
+   *   2. 之后页面里的静态资源和接口都靠这个 cookie 放行。
+   * 没装 auth 插件时 `authRequired()` 为假，一律放行。
+   */
+  const consoleAuthed = async (request: any): Promise<boolean> => {
+    if (!authRequired()) return true
     const cookie = String(request?.headers?.cookie || '')
+    const fromCookie = new RegExp(COOKIE_NAME + '=(\\d+):([0-9a-f]+)').exec(cookie)
+    if (fromCookie && await tokenAuthed(fromCookie[1], fromCookie[2])) return true
+    const query = request?.query ?? {}
+    // 控制台页面换来的面板 token（cookie 或 query 都认）
+    const fromPanelCookie = new RegExp(COOKIE_NAME + '_panel=([0-9a-f]+)').exec(cookie)
+    if (fromPanelCookie && panelTokenValid(fromPanelCookie[1])) return true
+    if (panelTokenValid(query.panel)) return true
+    if (await tokenAuthed(query.uid, query.token)) return true
+    // 兼容一些老版本控制台把 auth 放在 cookie 里的写法（name=id:token）
+    const database: any = (ctx as any).get?.('database')
+    if (!database?.get) return false
     for (const match of cookie.matchAll(/(?:^|;\s*)([\w-]+)=(\d+):([0-9a-f]+)/g)) {
-      try {
-        const rows = await database.get('token', { id: Number(match[2]), token: match[3] }, ['expiredAt'])
-        if (rows?.[0] && Number(rows[0].expiredAt) > Date.now()) return true
-      } catch { /* 试下一个 cookie */ }
+      if (await tokenAuthed(match[2], match[3])) return true
     }
     return false
+  }
+
+  /** 面板自己的 cookie：`id:token` */
+  const rememberPanelToken = (response: any) => {
+    const query = response?.request?.query ?? {}
+    const maxAge = Math.floor(TOKEN_TTL / 1000)
+    if (query.panel && panelTokenValid(query.panel)) {
+      response.set('Set-Cookie', COOKIE_NAME + '_panel=' + String(query.panel) + '; Path=/kkk; HttpOnly; Max-Age=' + maxAge)
+      return
+    }
+    if (query.uid && query.token) {
+      response.set('Set-Cookie', COOKIE_NAME + '=' + query.uid + ':' + query.token + '; Path=/kkk; HttpOnly; Max-Age=' + maxAge)
+    }
   }
 
   /**
@@ -157,6 +201,47 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
     }
     if (used) next.qq = group
     return next
+  }
+
+  /* ---------------- 控制台 RPC：换一个面板专用 token ---------------- */
+
+  /**
+   * 面板 token：控制台页面（左侧边栏「kkk 配置」）通过 RPC 向服务端要一个，
+   * 再拼到 iframe 地址上（`/kkk?panel=<token>`）。服务端校验通过后给面板发 cookie，
+   * 后续静态资源与接口都靠它放行。
+   *
+   * 关键点：RPC 监听器带 `authority: 4`，**未登录或权限不足的客户端根本调不到**，
+   * 所以「不登录就打不开面板」这件事是服务端强制的，不依赖前端自觉。
+   */
+  const panelTokens = new Map<string, number>()
+  const PANEL_TOKEN_TTL = 10 * 60 * 1000
+
+  const issuePanelToken = (): string => {
+    const value = crypto.randomBytes(16).toString('hex')
+    panelTokens.set(value, Date.now() + PANEL_TOKEN_TTL)
+    return value
+  }
+
+  const panelTokenValid = (value: unknown): boolean => {
+    const key = String(value || '')
+    const expire = panelTokens.get(key)
+    if (!expire) return false
+    if (expire < Date.now()) {
+      panelTokens.delete(key)
+      return false
+    }
+    return true
+  }
+
+  try {
+    const consoleService: any = (ctx as any).console
+    consoleService?.addListener?.('kkk/panel-token', function (this: any) {
+      // this 是发起调用的控制台客户端，auth 由 auth 插件写入
+      if (!this?.auth) throw new Error('请先登录 Koishi 控制台')
+      return issuePanelToken()
+    }, { authority: 4 })
+  } catch (error: any) {
+    logger.debug('[kkk] 注册面板 token RPC 失败: ' + String(error?.message ?? error))
   }
 
   const tokens = new Map<string, number>()
@@ -263,6 +348,17 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
     }
   })
 
+  /**
+   * 面板鉴权状态。控制台页面（iframe 的父页面）用它决定是直接打开面板还是提示先登录：
+   * 未登录时不要把 token 传进来，也就不会给面板发 cookie。
+   */
+  server.get('/kkk/api/status', async (response: any) => {
+    ok(response, {
+      authRequired: authRequired(),
+      authed: await consoleAuthed(response),
+    }, '')
+  })
+
   /* ---------------- 数据接口 ---------------- */
 
   const botList = () => {
@@ -348,6 +444,7 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
   for (const route of ['/kkk', '/kkk/', '/kkk/login']) {
     server.get(route, async (response: any) => {
       if (await pageDenied(response)) return
+      rememberPanelToken(response)
       response.type = 'text/html; charset=utf-8'
       response.body = indexHtml()
     })

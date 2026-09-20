@@ -95,7 +95,7 @@ export interface Config {
   debug: boolean
   /** 消息里的链接自动解析 */
   autoParse: boolean
-  /** 配置面板（/kkk）是否要求先登录 Koishi 控制台（默认关，即免登录） */
+  /** 配置面板（/kkk）是否要求先登录 Koishi 控制台（默认开；装了 auth 插件时生效） */
   webUiAuth: boolean
   /** QQ 平台解析前先发交互面板（Markdown + 按钮）让用户选解析内容和画质 */
   qqPanel: boolean
@@ -139,7 +139,7 @@ export const Config: Schema<Config> = Schema.intersect([
     dataPath: Schema.string().default('data').description('数据目录：配置、数据库、临时文件都放在这里'),
     debug: Schema.boolean().default(false).description('在日志里输出调试信息，排查问题时才需要打开'),
     autoParse: Schema.boolean().default(true).description('群里有人发链接（或回复一条带链接的消息）就自动解析，不用打指令'),
-    webUiAuth: Schema.boolean().default(false).description('配置面板 /kkk 是否要求先登录 Koishi 控制台。默认关（免登录，打开就能改配置）；装了 auth 插件且希望面板也走登录时再打开'),
+    webUiAuth: Schema.boolean().default(true).description('配置面板 /kkk 是否要求先登录 Koishi 控制台（默认开）。装了 auth 插件的部署只有登录后才能打开面板；没装 auth 插件时本来就没有登录这一说，这里不生效'),
     }).collapse().description('Koishi 原生设置（一般不用改，已折叠）'),
   }),
   Schema.object({
