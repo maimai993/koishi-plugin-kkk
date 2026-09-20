@@ -137,6 +137,16 @@ setTimeout(async () => {
   try {
     const { getRuntime } = require(path.join(pluginRoot, 'lib/compat/runtime.js'))
 
+    /**
+     * 本文件测的是**原来的 ffmpeg 烧录链路**（面板列头、`--dm=1` 的判定、降级提示）。
+     *
+     * 通用里的「在线播放器」现在**默认开启**，开着时 `--dm=1` 会走在线播放（不烧录、
+     * 也不发视频文件），本文件里那些关于烧录的断言就不成立了。
+     * 所以这里显式关掉播放器，让本文件的行为和加这个功能之前完全一致；
+     * 播放器模式本身（默认开启、列头写「弹幕」）由 scripts/smoke-player.cjs 覆盖。
+     */
+    getRuntime().config.playerEnabled = false
+
     console.log('\n[1] QQ 平台发 B站链接 → 只回面板（不解析、不下载）')
     const sent = await runCommand('B站', target)
     const panel = readPanel(sent)

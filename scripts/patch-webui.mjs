@@ -37,8 +37,13 @@ const arr = (items) => '[' + items.map(q).join(',') + ']'
 const APP_FIELDS = fields.filter((field) => field.renderIn === 'app')
 const QQ_FIELDS_ONLY = fields.filter((field) => field.renderIn !== 'app')
 
-/** 「通用 → 交互设置」里追加的字段（用该分类自己的渲染器：s = 开关，c = 文本框） */
-const APP_FIELDS_CODE = APP_FIELDS.map((field) => {
+/**
+ * 「通用」分类里追加的字段（用该分类自己的渲染器：s = 开关，c = 文本框）。
+ *
+ * 带 section 的字段（在线播放器那几项）额外包一层小标题，
+ * 不带 section 的直接跟在「交互设置」里 —— 和原来一样。
+ */
+const appFieldCall = (field) => {
   const path = '[' + [q('qq'), q(field.key)].join(',') + ']'
   if (field.type === 'boolean') return 's(' + path + ',' + q(field.label) + ',' + q(field.description) + ')'
   const opts = ["type:" + q(field.type === 'number' ? 'number' : 'text')]
@@ -48,7 +53,14 @@ const APP_FIELDS_CODE = APP_FIELDS.map((field) => {
     if (field.max !== undefined) opts.push('max:' + field.max)
   }
   return 'c(' + path + ',' + q(field.label) + ',' + q(field.description) + ',{' + opts.join(',') + '})'
-}).join(',')
+}
+const APP_FIELDS_CODE = [
+  ...APP_FIELDS.filter((field) => !field.section).map(appFieldCall),
+  ...[...new Set(APP_FIELDS.filter((field) => field.section).map((field) => field.section))].map((section) =>
+    'o(' + q(section) + ',(0,U.jsx)(U.Fragment,{children:['
+    + APP_FIELDS.filter((field) => field.section === section).map(appFieldCall).join(',')
+    + ']}))'),
+].join(',')
 
 /** 一个字段 → 一行渲染器调用 */
 function renderField (field) {
@@ -329,13 +341,31 @@ function stripMarked (text, from, to) {
   }
 }
 
+/**
+ * 同 {@link stripMarked}，但**把插入时多带的那个逗号一起吃回去**。
+ *
+ * 注入的写法是 `call,<START>…<END>`：只按标记切的话，逗号会留在原处，
+ * 而重新注入又会再加一个 —— 每跑一次补丁包就多一个逗号（实测跑几次就变成 `,,,,,,,`）。
+ */
+function stripMarkedWithComma (text, from, to) {
+  let out = text
+  for (;;) {
+    const a = out.indexOf(from)
+    if (a < 0) return out
+    const b = out.indexOf(to, a)
+    if (b < 0) return out
+    const start = out[a - 1] === ',' ? a - 1 : a
+    out = out.slice(0, start) + out.slice(b + to.length)
+  }
+}
+
 function patchPermFields (text, name) {
   const perm = (platform) => 't.renderPermField([' + BT + platform + BT + ',' + BT + 'loginPerm' + BT + '],' + BT + '谁可以触发扫码登录' + BT + ',' + BT + PERM_DESC + BT + ',{modes:' + PERM_MODES + '})'
   const APP_START = '/*KKK-APP-START*/'
   const APP_END = '/*KKK-APP-END*/'
   const logCall = 't.renderPermField([' + BT + 'app' + BT + ',' + BT + 'errorLogSendTo' + BT + '],' + BT + '错误日志' + BT + ',' + BT + LOG_DESC + BT + ',{list:true,modes:' + LOG_MODES + '})'
   const log = logCall + (APP_FIELDS_CODE ? ',' + APP_START + APP_FIELDS_CODE + APP_END : '')
-  let out = stripBarePermField(stripMarked(stripMarked(text, PERM_START, PERM_END), '/*KKK-APP-START*/', '/*KKK-APP-END*/'))
+  let out = stripBarePermField(stripMarkedWithComma(stripMarked(text, PERM_START, PERM_END), '/*KKK-APP-START*/', '/*KKK-APP-END*/'))
   const before = out
   for (const [prefix, build] of [
     ['l([' + BT + 'bilibili' + BT + ',' + BT + 'loginPerm' + BT + '],', () => perm('bilibili')],
@@ -360,7 +390,9 @@ const TEXT_REPLACERS = [
   // 「关于插件」页：上游的仓库/头像/作者信息换成本项目
   [/https:\/\/github\.com\/ikenxuan\/karin-plugin-kkk/g, 'https://github.com/maimai993/koishi-plugin-kkk'],
   [/https:\/\/github\.com\/ikenxuan\.png/g, 'https://github.com/maimai993.png'],
-  [/ikenxuan, sj817/g, 'maimai993（Koishi 移植版；上游 karin-plugin-kkk by ikenxuan, sj817）'],
+  // 注意：替换文本自身也含 "ikenxuan, sj817"，不加否定断言的话每跑一次就会再套一层
+  // （实测 ThemeSwitch 那个包里已经被套了两层，脚本就不是「可反复执行」了）
+  [/ikenxuan, sj817(?![）)])/g, 'maimai993（Koishi 移植版；上游 karin-plugin-kkk by ikenxuan, sj817）'],
   // 「关于插件」页的大标题（JSX 里是反引号字符串）
   [/`karin-plugin-kkk`/g, '`koishi-plugin-kkk`'],
   [/版本 2\.33\.0/g, '版本 __KKK_VERSION__'],

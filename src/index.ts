@@ -18,6 +18,7 @@ import { setLogger } from './compat/logger'
 import { Message, NEXT } from './compat/node-karin'
 import { bindRuntime, commandPrefixes, commandQueue, eventQueue, taskQueue, tryGetRuntime } from './compat/runtime'
 import { buildQqSchema, QQ_KEYS, readQqOptions } from './qqOptions'
+import { isOnlinePlayerEnabled, setupOnlinePlayer } from './player'
 import { registerWebUi } from './webui'
 import { applyUpstreamOverrides } from './configBridge'
 import { resolveQqCardContent } from './karin/module/utils/QqCardResolve'
@@ -169,7 +170,7 @@ export const usage = `
 | 指令 | 作用 |
 | --- | --- |
 | \`解析 <链接>\` / \`kkk解析\` | 解析作品（QQ 上先出交互面板） |
-| \`弹幕解析 <链接>\` | 把弹幕烧进视频（需要先关掉通用里的「强制不烧录弹幕」） |
+| \`弹幕解析 <链接>\` | 带弹幕解析：开了「在线播放器」就是在网页里看，否则是烧进视频 |
 | \`kkk帮助\` | 查看命令菜单 |
 | \`kkk版本\` | 运行环境诊断卡片 |
 | \`kkk解析统计\` / \`kkk全局解析统计\` | 查看解析统计（后者仅主人） |
@@ -199,8 +200,28 @@ export const usage = `
 - **QQ 适配器 → 面板显示「烧录弹幕」列**（默认关闭）：打开后，QQ 里的解析面板会从
   「清晰度 / 大小」两列变成「清晰度 / 烧录弹幕 / 大小」三列，用户可以自己选一档带弹幕解析。
 
-关掉总开关之后，也可以直接用 \`弹幕解析 <链接>\` 指令烧弹幕。烧录需要机器上装了 ffmpeg，
-没有的话会提示一句并退回纯视频。
+关掉总开关之后，也可以直接用 \`弹幕解析 <链接>\` 指令走弹幕解析。不过默认是被**在线播放器**接管的
+（在网页里看，不烧进画面）；想要原来那套烧录，得把下面的「在线播放器」也关掉。
+烧录需要机器上装了 ffmpeg，没有的话会提示一句并退回纯视频。
+
+## 在线播放器（弹幕在线看）
+
+通用 → **在线播放器设置** 里的四项：
+
+- **在线播放器**（默认开）：总开关。开着时，解析面板里那一列按钮就写「**弹幕**」
+  （不再是「烧录弹幕」），点它是**在线播放**：机器人把视频下下来放进播放器目录，
+  回一条链接，点开就是带弹幕的播放页 —— 不烧录（不需要 ffmpeg）、也不占群文件。
+- **播放器公网地址**：例如 \`https://play.example.com\`，用户收到的链接就是它加上
+  \`/kkk/player/<令牌>\`。留空**照样能用**：链接退化成「本机 IP + 端口」，同时在日志里提醒你补上
+  （这种地址只有本机 / 内网能打开，公网用户打不开）。
+- **播放器端口**：0（默认）= 复用 Koishi 自己的端口；填别的值会用 node:http 另起一个服务，
+  端口被占用时只记一条日志并退回 Koishi 端口，不影响解析。
+- **链接有效期（分钟）**：默认 60（1~1440）。到点自动删掉视频和弹幕，链接打开是「链接已过期」。
+
+播放页是自带的单文件页面（深色界面、手机也能看），有**弹幕开关 / 字号 / 透明度**三个控件，
+弹幕用 canvas 自己画，拖动进度条靠服务端的 HTTP Range 支持，页面不依赖任何外网 CDN。
+
+关掉总开关（手动把「在线播放器」关掉）后一切照旧：面板列写「烧录弹幕」，走原来的 ffmpeg 烧录流程。
 `
 
 /**
@@ -486,7 +507,13 @@ function registerCommands (
     for (const name of names) {
       if (registered.has(name)) continue
       registered.add(name)
-      const description = COMMAND_DESCRIPTIONS[name] ?? ('koishi-plugin-kkk: ' + (registration.options?.name ?? name))
+      /**
+       * 指令说明按「当前是不是播放器模式」动态取：开着在线播放器时，
+       * 「弹幕解析」不再是「把弹幕烧进视频」，控制台里显示的用法也得跟着改。
+       */
+      const description = (name === '弹幕解析' && isOnlinePlayerEnabled())
+        ? '解析链接并在网页上带弹幕在线播放（弹幕不烧进视频）'
+        : (COMMAND_DESCRIPTIONS[name] ?? ('koishi-plugin-kkk: ' + (registration.options?.name ?? name)))
       // 解析类指令接一段自由文本（链接 / BV 号 / 参数），声明出来控制台里能看清用法；
       // Koishi 的 checkArgCount / checkUnknown 默认都是关的，多传也不会报错
       const parseCommand = name === '解析' || name === '弹幕解析' || name === 'kkk解析'
@@ -496,7 +523,7 @@ function registerCommands (
         command
           .option('qn', '--qn <qn:number> B站画质 qn')
           .option('q', '--q <quality:string> 抖音/小红书画质档位')
-          .option('dm', '--dm <value:string> 烧录弹幕')
+          .option('dm', '--dm <value:string> ' + (isOnlinePlayerEnabled() ? '带弹幕（在线播放）' : '烧录弹幕'))
           .option('panel', '--panel <mode:number> 只重发解析面板')
           .option('bgp', '--bgp <page:number> 番剧分集表格翻页')
       }
@@ -775,6 +802,23 @@ export async function apply (ctx: Context, rawConfig: Config) {
       qqPanelDanmaku: config.qqPanelDanmaku === true,
       qqPanelSourceLink: (config as any).qqPanelSourceLink !== false,
       forceNoDanmaku: (config as any).forceNoDanmaku !== false,
+      // 在线播放器（通用 → 在线播放器设置）：**默认开启**（和「打开原站」那个开关一样）。
+      // 老配置里没有这个键时也必须是开的，所以判据写成 !== false。
+      playerEnabled: (config as any).playerEnabled !== false,
+      playerBaseUrl: String((config as any).playerBaseUrl ?? ''),
+      playerPort: (() => {
+        const raw = (config as any).playerPort
+        const num = Number(raw)
+        return Number.isFinite(num) && num > 0 && num < 65536 ? Math.floor(num) : 0
+      })(),
+      playerExpireMinutes: (() => {
+        const raw = (config as any).playerExpireMinutes
+        // 空值（undefined / null / ''）走默认 60 分钟，别被 Number('') 变成 0 再夹成 1 分钟
+        if (raw === undefined || raw === null || raw === '') return 60
+        const num = Number(raw)
+        if (!Number.isFinite(num)) return 60
+        return Math.min(1440, Math.max(1, Math.floor(num)))
+      })(),
       qqGroupFileLimitMB: (() => {
         const raw = (config as any).qqGroupFileLimitMB
         if (raw === undefined || raw === null || raw === '') return 30
@@ -834,6 +878,21 @@ export async function apply (ctx: Context, rawConfig: Config) {
   } catch (error: any) {
     logger.warn('初始化临时目录失败: %s', error?.message ?? error)
   }
+
+  /**
+   * 在线播放器（弹幕在线看）：按总开关决定要不要挂 /kkk/player 路由、起过期清理定时器。
+   *
+   * 必须放在 bindRuntime 之后 —— 播放器要读运行时配置（公网地址、端口、有效期）。
+   * 开关关着时这里什么都不做，行为和以前完全一致。
+   */
+  const disposeOnlinePlayer = setupOnlinePlayer(ctx)
+  ctx.on('dispose', () => {
+    try {
+      disposeOnlinePlayer()
+    } catch (error: any) {
+      logger.debug('[kkk] 卸载在线播放器失败: ' + String(error?.message ?? error))
+    }
+  })
 
   // 控制台里配的 OCR key 覆盖到上游配置上（CardParser 读的是 Config.app.ocrApiKey）
   if (config.ocrApiKey) { try { (Config.app as any).ocrApiKey = config.ocrApiKey } catch { /* 忽略 */ } }

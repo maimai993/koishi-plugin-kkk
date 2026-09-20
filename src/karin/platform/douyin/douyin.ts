@@ -1,8 +1,10 @@
 import fs from 'node:fs'
 import { sendSlicedImage } from '@/module/utils/ImageSlice'
 import { buildMarkdownImageMessage } from '@/module/utils/QqPanel'
-// 弹幕烧录的总开关（通用里的「强制不烧录弹幕」优先级最高，平台配置也压不过）
-import { shouldBurnDanmaku } from '@/module/utils/DanmakuPolicy'
+// 弹幕策略（通用里的「强制不烧录弹幕」优先；「在线播放器」开着时是在线播放，不烧录）
+import { shouldBurnDanmaku, shouldFetchDanmaku } from '@/module/utils/DanmakuPolicy'
+// 在线播放：下载完之后登记播放会话并把链接回给用户（路径不能写 @/，那指向 karin/）
+import { isOnlinePlayerRequest, publishOnlinePlayer } from '../../../player'
 import { sendParseTip } from '@/module/utils/parseTip'
 import { sendParseTip } from '@/module/utils/parseTip'
 
@@ -841,9 +843,9 @@ export class DouYin extends Base {
             logger.warn('[抖音] 视频还没下载成功，跳过发送')
             return
           }
-          // 获取弹幕数据（如果开启弹幕烧录）
+          // 获取弹幕数据（要烧录，或者是在线播放 —— 后者也弹幕，只是不画进画面）
           let danmakuList: DouyinDanmakuElem[] = []
-          if (shouldBurnDanmaku(this.forceBurnDanmaku || Config.douyin.burnDanmaku) && video) {
+          if (shouldFetchDanmaku(this.forceBurnDanmaku || Config.douyin.burnDanmaku) && video) {
             try {
               const duration = video.duration // 视频时长（毫秒）
               logger.mark(`[抖音] 视频时长: ${duration}ms, 开始获取弹幕数据`)
@@ -912,6 +914,22 @@ export class DouYin extends Base {
               } else {
                 await Common.removeFile(videoFile.filepath, true)
               }
+            }
+          } else if (isOnlinePlayerRequest()) {
+            /**
+             * 在线播放模式：视频不传到群里，改成登记播放会话 + 回一条公网链接，
+             * 弹幕一起存下来给播放页用（抖音的弹幕表情是图片贴纸，统一降级成文字）。
+             * 登记失败就退回下面的直接上传，别让用户什么都收不到。
+             */
+            const published = await publishOnlinePlayer(this.e, {
+              videoPath: downloadedVideo.filepath,
+              title: g_title || '',
+              platform: 'douyin',
+              danmaku: danmakuList
+            })
+            if (!published) {
+              logger.warn('[在线播放] 播放会话登记失败，退回直接发送视频文件')
+              await uploadFile(this.e, downloadedVideo, g_video_url, { message_id: this.e.messageId })
             }
           } else {
             // 不烧录弹幕：视频在「下载视频」那一步就已经落地了，这里直接上传

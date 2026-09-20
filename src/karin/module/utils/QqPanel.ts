@@ -734,29 +734,36 @@ export async function sendQqParsePanel (e: Message, request: PanelRequest): Prom
   const qualityFlag = request.platform === 'bilibili' ? '--qn=' : '--q='
   /**
    * 一个按钮：点下去**直接按这一档画质解析**。
-   * @param burn 为 true 时命令里多带一个 `--dm=1` —— 这一档画质解析完把弹幕一起烧进视频
+   * @param burn 为 true 时命令里多带一个 `--dm=1` —— 这一档画质按「带弹幕」解析
+   *   （通用里「在线播放器」开着时是在线播放，关着时是真烧录，由 tools.ts 判定）
    */
   const cell = (command: string, id: string | number, label: string, burn = false) =>
     cmdInput(command + ' ' + (urlPart || short) + ' ' + short + ' ' + qualityFlag + id + (burn ? ' --dm=1' : ''), label)
 
   /**
    * 表格排版。
-   *   - 默认（关闭烧录弹幕）：清晰度 / 大小 两列，「清晰度」本身就是按钮
-   *   - 打开烧录弹幕：清晰度 / 烧录弹幕 / 大小 三列 —— 中间那列是按这一档画质
+   *   - 默认（不带弹幕）：清晰度 / 大小 两列，「清晰度」本身就是按钮
+   *   - 带弹幕：清晰度 / 弹幕 / 大小 三列 —— 中间那列是按这一档画质
    *     **带弹幕**解析的按钮（命令里带 `--dm=1`），原「清晰度」按钮仍是纯视频
    * 这一列出不出现，完全由配置决定（WebUI 面板 → QQ 适配器 → 「面板显示「烧录弹幕」列」，
-   * 默认关）：关着就只有「清晰度 / 大小」两列，用户没法从面板上选烧弹幕；
-   * 通用里的「强制不烧录弹幕」（默认开）优先级更高，开着时即使配置打开也不显示这一列。
+   * 默认关）：关着就只有「清晰度 / 大小」两列，用户没法从面板上选弹幕。
+   *
+   * 两种模式共用这一列，只是文案和落地方式不同：
+   *   - 通用里「在线播放器」开着 → 列头/按钮写「弹幕」，点它是**在线播放**（不需要 ffmpeg）；
+   *   - 关着 → 老流程，写「烧录弹幕」，需要机器上有 ffmpeg + 关掉「强制不烧录弹幕」。
    */
-  const danmakuEnabled = runtime.config.qqPanelDanmaku === true && isBurnDanmakuSupported()
+  // 缺省即开启（和「打开原站」开关一个口径）：老配置里没有这个键时，列头也是「弹幕」
+  const onlinePlayer = runtime.config.playerEnabled !== false
+  const danmakuLabel = onlinePlayer ? '弹幕' : '烧录弹幕'
+  const danmakuEnabled = runtime.config.qqPanelDanmaku === true && (onlinePlayer || isBurnDanmakuSupported())
   if (danmakuEnabled) {
-    lines.push('| 清晰度 | 烧录弹幕 | 大小 |')
+    lines.push('| 清晰度 | ' + danmakuLabel + ' | 大小 |')
     lines.push('| :--- | :---: | ---: |')
     for (const option of shown) {
       const size = Math.round(option.sizeMB) + 'M'
       lines.push(
         '| ' + cell(parseCommand, option.id, option.label) + ' | ' +
-        cell(parseCommand, option.id, '烧录弹幕', true) + ' | ' + size + ' |'
+        cell(parseCommand, option.id, danmakuLabel, true) + ' | ' + size + ' |'
       )
     }
   } else {

@@ -107,5 +107,49 @@
     "default": true,
     "label": "强制不烧录弹幕",
     "description": "优先级最高的总开关：打开时无论指令、面板按钮还是平台配置，都不会烧录弹幕，一律按纯视频解析。要用弹幕功能时先把它关掉。"
+  },
+  {
+    "key": "playerEnabled",
+    "group": "通用",
+    "renderIn": "app",
+    "section": "在线播放器设置",
+    "type": "boolean",
+    "default": true,
+    "label": "在线播放器",
+    "description": "默认开启。打开时，解析面板里那一列按钮上的「弹幕」会把视频放到在线播放页（带弹幕）并回一条链接，不再把弹幕烧进视频、也不再把视频传到群里；链接有有效期，过期自动清理文件。关掉它就回到原来的 ffmpeg 烧录流程（列头也会变回「烧录弹幕」）。"
+  },
+  {
+    "key": "playerBaseUrl",
+    "group": "通用",
+    "renderIn": "app",
+    "section": "在线播放器设置",
+    "type": "string",
+    "default": "",
+    "label": "播放器公网地址",
+    "description": "例如 https://play.example.com（结尾斜杠会自动去掉）。用户收到的播放链接就是它加上 /kkk/player/<令牌>。留空会退化成「本机 IP + 端口」并在日志里警告一次，公网用户很可能打不开。"
+  },
+  {
+    "key": "playerPort",
+    "group": "通用",
+    "renderIn": "app",
+    "section": "在线播放器设置",
+    "type": "number",
+    "default": 0,
+    "min": 0,
+    "max": 65535,
+    "label": "播放器端口",
+    "description": "0 = 复用 Koishi 自己的端口（推荐，不用额外开端口）；填其它值会用 node:http 另起一个服务。端口被占用时只记一条日志并退回 Koishi 端口，不会影响解析。"
+  },
+  {
+    "key": "playerExpireMinutes",
+    "group": "通用",
+    "renderIn": "app",
+    "section": "在线播放器设置",
+    "type": "number",
+    "default": 60,
+    "min": 1,
+    "max": 1440,
+    "label": "链接有效期（分钟）",
+    "description": "播放链接与视频文件的有效期，默认 60 分钟（最小 1、最大 1440）。到点后视频和弹幕会被自动删除，链接打开是「链接已过期」。"
   }
 ]

@@ -1,7 +1,9 @@
 import fs from 'node:fs'
 import { buildMarkdownImageMessage } from '@/module/utils/QqPanel'
-// 弹幕烧录的总开关（通用里的「强制不烧录弹幕」优先级最高，平台配置也压不过）
-import { shouldBurnDanmaku } from '@/module/utils/DanmakuPolicy'
+// 弹幕策略（通用里的「强制不烧录弹幕」优先；「在线播放器」开着时是在线播放，不烧录）
+import { shouldBurnDanmaku, shouldFetchDanmaku } from '@/module/utils/DanmakuPolicy'
+// 在线播放：下载完之后登记播放会话并把链接回给用户（路径不能写 @/，那指向 karin/）
+import { isOnlinePlayerRequest, publishOnlinePlayer } from '../../../player'
 import { ParseSteps } from '@/module/utils/ParseSteps'
 import { sendSlicedImage } from '@/module/utils/ImageSlice'
 
@@ -94,6 +96,13 @@ export class Bilibili extends Base {
   downloadfilename: string
   /** 强制烧录弹幕（用于 #弹幕解析 命令） */
   forceBurnDanmaku: boolean
+  /**
+   * 本次解析取到的弹幕。
+   *
+   * `prepareVideo` 不负责发送，而在线播放要在「发送」那一步才能拿到最终文件名，
+   * 所以这里留一份给 `sendPreparedVideo` 用（只在线播放模式读，平时不占额外内存）。
+   */
+  danmakuList: BiliDanmakuElem[] = []
   /** 本次解析的内容形态，供统计埋点读取 */
   workType?: ParseWorkType
   get botadapter(): string {
@@ -289,7 +298,12 @@ export class Bilibili extends Base {
          * 顺序是用户要求的：下载最快不起来、又最不能失败，所以提到渲染卡片之前；
          * 下好的文件先存着，等卡片和评论区都发完再上传（见下面的「发送视频」）。
          */
-        const videoOversize = Config.app.usefilelimit && Number(videoSize) > Number(Config.app.filelimit) && !Config.app.compress
+        /**
+         * 在线播放模式**不做体积检查**：视频不会下发到 QQ，而是留在服务器上让播放页拉流，
+         * QQ 的 200MB 限制与它无关（大文件照样能在线看）。关掉播放器时才按老规矩判定。
+         */
+        const videoOversize = !isOnlinePlayerRequest() &&
+          Config.app.usefilelimit && Number(videoSize) > Number(Config.app.filelimit) && !Config.app.compress
         const willSendVideo = Config.bilibili.sendContent.some((content) => content === 'video')
         /** 本次要烧录的弹幕（烧录在下载那一步里完成，所以这里先拿到） */
         let danmakuList: BiliDanmakuElem[] = []
@@ -297,7 +311,8 @@ export class Bilibili extends Base {
           if (useAnonymousQuality) {
             this.islogin = false
           }
-          if (shouldBurnDanmaku(this.forceBurnDanmaku || Config.bilibili.burnDanmaku)) {
+          // 取弹幕的条件：要烧录，或者是在线播放（在线播放也要弹幕，只是不画进画面）
+          if (shouldFetchDanmaku(this.forceBurnDanmaku || Config.bilibili.burnDanmaku)) {
             const cid = iddata.p ? (infoData.data.data.pages[iddata.p - 1]?.cid ?? infoData.data.data.cid) : infoData.data.data.cid
             const duration = iddata.p
               ? (infoData.data.data.pages[iddata.p - 1]?.duration ?? infoData.data.data.duration)
@@ -560,7 +575,7 @@ export class Bilibili extends Base {
          * 这里和普通视频分支一样，按当前这一集的 cid 拉一份。
          */
         let bangumiDanmakuList: BiliDanmakuElem[] = []
-        if (shouldBurnDanmaku(this.forceBurnDanmaku || Config.bilibili.burnDanmaku)) {
+        if (shouldFetchDanmaku(this.forceBurnDanmaku || Config.bilibili.burnDanmaku)) {
           const currentEpisode = videoInfo.data.result.episodes[Number(Episode) - 1] as any
           const epDuration = Number(currentEpisode?.duration ?? 0) || 0
           bangumiDanmakuList = await this.fetchVideoDanmakuList(currentEpisode.cid, epDuration)
@@ -1343,6 +1358,8 @@ export class Bilibili extends Base {
   }) {
     /** 获取视频 => FFmpeg合成 */
     logger.debug('是否登录:', this.islogin)
+    // 留一份给「发送」那一步：在线播放要在那里登记播放会话（见 sendPreparedVideo）
+    this.danmakuList = danmakuList
     switch (this.islogin) {
       case true: {
         logger.debug(
@@ -1552,6 +1569,22 @@ export class Bilibili extends Base {
     this.preparedVideo = null
     if (!prepared) return false
     const { filepath, totalBytes, originTitle, videoUrl } = prepared
+    /**
+     * 在线播放模式：不烧录、也不上传，直接把下好的视频登记成播放会话，
+     * 回一条公网链接（弹幕存下来给播放页用）。
+     *
+     * 登记失败就往下走老流程（照常上传视频），在线播放器出问题不能连累整条解析。
+     */
+    if (isOnlinePlayerRequest()) {
+      const published = await publishOnlinePlayer(this.e, {
+        videoPath: filepath,
+        title: originTitle || this.downloadfilename,
+        platform: 'bilibili',
+        danmaku: this.danmakuList
+      })
+      if (published) return true
+      logger.warn('[在线播放] 播放会话登记失败，退回直接发送视频文件')
+    }
     if (totalBytes > Config.app.groupfilevalue) {
       await uploadFile(this.e, { filepath, totalBytes, originTitle }, videoUrl ?? '', { useGroupFile: true })
     } else {

@@ -21,6 +21,8 @@ export interface QqField {
   min?: number
   max?: number
   secret?: boolean
+  /** 只对 WebUI 有意义：renderIn 为 app 的字段，界面上归到这个小标题下 */
+  section?: string
 }
 
 export const QQ_FIELDS = fields as QqField[]

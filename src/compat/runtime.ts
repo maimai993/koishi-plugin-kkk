@@ -29,6 +29,14 @@ export interface KkkRuntimeConfig {
   qqPanelSourceLink?: boolean
   /** 强制不烧录弹幕（默认开）：优先级最高，指令 / 面板 / 平台配置都压不过它 */
   forceNoDanmaku?: boolean
+  /** 在线播放器总开关（默认关）：打开后「弹幕」走在线播放，不再烧录、也不再把视频发到群里 */
+  playerEnabled?: boolean
+  /** 播放器公网地址（例如 https://play.example.com）；留空退化成「本机 IP + 端口」并警告 */
+  playerBaseUrl?: string
+  /** 播放器端口：0 = 复用 Koishi 自己的端口（默认），非 0 用 node:http 另起一个 */
+  playerPort?: number
+  /** 播放链接 / 视频文件的有效期（分钟，1~1440） */
+  playerExpireMinutes?: number
 }
 
 export interface KkkRuntime {

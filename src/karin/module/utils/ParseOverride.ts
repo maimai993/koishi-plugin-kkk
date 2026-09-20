@@ -23,6 +23,13 @@ export interface ParseOverride {
   /** 强制烧录弹幕（等价于用「#弹幕解析」触发） */
   burnDanmaku?: boolean
   /**
+   * 本次走「在线播放」：不烧录弹幕，改成把视频登记成播放会话再把链接回给用户。
+   *
+   * 由 apps/tools.ts 在「用户要弹幕 + 播放器总开关打开」时置为 true，
+   * 平台 handler 与弹幕策略都读它（见 src/player/index.ts）。
+   */
+  onlinePlayer?: boolean
+  /**
    * 本次解析是**从 QQ 面板按钮点进来的**。
    *
    * 面板已经把卡片图发过了，所以解析时不再重复发提示语和预览卡片，

@@ -17,6 +17,9 @@ import {
   type PanelRequest
 } from '@/module/utils/QqPanel'
 import { isBurnDanmakuForbidden, isBurnDanmakuSupported } from '@/module/utils/DanmakuPolicy'
+// 注意路径同样不能用 @/：@/ 指向 karin/，而播放器在 src/player（见 src/player/index.ts）
+// 这里在 src/karin/apps/ 下，到 src/ 是两级；写成三级会解析到仓库根，tools 整个应用会加载失败
+import { isOnlinePlayerEnabled } from '../../player'
 import { wrapWithErrorHandler } from '@/module/utils/ErrorHandler'
 import { Bilibili, getBilibiliID } from '@/platform/bilibili'
 import { DouYin, getDouyinID } from '@/platform/douyin'
@@ -69,6 +72,9 @@ const recordParseStat = async (
  *
  * 优先级从高到低：通用里的「强制不烧录弹幕」（默认开，开了连指令都烧不了）→
  * 机器上有没有 ffmpeg → 这次用户有没有主动要。降级时只回一句话说明，不丢报错卡片。
+ *
+ * 注意：**在线播放模式不走这里**（调用方直接按 false 处理）—— 它不需要 ffmpeg，
+ * 也不该给用户弹一句「本部署已关闭弹幕烧录」的降级提示。
  * @param e 消息事件
  * @param requested 用户或配置是否要了弹幕
  * @returns 是否仍然按弹幕解析
@@ -139,13 +145,15 @@ const handleDouyin = wrapWithErrorHandler(
       return next()
     }
 
-    // 是否为弹幕解析：用 \`弹幕解析\` 指令触发，或面板按钮里带了 --dm=1
     /**
-    /**
-     * 是否为弹幕解析：指令 `弹幕解析 <链接>` 触发，或者画质面板里点了「烧录弹幕」（命令里带 --dm=1）。
-     * 能不能真的烧由 resolveBurnDanmaku 兜底：机器上没装 ffmpeg 时会提示一句并降级成纯视频。
+     * 是否为弹幕解析：指令 `弹幕解析 <链接>` 触发，或者解析面板里点了带弹幕的那一档（命令里带 --dm=1）。
+     *
+     * 两种落地方式：
+     *   - 通用里「在线播放器」开着 → **在线播放**（不烧录，登记播放会话后回一条链接）；
+     *   - 关着 → 老流程，交给 resolveBurnDanmaku 判定能不能真烧（没 ffmpeg 就提示一句并降级成纯视频）。
      */
     const requestBurnDanmaku = flags.override.burnDanmaku === true || /^#?弹幕解析/.test(e.msg)
+    const onlinePlayer = requestBurnDanmaku && isOnlinePlayerEnabled()
 
     const urlMatch = e.msg.match(/(https?:\/\/[^\s]*\.(douyin|iesdouyin)\.com[^\s]*)/gi)
     if (!urlMatch) {
@@ -165,9 +173,10 @@ const handleDouyin = wrapWithErrorHandler(
     }
 
     // 真的开始解析了才提示「本部署烧不了弹幕」——切换面板时要重发面板，那时提示是多余的
-    const forceBurnDanmaku = await resolveBurnDanmaku(e, requestBurnDanmaku)
+    // 在线播放模式直接按「不烧」处理（它压根不需要 ffmpeg，也不该弹降级提示）
+    const forceBurnDanmaku = onlinePlayer ? false : await resolveBurnDanmaku(e, requestBurnDanmaku)
     // 同一次点击可能被投递两遍（指令按钮 + 交互事件、连点），这里只放行一次
-    const douyinKey = ['douyin', e.contact?.peer ?? '', e.userId, iddata.aweme_id, flags.override.douyinQuality ?? '', String(forceBurnDanmaku)].join(':')
+    const douyinKey = ['douyin', e.contact?.peer ?? '', e.userId, iddata.aweme_id, flags.override.douyinQuality ?? '', String(forceBurnDanmaku), onlinePlayer ? 'player' : ''].join(':')
     if (!acquireParseLock(douyinKey)) {
       logger.debug('短时间内重复的抖音解析请求，已忽略: %s', douyinKey)
       return
@@ -181,7 +190,9 @@ const handleDouyin = wrapWithErrorHandler(
          * 只该回一句「收到请求，开始下载」，不再走「检测到链接，开始解析」。
          * 判据是面板专有参数：--p（画质按钮令牌）、--panel（选集）、--bgp（翻页）。
          */
-        fromPanel: flags.panelToken !== undefined || flags.panel !== undefined || flags.bangumiPage !== undefined
+        fromPanel: flags.panelToken !== undefined || flags.panel !== undefined || flags.bangumiPage !== undefined,
+        /** 在线播放模式：平台 handler 据此「取弹幕但不烧录」，下载完登记播放会话并回链接 */
+        onlinePlayer
       },
       () => douyin.DouyinHandler(iddata)
     )
@@ -211,12 +222,15 @@ const handleBilibili = wrapWithErrorHandler(
 
     e.msg = e.msg.replace(/\\/g, '') // 移除消息中的反斜杠
 
-    // 是否为弹幕解析（通过 #弹幕解析 命令触发，或面板里选了「视频＋弹幕」）
     /**
-     * 是否为弹幕解析：指令 `弹幕解析 <链接>` 触发，或者画质面板里点了「烧录弹幕」（命令里带 --dm=1）。
-     * 能不能真的烧由 resolveBurnDanmaku 兜底：机器上没装 ffmpeg 时会提示一句并降级成纯视频。
+     * 是否为弹幕解析：指令 `弹幕解析 <链接>` 触发，或者解析面板里点了带弹幕的那一档（命令里带 --dm=1）。
+     *
+     * 两种落地方式：
+     *   - 通用里「在线播放器」开着 → **在线播放**（不烧录，登记播放会话后回一条链接）；
+     *   - 关着 → 老流程，交给 resolveBurnDanmaku 判定能不能真烧（没 ffmpeg 就提示一句并降级成纯视频）。
      */
     const requestBurnDanmaku = flags.override.burnDanmaku === true || /^#?弹幕解析/.test(e.msg)
+    const onlinePlayer = requestBurnDanmaku && isOnlinePlayerEnabled()
 
     const urlRegex = /(https?:\/\/(?:(?:www\.|m\.|t\.)?bilibili\.com|b23\.tv|bili2233\.cn)\/[a-zA-Z0-9_\-.~:/?#[\]@!$&'()*+,;=]+)/
     const bvRegex = /^BV[1-9a-zA-Z]{10}$/
@@ -252,9 +266,10 @@ const handleBilibili = wrapWithErrorHandler(
     }
 
     // 真的开始解析了才提示「本部署烧不了弹幕」——切换面板时要重发面板，那时提示是多余的
-    const forceBurnDanmaku = await resolveBurnDanmaku(e, requestBurnDanmaku)
+    // 在线播放模式直接按「不烧」处理（它压根不需要 ffmpeg，也不该弹降级提示）
+    const forceBurnDanmaku = onlinePlayer ? false : await resolveBurnDanmaku(e, requestBurnDanmaku)
     // 同一次点击可能被投递两遍（指令按钮 + 交互事件、连点），这里只放行一次
-    const biliKey = ['bilibili', e.contact?.peer ?? '', e.userId, iddata.bvid ?? '', flags.override.bilibiliQuality ?? '', String(forceBurnDanmaku)].join(':')
+    const biliKey = ['bilibili', e.contact?.peer ?? '', e.userId, iddata.bvid ?? '', flags.override.bilibiliQuality ?? '', String(forceBurnDanmaku), onlinePlayer ? 'player' : ''].join(':')
     if (!acquireParseLock(biliKey)) {
       logger.debug('短时间内重复的B站解析请求，已忽略: %s', biliKey)
       return
@@ -274,6 +289,8 @@ const handleBilibili = wrapWithErrorHandler(
          * 手工敲的 `解析 <链接> --qn=32` 不带这些，仍然是正常解析流程。
          */
         fromPanel: flags.panelToken !== undefined || flags.panel !== undefined || flags.bangumiPage !== undefined,
+        /** 在线播放模式：平台 handler 据此「取弹幕但不烧录」，下载完登记播放会话并回链接 */
+        onlinePlayer,
         estimatedSizeMB,
         bangumiPage: flags.bangumiPage
       },
