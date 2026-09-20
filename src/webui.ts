@@ -86,7 +86,8 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
   // 面板把登录态存在 localStorage 的 accessToken / userId / refreshToken 三个键里，
   // 登录页只是个表单壳子 —— 与其去点 DOM（React 受控组件很脆），不如直接调登录接口把凭据写进去再刷新。
   try {
-    if (localStorage.getItem('accessToken')) return;
+    // 每次都重新换一次：面板自己的 token 存在服务端内存里，Koishi 重启就失效，
+    // 之前这里看到 localStorage 有值就直接 return，结果一直拿着废 token 请求，全部 401。
     // 防呆：万一接口一直不给凭据，也别在这里无限刷新
     if (sessionStorage.getItem('kkk-autologin') === '1') return;
     sessionStorage.setItem('kkk-autologin', '1');
@@ -256,6 +257,9 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
 
   const authed = (request: any): boolean => {
     if (!authRequired()) return true
+    // 面板 cookie（控制台换来的）本身就是授权凭据，接口请求直接用账号密码也不用再走一遍
+    const panelCookie = new RegExp(COOKIE_NAME + '_panel=([0-9a-f]+)').exec(String(request?.headers?.cookie || ''))
+    if (panelCookie && panelTokenValid(panelCookie[1])) return true
     const header = String(request?.headers?.authorization || request?.headers?.['x-access-token'] || '')
     if (header && tokens.has(header.replace(/^Bearer\s+/i, ''))) return true
     const cookie = String(request?.headers?.cookie || '')
