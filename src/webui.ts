@@ -291,9 +291,33 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
    * 这种无名的 `*` 通配（会直接抛 `Unexpected MODIFIER` 把整个插件搞崩），
    * 手动判前缀最省事也最兼容。
    */
+  /**
+   * 面板页面与静态资源的鉴权。
+   *
+   * `webUiAuth` 关（默认）时一律放行 —— 打开 `/kkk` 就能改配置；
+   * 打开后要求**已登录 Koishi 控制台**（认控制台的 cookie），没登录直接给提示页，
+   * 这样未登录状态下连 SPA 的静态资源和 /kkk/assets/config 这种前端路由也拿不到。
+   */
+  const pageDenied = async (response: any): Promise<boolean> => {
+    if (!authRequired()) return false
+    if (await consoleAuthed(response)) return false
+    response.status = 401
+    response.type = 'text/html; charset=utf-8'
+    response.body = [
+      '<!doctype html><meta charset="utf-8">',
+      '<div style="font-family:system-ui;padding:40px;line-height:1.8">',
+      '<h2>需要先登录 Koishi 控制台</h2>',
+      '<p>配置面板已开启登录校验（插件配置里的 <code>webUiAuth</code>）。</p>',
+      '<p><a href="/">去登录控制台</a>，登录后再回到本页面。</p>',
+      '</div>',
+    ].join('')
+    return true
+  }
+
   server.use(async (response: any, next: any) => {
     const requestPath = String(response.path || '')
     if (!requestPath.startsWith('/kkk/assets/')) return next()
+    if (await pageDenied(response)) return
     const relative = decodeURIComponent(requestPath.slice('/kkk/assets/'.length))
     const file = relative ? readWebFile(relative) : null
     if (!file) {
@@ -309,7 +333,8 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
   })
 
   for (const route of ['/kkk', '/kkk/', '/kkk/login']) {
-    server.get(route, (response: any) => {
+    server.get(route, async (response: any) => {
+      if (await pageDenied(response)) return
       response.type = 'text/html; charset=utf-8'
       response.body = indexHtml()
     })

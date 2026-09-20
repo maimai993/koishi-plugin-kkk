@@ -76,37 +76,110 @@ function stripComponent (text) {
     if (start < 0) return out
     const end = out.indexOf(END, start)
     if (end < 0) return out
-    out = out.slice(0, start) + out.slice(end + END.length)
+    // 插入时是 `,<块>,PR=...`，这里的块前面那个逗号也要一起去掉，
+    // 否则会留下 `,,` —— 语法直接报 Expected identifier but found ","
+    const from = out[start - 1] === ',' ? start - 1 : start
+    out = out.slice(0, from) + out.slice(end + END.length)
   }
 }
 
-const files = fs.readdirSync(webAssets).filter((name) => /^index-.*[.]js$/.test(name))
+/* ---------------- 布局里的「用户信息」块 ---------------- */
+
+/**
+ * 原版面板把用户信息写死在布局里（侧栏那张「炫炫 / Super Admin / 当前身份：管理员」卡片），
+ * Koishi 这边面板是免登录的，这块没有意义，整块删掉。
+ */
+function matchParen (text, start) {
+  let depth = 0
+  let quote = ''
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i]
+    if (quote) {
+      if (ch === '\\') { i++; continue }
+      if (ch === quote) quote = ''
+      continue
+    }
+    if (ch === '`' || ch === '"' || ch === "'") { quote = ch; continue }
+    if (ch === '(') depth++
+    else if (ch === ')') { depth--; if (depth === 0) return i }
+  }
+  return -1
+}
+
+function stripUserCard (text) {
+  // 桌面版在侧栏（`shrink-0 px-4 pt-3 pb-2`），移动版在菜单抽屉里（`shrink-0 pb-5`）
+  const nameAt = text.indexOf('炫炫')
+  if (nameAt < 0) return text
+  const divAt = text.lastIndexOf('(`div`,{className:`shrink-0', nameAt)
+  if (divAt < 0) return text
+  const start = text.lastIndexOf('(0,', divAt)
+  if (start < 0) return text
+  // 调用长这样：`(0,T.jsx)('div', {...})` —— 前半截 `(0,T.jsx)` 自己就闭合了，
+  // 括号配对必须从**参数**那个括号开始，否则会立刻返回、切错位置
+  const argOpen = text.indexOf(')(', start)
+  if (argOpen < 0) return text
+  let end = matchParen(text, argOpen + 1)
+  if (end < 0) return text
+  // 它通常是数组里的第一项，顺手把后面的逗号一起吃掉，免得留下一个空位
+  if (text[end + 1] === ',') end += 1
+  return text.slice(0, start) + text.slice(end + 1)
+}
+
+/* ---------------- 全局文案替换 ---------------- */
+
+const TEXT_REPLACERS = [
+  [/https:\/\/kkk\.karinjs\.com/g, 'https://kkk.tangbot.xyz'],
+  [/Karin 插件配置管理面板/g, 'koishi-plugin-kkk 配置面板'],
+  [/\bKarin\b/g, 'Koishi'],
+]
+
+function applyTextReplacements (text, name) {
+  let out = text
+  for (const [pattern, to] of TEXT_REPLACERS) out = out.replace(pattern, to)
+  if (out !== text) console.log('[kkk] 文案替换: ' + name)
+  return out
+}
+
+// 主包和布局在 assets/ 下，index.html 在上一级
+const files = [
+  ...fs.readdirSync(webAssets).filter((name) => /\.js$/.test(name)).map((name) => path.join(webAssets, name)),
+  path.join(path.dirname(webAssets), 'index.html'),
+].filter((file) => fs.existsSync(file))
 if (!files.length) throw new Error('找不到 assets/web/assets/index-*.js（WebUI 前端包）')
 
-for (const name of files) {
-  const file = path.join(webAssets, name)
+for (const file of files) {
+  const name = path.basename(file)
   let text = fs.readFileSync(file, 'utf-8')
   const before = text.length
 
-  // 可重复执行：先清掉上次插入的片段
-  text = stripComponent(text)
-  text = text.split(',' + CATEGORY).join('')
-  text = text.split(SWITCH).join('')
+  // 「QQ 适配器」分类只注入主包，其余文件（布局 / 主题 / index.html）只做删块与文案替换
+  const isBundle = text.includes(SWITCH_ANCHOR) || /^index-.*[.]js$/.test(name)
 
-  // 1. 分类列表
-  if (!text.includes(CATEGORY_ANCHOR)) throw new Error(name + '：找不到分类列表（前端包可能换版本了，需要重新适配）')
-  text = text.replace(CATEGORY_ANCHOR, ',' + CATEGORY + CATEGORY_ANCHOR)
+  if (isBundle) {
+    // 可重复执行：先清掉上次插入的片段
+    text = stripComponent(text)
+    text = text.split(',' + CATEGORY).join('')
+    text = text.split(SWITCH).join('')
 
-  // 2. 分发 switch
-  if (!text.includes(SWITCH_ANCHOR)) throw new Error(name + '：找不到配置面板的 switch')
-  text = text.replace(SWITCH_ANCHOR, SWITCH_ANCHOR + SWITCH)
+    // 1. 分类列表
+    if (text.includes(CATEGORY_ANCHOR)) text = text.replace(CATEGORY_ANCHOR, ',' + CATEGORY + CATEGORY_ANCHOR)
+    else console.warn('[kkk] ' + name + '：没找到分类列表，跳过（前端包可能换版本了）')
 
-  // 3. 组件定义（塞在 PR 前面，同一个模块作用域，能用 U / Q 这些打包期变量）
-  if (!text.includes(COMPONENT_ANCHOR)) throw new Error(name + '：找不到配置面板组件')
-  text = text.replace(COMPONENT_ANCHOR, ',' + START + componentCode + END + COMPONENT_ANCHOR)
+    // 2. 分发 switch
+    if (text.includes(SWITCH_ANCHOR)) text = text.replace(SWITCH_ANCHOR, SWITCH_ANCHOR + SWITCH)
+
+    // 3. 组件定义（塞在 PR 前面，同一个模块作用域，能用 U / Q 这些打包期变量）
+    if (text.includes(COMPONENT_ANCHOR)) text = text.replace(COMPONENT_ANCHOR, ',' + START + componentCode + END + COMPONENT_ANCHOR)
+  }
+
+  if (/DesktopLayout|MobileLayout/.test(name)) {
+    const stripped = stripUserCard(text)
+    if (stripped !== text) { console.log('[kkk] 已删除用户信息块: ' + name); text = stripped }
+  }
+  text = applyTextReplacements(text, name)
 
   fs.writeFileSync(file, text)
-  console.log('[kkk] 已注入 QQ 适配器分类: ' + name + '（' + before + ' → ' + text.length + ' 字节）')
+  if (text.length !== before || before !== fs.statSync(file).size || !isBundle) console.log('[kkk] 已处理: ' + name + '（' + before + ' → ' + text.length + ' 字节）')
 }
 
 console.log('[kkk] 完成，共处理 ' + files.length + ' 个文件')

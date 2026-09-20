@@ -1,5 +1,5 @@
 # 本地视频发送方式，可选值：file / base64
-# file: 使用 file 协议发送本地视频（需 Karin 与协议端在同一系统）
+# file: 使用 file 协议发送本地视频（需 Koishi 与协议端在同一系统）
 # base64: 转换为 base64 后发送（传输数据量增大约 30%，不在同一网络环境可能导致额外带宽成本，适合 karin 和协议端不在同一网络环境）
 videoSendMode: file
 
@@ -27,7 +27,7 @@ groupfilevalue: 100
 
 # 网络图片发送方式，可选值：url / file / base64
 # url: 直接传递 HTTP 链接给上游下载（可能因上游网络问题导致下载超时）
-# file: 下载到本地使用 file 协议发送（需 Karin 与协议端在同一系统）
+# file: 下载到本地使用 file 协议发送（需 Koishi 与协议端在同一系统）
 # base64: 下载后转换为 base64 发送（传输数据量增大约 30%，不在同一网络环境可能导致额外带宽成本）
 imageSendMode: url
 
