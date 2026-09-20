@@ -59,6 +59,9 @@ import {
 import { bilibiliFetcher, isSoftFailure, SOFT_ERROR_CODES, softFetch } from '@/module/utils/amagiClient'
 import { Config } from '@/module/utils/Config'
 import { getParseOverride } from '@/module/utils/ParseOverride'
+// 解析阶段（「下载进度」指令读的就是这里登记的状态）
+import { DOWNLOAD_STAGES, withDownloadStage } from '@/module/utils/Network/Downloader'
+import { beginParseStage } from '@/module/utils/parseTip'
 import { bilibiliComments, BilibiliId, checkCk, genParams } from '@/platform/bilibili'
 import { type BiliDanmakuElem, burnBiliDanmaku, getHotDanmaku, mergeAndBurnBili } from '@/platform/bilibili/danmaku'
 import {
@@ -129,6 +132,11 @@ export class Bilibili extends Base {
   }
 
   async BilibiliHandler(iddata: BilibiliId): Promise<boolean | undefined> {
+    /**
+     * B站这条链路原来**没有登记任何解析阶段**（sendParseTip 只被抖音/快手/小红书调用），
+     * 所以用户点「下载进度」一直是「当前没有正在进行的下载」。这里补上第一步。
+     */
+    await beginParseStage('B站')
     // 面板点进来的：卡片已经在面板里发过了，这里只回一句「收到请求」就开始下载
     const fromPanel = getParseOverride()?.fromPanel === true
     if (fromPanel) {
@@ -1472,26 +1480,31 @@ export class Bilibili extends Base {
           if (!bmp3) {
             if (hasDanmaku) {
               logger.debug(`开始烧录 ${danmakuList.length} 条弹幕...`)
-              success = await burnBiliDanmaku(bmp4.filepath, danmakuList, resultPath, {
-                danmakuArea: Config.bilibili.danmakuArea,
-                verticalMode: Config.bilibili.verticalMode,
-                videoCodec: Config.bilibili.videoCodec,
-                danmakuFontSize: Config.bilibili.danmakuFontSize,
-                danmakuOpacity: Config.bilibili.danmakuOpacity
-              })
+              // 包一层阶段：烧录期间「下载进度」显示「正在烧录」，结束（成功失败）都清掉
+              success = await withDownloadStage(DOWNLOAD_STAGES.burning, () =>
+                burnBiliDanmaku(bmp4.filepath, danmakuList, resultPath, {
+                  danmakuArea: Config.bilibili.danmakuArea,
+                  verticalMode: Config.bilibili.verticalMode,
+                  videoCodec: Config.bilibili.videoCodec,
+                  danmakuFontSize: Config.bilibili.danmakuFontSize,
+                  danmakuOpacity: Config.bilibili.danmakuOpacity
+                })
+              )
               sourcePath = resultPath
             } else {
               success = true
             }
           } else if (hasDanmaku) {
             logger.debug(`开始合成视频并烧录 ${danmakuList.length} 条弹幕...`)
-            success = await mergeAndBurnBili(bmp4.filepath, bmp3.filepath, danmakuList, resultPath, {
-              danmakuArea: Config.bilibili.danmakuArea,
-              verticalMode: Config.bilibili.verticalMode,
-              videoCodec: Config.bilibili.videoCodec,
-              danmakuFontSize: Config.bilibili.danmakuFontSize,
-              danmakuOpacity: Config.bilibili.danmakuOpacity
-            })
+            success = await withDownloadStage(DOWNLOAD_STAGES.burning, () =>
+              mergeAndBurnBili(bmp4.filepath, bmp3.filepath, danmakuList, resultPath, {
+                danmakuArea: Config.bilibili.danmakuArea,
+                verticalMode: Config.bilibili.verticalMode,
+                videoCodec: Config.bilibili.videoCodec,
+                danmakuFontSize: Config.bilibili.danmakuFontSize,
+                danmakuOpacity: Config.bilibili.danmakuOpacity
+              })
+            )
             sourcePath = resultPath
           } else {
             success = await mergeVideoAudio(bmp4.filepath, bmp3.filepath, resultPath)
@@ -1542,13 +1555,15 @@ export class Bilibili extends Base {
           if (videoFile.filepath) {
             const resultPath = Common.tempDri.video + `Bil_Result_${Date.now()}.mp4`
             logger.mark(`开始烧录 ${danmakuList.length} 条弹幕...`)
-            const success = await burnBiliDanmaku(videoFile.filepath, danmakuList, resultPath, {
-              danmakuArea: Config.bilibili.danmakuArea,
-              verticalMode: Config.bilibili.verticalMode,
-              videoCodec: Config.bilibili.videoCodec,
-              danmakuFontSize: Config.bilibili.danmakuFontSize,
-              danmakuOpacity: Config.bilibili.danmakuOpacity
-            })
+            const success = await withDownloadStage(DOWNLOAD_STAGES.burning, () =>
+              burnBiliDanmaku(videoFile.filepath, danmakuList, resultPath, {
+                danmakuArea: Config.bilibili.danmakuArea,
+                verticalMode: Config.bilibili.verticalMode,
+                videoCodec: Config.bilibili.videoCodec,
+                danmakuFontSize: Config.bilibili.danmakuFontSize,
+                danmakuOpacity: Config.bilibili.danmakuOpacity
+              })
+            )
             if (success) {
               const filePath = Common.tempDri.video + `${Config.app.removeCache ? 'tmp_' + Date.now() : this.downloadfilename}.mp4`
               fs.renameSync(resultPath, filePath)

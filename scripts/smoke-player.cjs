@@ -556,6 +556,35 @@ setTimeout(async () => {
     runtime.config.qqPanel = savedQqPanelFlag
     runtime.config.playerOnOversize = savedOnOversize
 
+    console.log('\n[12] 会话索引 / 弹幕带 BOM 也能读回来（Windows 上写文件很容易带 BOM）')
+    const bomDir = path.join(dataRoot, 'bom-check')
+    const bomToken = 'bomcheck00000001'
+    const bomSessionDir = path.join(bomDir, bomToken)
+    const bomVideo = path.join(bomSessionDir, 'video.mp4')
+    fs.rmSync(bomDir, { recursive: true, force: true })
+    fs.mkdirSync(bomSessionDir, { recursive: true })
+    fs.writeFileSync(bomVideo, VIDEO_BYTES)
+    fs.writeFileSync(path.join(bomSessionDir, 'danmaku.json'),
+      '\uFEFF' + JSON.stringify({ total: 1, items: [{ time: 10, mode: 1, size: 25, color: 16777215, text: 'BOM 弹幕' }] }))
+    fs.writeFileSync(path.join(bomDir, 'sessions.json'), '\uFEFF' + JSON.stringify([{
+      token: bomToken,
+      title: 'BOM 验证',
+      platform: 'bilibili',
+      dir: bomSessionDir,
+      filePath: bomVideo,
+      sizeBytes: VIDEO_BYTES.length,
+      danmakuCount: 1,
+      createdAt: Date.now(),
+      expireAt: Date.now() + 10 * 60 * 1000
+    }]))
+    store.setupPlayerStore(bomDir)
+    check('带 BOM 的 sessions.json 能读回来', store.listPlayerSessions().length === 1,
+      JSON.stringify(store.listPlayerSessions().map((item) => item.token)))
+    check('带 BOM 的 danmaku.json 也能读', (store.readPlayerDanmaku(bomToken)?.total ?? 0) === 1,
+      'total=' + store.readPlayerDanmaku(bomToken)?.total)
+    check('恢复出来的会话能打开播放页', (await request('/kkk/player/' + bomToken)).status === 200)
+    await store.deletePlayerSession(bomToken)
+
     videoSourceServer.close()
 
     const failed = results.filter((item) => !item.ok)

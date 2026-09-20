@@ -128,11 +128,23 @@ function normalizeSession (raw: any): PlayerSession | null {
   }
 }
 
+/**
+ * 读 JSON 文件（顺手吃掉 BOM）。
+ *
+ * Windows 上用 PowerShell 的 `Set-Content -Encoding utf8` 之类写出来的文件会带 U+FEFF，
+ * `JSON.parse` 会直接报 `Unexpected token '﻿'` —— 表现就是「会话索引读不回来」，
+ * 真实部署里踩到过，所以入口统一吃掉。
+ */
+function readJsonFile (file: string): any {
+  const text = fs.readFileSync(file, 'utf-8').replace(/^\uFEFF/, '')
+  return JSON.parse(text)
+}
+
 /** 读会话索引（宿主重启后恢复还没过期的会话） */
 function loadIndex (): void {
   if (!indexFile || !fs.existsSync(indexFile)) return
   try {
-    const list = JSON.parse(fs.readFileSync(indexFile, 'utf-8'))
+    const list = readJsonFile(indexFile)
     if (!Array.isArray(list)) return
     for (const item of list) {
       const session = normalizeSession(item)
@@ -255,7 +267,7 @@ export function readPlayerDanmaku (token: unknown): { total: number, items: Play
   const session = getPlayerSession(token)
   if (!session) return null
   try {
-    const raw = JSON.parse(fs.readFileSync(path.join(session.dir, 'danmaku.json'), 'utf-8'))
+    const raw = readJsonFile(path.join(session.dir, 'danmaku.json'))
     const items = Array.isArray(raw) ? raw : (Array.isArray(raw?.items) ? raw.items : [])
     return { total: Array.isArray(raw?.items) ? (Number(raw.total) || items.length) : items.length, items }
   } catch (error: any) {

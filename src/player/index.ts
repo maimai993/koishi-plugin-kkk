@@ -19,6 +19,8 @@ import path from 'node:path'
 import { logger } from 'node-karin'
 
 import { PLUGIN_DIR_NAME, tryGetRuntime } from '../compat/runtime'
+// 解析阶段（「下载进度」指令读的就是这里登记的状态）
+import { DOWNLOAD_STAGES, clearParseStage, updateDownloadStage } from '../karin/module/utils/Network/Downloader'
 import { getParseOverride } from '../karin/module/utils/ParseOverride'
 import { registerPlayerRoutes } from './server'
 import {
@@ -252,6 +254,11 @@ export async function publishOnlinePlayer (e: any, input: {
   danmaku?: any
 }): Promise<boolean> {
   if (!isOnlinePlayerEnabled()) return false
+  /**
+   * 在线播放模式下的「处理阶段」：下载已经完成，接下来是登记播放会话 + 回链接。
+   * 用户这时候点「下载进度」应该看到「正在准备在线播放」，而不是「当前没有正在进行的下载」。
+   */
+  updateDownloadStage(DOWNLOAD_STAGES.preparingPlayer)
   const reply = async (content: string) => {
     try {
       await e?.reply?.(content)
@@ -292,6 +299,9 @@ export async function publishOnlinePlayer (e: any, input: {
     logger.error('[在线播放] 发布播放会话失败: ' + String(error?.stack ?? error))
     await reply('在线播放准备失败（详情见日志），这里直接发送视频')
     return false
+  } finally {
+    // 阶段结束就清掉（成功失败都清）：下一阶段（比如退回发送）会重新登记
+    clearParseStage()
   }
 }
 

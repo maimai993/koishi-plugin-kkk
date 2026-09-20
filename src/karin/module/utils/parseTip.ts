@@ -10,9 +10,22 @@ import { segment, type Message } from 'node-karin'
 
 import { getParseOverride } from './ParseOverride'
 
-/** 阶段登记用的固定 key（同一时间只可能有一个解析在跑） */
-const STAGE_KEY = 'parse'
 import { Config } from './Config'
+
+/**
+ * 登记「正在获取下载链接」阶段。
+ *
+ * 用户在「收到请求，开始下载」刚出现时点「查询下载进度」，这时还没开始传字节，
+ * 以前只会显示「当前没有正在进行的下载」，很误导 —— 现在能看到真实阶段。
+ * 真正开始下载时 Downloader 会清掉阶段条目（改成显示字节进度），
+ * 后面的烧录 / 准备在线播放 / 发送等阶段会接着覆盖同一条记录。
+ */
+export const beginParseStage = async (platformName: string): Promise<void> => {
+  try {
+    const { reportDownloadStage, PARSE_STAGE_KEY, DOWNLOAD_STAGES } = await import('./Network/Downloader')
+    reportDownloadStage(PARSE_STAGE_KEY, platformName + '解析', DOWNLOAD_STAGES.fetching)
+  } catch { /* 观测失败不影响解析 */ }
+}
 
 /** 撤回上一条机器人消息（拿不到就忽略） */
 const recallPrevious = async (e: Message, content: any): Promise<void> => {
@@ -34,16 +47,8 @@ const recallPrevious = async (e: Message, content: any): Promise<void> => {
  *   - 手工发链接的：仍然是「检测到 XX 链接，开始解析」
  */
 export const sendParseTip = async (e: Message, platformName: string): Promise<void> => {
-  /**
-   * 登记一个「正在获取下载链接」的阶段。
-   * 用户在「收到请求，开始下载」刚出现时点「查询下载进度」，这时还没开始传字节，
-   * 以前只会显示「当前没有正在进行的下载」，很误导 —— 现在能看到真实阶段。
-   * 真正开始下载时 Downloader 会清掉这个阶段条目。
-   */
-  try {
-    const { reportDownloadStage } = await import('./Network/Downloader')
-    reportDownloadStage(STAGE_KEY, platformName + '解析', '正在获取下载链接')
-  } catch { /* 观测失败不影响解析 */ }
+  // 解析一开始就登记阶段：用户这时候点「下载进度」能看到「正在获取下载链接」
+  await beginParseStage(platformName)
 
   const fromPanel = getParseOverride()?.fromPanel === true
   if (fromPanel) {

@@ -70,14 +70,95 @@ export function reportDownloadProgress (filepath: string, bytes: number, total: 
  */
 export function reportDownloadStage (key: string, name: string, stage: string) {
   try {
+    lastStageNames.set(key, name)
     activeDownloads.set('stage:' + key, { name, bytes: 0, total: 0, at: Date.now(), stage })
     if (activeDownloads.size > 64) activeDownloads.delete(activeDownloads.keys().next().value as string)
   } catch { /* 观测失败不影响流程 */ }
 }
 
+/**
+ * 每个 key 最近一次用过的任务名。
+ *
+ * 阶段之间会被 {@link clearParseStage} 清掉（免得状态卡死），但名字要留着 ——
+ * 「正在烧录」「正在发送」这些出口拿不到平台名，得接着用「抖音解析」这个名字。
+ */
+const lastStageNames = new Map<string, string>()
+
 /** 结束阶段登记（进入真正下载或流程结束时调用） */
 export function clearDownloadStage (key: string) {
   activeDownloads.delete('stage:' + key)
+}
+
+/* ------------------------------------------------------------------ *
+ * 解析阶段（一次解析共用一个 key）
+ * ------------------------------------------------------------------ */
+
+/**
+ * 一次解析共用的阶段 key。
+ *
+ * 五个阶段（获取下载链接 / 合并音轨 / 烧录 / 准备在线播放 / 发送）都写同一个 key ——
+ * `reportDownloadStage` 是**覆盖**语义，所以同一次解析在进度表里永远只有一条阶段记录，
+ * 不会出现「正在烧录」和「正在发送」并排打架。
+ * （同一时刻只可能有一个解析在跑，这也是 parseTip 里原本的约定。）
+ */
+export const PARSE_STAGE_KEY = 'parse'
+
+/**
+ * 阶段文案。
+ *
+ * 集中放这里有两个好处：调用方各写一份中文容易写歪；冒烟测试也能直接引用同一份常量断言。
+ */
+export const DOWNLOAD_STAGES = {
+  /** 解析开始、还没拿到直链 */
+  fetching: '正在获取下载链接',
+  /** 音视频合成 / 实况合成 */
+  merging: '正在合并音轨',
+  /** 真烧录（把弹幕画进画面，要跑 ffmpeg） */
+  burning: '正在烧录',
+  /** 在线播放：登记播放会话、准备播放页 */
+  preparingPlayer: '正在准备在线播放',
+  /** 上传给聊天平台 */
+  sending: '正在发送'
+} as const
+
+/**
+ * 更新当前解析的阶段（沿用已有条目的任务名）。
+ *
+ * 「上传 / 烧录」这些出口拿不到平台名，用这里读到开始时登记的名字，
+ * 用户看到的始终是「抖音解析 正在烧录」这种完整的一条。
+ * @param stage 阶段文案（用 {@link DOWNLOAD_STAGES} 里的常量）
+ * @param fallbackName 阶段表里还没有条目时用的名字
+ */
+export function updateDownloadStage (stage: string, fallbackName = '视频解析') {
+  const existing = activeDownloads.get('stage:' + PARSE_STAGE_KEY)
+  const name = existing?.name ?? lastStageNames.get(PARSE_STAGE_KEY) ?? fallbackName
+  reportDownloadStage(PARSE_STAGE_KEY, name, stage)
+}
+
+/** 清掉当前解析的阶段条目（解析结束 / 失败兜底调用，别让状态卡死残留；任务名会留着给下一阶段用） */
+export function clearParseStage () {
+  clearDownloadStage(PARSE_STAGE_KEY)
+}
+
+/**
+ * 在某个阶段里跑一段工作：开始登记阶段，**成功失败都清掉**。
+ *
+ * 烧录 / 发送这类出口用它包一层就行，不用在每个函数体里各写一遍 try/finally。
+ * @param stage 阶段文案（用 {@link DOWNLOAD_STAGES} 里的常量）
+ * @param run 真正要做的事
+ * @param fallbackName 阶段表里还没有条目时用的名字
+ */
+export async function withDownloadStage<T> (
+  stage: string,
+  run: () => Promise<T>,
+  fallbackName = '视频解析'
+): Promise<T> {
+  updateDownloadStage(stage, fallbackName)
+  try {
+    return await run()
+  } finally {
+    clearParseStage()
+  }
 }
 
 /** 结束一次下载（成功/失败都要清掉，否则按钮会一直显示已完成的任务） */

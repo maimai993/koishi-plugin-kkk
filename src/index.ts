@@ -499,6 +499,18 @@ function registerCommands (
     } catch (error: any) {
       logger.error('命令 %s 执行失败: %s', options?.name ?? String(reg), error?.stack ?? error)
       throw error
+    } finally {
+      /**
+       * 兜底清理解析阶段（「下载进度」读的那条状态）。
+       *
+       * 正常情况下每个阶段结束自己会清（withDownloadStage / uploadFile / publishOnlinePlayer），
+       * 但解析可能在任何一步提前返回（图集作品、体积超限、用户没要视频…），
+       * 这里统一兜一层，保证「下载进度」不会一直卡在「正在获取下载链接」。
+       */
+      try {
+        const { clearParseStage } = require('./karin/module/utils/Network/Downloader')
+        clearParseStage()
+      } catch { /* 观测失败不影响解析 */ }
     }
     return !continued
   }

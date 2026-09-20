@@ -15,6 +15,8 @@ import { AmagiBase } from './amagiClient'
 import { tryGetRuntime } from '../../../compat/runtime'
 // 超限转在线播放：视频超过全局体积上限时，不拒绝而是挂到播放页（见 src/player）
 import { markOnlinePlayerOverride, shouldRedirectOversizeToPlayer } from '../../../player'
+// 解析阶段（「下载进度」指令读的就是这里登记的状态）
+import { DOWNLOAD_STAGES, clearParseStage, updateDownloadStage } from './Network/Downloader'
 
 type uploadFileOptions = {
   /** 是否使用群文件上传 */
@@ -202,6 +204,12 @@ export const Count = (count: number): string => {
  * @returns
  */
 export const uploadFile = async (event: Message, file: fileInfo, videoUrl: string, options?: uploadFileOptions): Promise<boolean> => {
+  /**
+   * 上传阶段：压缩、base64、真正推给平台都算「正在发送」。
+   * 以前这里没有任何登记，用户点「下载进度」只能看到「当前没有正在进行的下载」，
+   * 而实际上机器人正在上传几十 MB 的文件。
+   */
+  updateDownloadStage(DOWNLOAD_STAGES.sending)
   let sendStatus: boolean = true
   let File: string
   let newFileSize = file.totalBytes
@@ -354,6 +362,8 @@ export const uploadFile = async (event: Message, file: fileInfo, videoUrl: strin
     logger.error('视频文件上传错误,' + String(error))
     throw error // 重新抛出错误，让 wrapWithErrorHandler 能够捕获
   } finally {
+    // 发送阶段结束（成功失败都要清，否则「下载进度」会一直卡在「正在发送」）
+    clearParseStage()
     const filePath = file.filepath
     Common.registerVideoPreview(filePath, Config.app.removeCache, 30 * 60 * 1000)
     logger.mark(

@@ -5,7 +5,8 @@ import { buildMarkdownImageMessage } from '@/module/utils/QqPanel'
 import { shouldBurnDanmaku, shouldFetchDanmaku } from '@/module/utils/DanmakuPolicy'
 // 在线播放：下载完之后登记播放会话并把链接回给用户（路径不能写 @/，那指向 karin/）
 import { isOnlinePlayerRequest, publishOnlinePlayer } from '../../../player'
-import { sendParseTip } from '@/module/utils/parseTip'
+// 解析阶段（「下载进度」指令读的就是这里登记的状态）
+import { DOWNLOAD_STAGES, withDownloadStage } from '@/module/utils/Network/Downloader'
 import { sendParseTip } from '@/module/utils/parseTip'
 
 import { type DouyinEmojiListResponse, DouyinVideoWorkResponse } from '@ikenxuan/amagi'
@@ -891,13 +892,16 @@ export class DouYin extends Base {
             if (videoFile.filepath) {
               const resultPath = Common.tempDri.video + `Douyin_Result_${Date.now()}.mp4`
               logger.mark(`[抖音] 开始烧录 ${danmakuList.length} 条弹幕...`)
-              const success = await burnDouyinDanmaku(videoFile.filepath, danmakuList, resultPath, {
-                danmakuArea: Config.douyin.danmakuArea,
-                verticalMode: Config.douyin.verticalMode,
-                videoCodec: Config.douyin.videoCodec,
-                danmakuFontSize: Config.douyin.danmakuFontSize,
-                danmakuOpacity: Config.douyin.danmakuOpacity
-              })
+              // 包一层阶段：烧录期间「下载进度」显示「正在烧录」，结束（成功失败）都清掉
+              const success = await withDownloadStage(DOWNLOAD_STAGES.burning, () =>
+                burnDouyinDanmaku(videoFile.filepath, danmakuList, resultPath, {
+                  danmakuArea: Config.douyin.danmakuArea,
+                  verticalMode: Config.douyin.verticalMode,
+                  videoCodec: Config.douyin.videoCodec,
+                  danmakuFontSize: Config.douyin.danmakuFontSize,
+                  danmakuOpacity: Config.douyin.danmakuOpacity
+                })
+              )
               if (success) {
                 const filePath = Common.tempDri.video + `${Config.app.removeCache ? 'tmp_' + Date.now() : g_title}.mp4`
                 fs.renameSync(resultPath, filePath)

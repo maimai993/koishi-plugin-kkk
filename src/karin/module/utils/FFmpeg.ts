@@ -81,12 +81,15 @@ export const loopVideoWithTransition = async (
    * 登记「正在合并音轨」阶段：这一步要跑 ffmpeg 重编码 + BGM 混流，
    * 期间没有任何字节级别的进度，「查询下载进度」以前只会显示「未正在下载」。
    * 结束时清掉（成功失败都清）。
+   *
+   * 注意用的是**解析阶段共用的 key**（见 Downloader 的 PARSE_STAGE_KEY）：
+   * 用独立 key 的话会和「正在获取下载链接」并排显示成两条，用户看着就是打架。
    */
-  const { reportDownloadStage, clearDownloadStage } = await import('./Network/Downloader').catch(
-    () => ({ reportDownloadStage: null, clearDownloadStage: null }) as any
+  const { updateDownloadStage, clearParseStage, DOWNLOAD_STAGES } = await import('./Network/Downloader').catch(
+    () => ({ updateDownloadStage: null, clearParseStage: null, DOWNLOAD_STAGES: null }) as any
   )
   try {
-    reportDownloadStage?.('merge', '音视频合成', '正在合并音轨')
+    updateDownloadStage?.(DOWNLOAD_STAGES?.merging ?? '正在合并音轨', '音视频合成')
   } catch { /* 观测失败不影响合成 */ }
   /** 步骤 1：解析参数与基础配置 */
   const {
@@ -233,6 +236,11 @@ export const loopVideoWithTransition = async (
       }
     }
 
+    // 这条分支原来直接 return，阶段条目会一直残留（「下载进度」一直显示「正在合并音轨」）
+    try {
+      clearParseStage?.()
+    } catch { /* 观测失败不影响合成 */ }
+
     return {
       success: result.status,
       context: mergeContext
@@ -251,7 +259,7 @@ export const loopVideoWithTransition = async (
   }
 
   try {
-    clearDownloadStage?.('merge')
+    clearParseStage?.()
   } catch { /* 观测失败不影响合成 */ }
 
   return {
@@ -263,13 +271,25 @@ export const loopVideoWithTransition = async (
 
 /** 合并视频和音频（直接复制流） */
 export async function mergeVideoAudio(videoPath: string, audioPath: string, resultPath: string): Promise<boolean> {
-  const result = await ffmpeg(`-y -i "${videoPath}" -i "${audioPath}" -c copy "${resultPath}"`)
-  if (result.status) {
-    logger.debug(`视频合成成功: ${resultPath}`)
-  } else {
-    logger.error('视频合成失败', result)
+  /**
+   * 合成阶段（B站登录态那条链路走的就是它）：几百 MB 的音视频 copy 也要几秒到几十秒，
+   * 期间没有任何字节进度，用户点「下载进度」得有东西看。结束（成功失败）都清掉。
+   */
+  const { withDownloadStage, DOWNLOAD_STAGES } = await import('./Network/Downloader').catch(
+    () => ({ withDownloadStage: null, DOWNLOAD_STAGES: null }) as any
+  )
+  const merge = async () => {
+    const result = await ffmpeg(`-y -i "${videoPath}" -i "${audioPath}" -c copy "${resultPath}"`)
+    if (result.status) {
+      logger.debug(`视频合成成功: ${resultPath}`)
+    } else {
+      logger.error('视频合成失败', result)
+    }
+    return result.status
   }
-  return result.status
+  return withDownloadStage
+    ? await withDownloadStage(DOWNLOAD_STAGES?.merging ?? '正在合并音轨', merge, '音视频合成')
+    : await merge()
 }
 
 // ==================== 视频压缩 ====================
