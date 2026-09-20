@@ -262,8 +262,9 @@ function checkPermission (session: any, perm?: string | string[]): boolean {
   if (tokens.includes('master')) return isMaster
 
   if (tokens.includes('admin')) {
+    // Koishi 这边 admin 指「权限等级 4 及以上」
     if (isMaster) return true
-    if (authority >= 3) return true   // 3 = 管理员
+    if (authority >= 4) return true
     const roles: string[] = session.author?.roles ?? []
     if (roles.includes('owner') || roles.includes('admin') || roles.includes('administrator')) return true
     return false

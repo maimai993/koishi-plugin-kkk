@@ -164,8 +164,8 @@ function patchPushDialog (text, name) {
  * 现在都换成文本框：可以填 * （谁都可以）、关键字，也可以直接写 QQ 号，多个用逗号分隔。
  * 服务端保存时会把「错误日志」这一项的字符串拆成数组。
  */
-const PERM_DESC = '填 * 表示谁都可以；也可以直接写账号（多个用逗号分隔）。可选关键字：all / admin / master / group.owner / group.admin。'
-const LOG_DESC = '谁来接收错误日志。可填 master（第一个主人）、allMasters（所有主人）、admin（管理员）、trigger（触发者的群聊），也可以直接写账号；多个用逗号分隔。'
+const PERM_DESC = '可填 all（所有人，等同 *）或 admin（权限等级 4 及以上的账号）；也可以直接写账号（QQ 号），多个用逗号分隔。'
+const LOG_DESC = '谁来接收错误日志。可填 master（第一个主人）、allMasters（所有主人）、admin（权限等级 4 及以上）、trigger（触发者所在的群），也可以直接写账号（QQ 号）；多个用逗号分隔。'
 
 const TEXT_SWAPS = [
   [
@@ -181,6 +181,25 @@ const TEXT_SWAPS = [
     'c([`app`,`errorLogSendTo`],`错误日志`,' + '{DESC2}' + ')',
   ],
 ]
+
+/**
+ * 描述按「标签」改写：不管之前是下拉框还是文本框版本，都能把说明换成最新文案，
+ * 避免只改了第一次打补丁时的那段原文、后面就再也替换不到。
+ */
+const DESC_BY_LABEL = [
+  ['谁可以触发扫码登录', PERM_DESC],
+  ['错误日志', LOG_DESC],
+]
+
+function patchDescriptions (text, name) {
+  let out = text
+  for (const [label, desc] of DESC_BY_LABEL) {
+    const pattern = new RegExp('`' + label + '`,`[^`]*`', 'g')
+    out = out.replace(pattern, '`' + label + '`,`' + desc + '`')
+  }
+  if (out !== text) console.log('[kkk] 描述已更新: ' + name)
+  return out
+}
 
 function patchTextFields (text, name) {
   let out = text
@@ -254,6 +273,7 @@ for (const file of files) {
   }
   text = patchPushDialog(text, name)
   text = patchTextFields(text, name)
+  text = patchDescriptions(text, name)
   text = applyTextReplacements(text, name)
 
   fs.writeFileSync(file, text)
