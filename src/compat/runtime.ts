@@ -25,6 +25,8 @@ export interface KkkRuntimeConfig {
   qqGroupFileLimitMB?: number
   /** 解析面板里是否显示「烧录弹幕」列（默认关） */
   qqPanelDanmaku?: boolean
+  /** 解析面板 / 番剧面板下方是否带「打开原站」链接（默认带） */
+  qqPanelSourceLink?: boolean
   /** 强制不烧录弹幕（默认开）：优先级最高，指令 / 面板 / 平台配置都压不过它 */
   forceNoDanmaku?: boolean
 }

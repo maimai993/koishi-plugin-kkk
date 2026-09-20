@@ -321,6 +321,20 @@ async function fetchPanelInfo (request: PanelRequest): Promise<PanelInfo | null>
  * @param command 点击后发送的指令文本
  * @param show 展示文字（默认同 command）
  */
+/**
+ * QQ markdown 里「点一下就跳转」的链接。
+ *
+ * 普通外链（`[文字](https://…)`）在 QQ 的 markdown 消息里点不动，
+ * 官方给的写法是 `mqqapi://forward/url?version=1&src_type=web&url_prefix=<编码后的地址>`
+ * （推送那边一直用的就是这个）。空地址返回空串，调用方判空即可。
+ * @param label 用户看到的文字
+ * @param url 目标地址
+ */
+export function sourceLink (label: string, url: string): string {
+  if (!url) return ''
+  return '[' + label + '](mqqapi://forward/url?version=1&src_type=web&url_prefix=' + encodeURIComponent(url) + ')'
+}
+
 export function cmdInput (command: string, show?: string): string {
   const text = encodeURIComponent(command).replace(/'/g, '%27')
   const label = encodeURIComponent(show ?? command).replace(/'/g, '%27')
@@ -641,6 +655,8 @@ export async function sendBangumiPanelPage (e: Message, episodes: any[], cardDat
     // 翻页信息放在表格**外面**（不占表格格子）：上一页 | 第 x/y 页 | 下一页
     lines.push('')
     lines.push((prev ? prev : '　') + '　第 ' + current + ' / ' + pages + ' 页　' + (next ? next : '　'))
+    // 「打开原站」同样挂在选集面板下面（开关见 qqPanelSourceLink）
+    if (tryGetRuntime()?.config.qqPanelSourceLink !== false && seasonUrl) lines.push(sourceLink('打开原站', seasonUrl))
 
     await recallLastPanel(e)
     const sent: any = await e.reply(segment.markdown(lines.join('\n')))
@@ -754,6 +770,12 @@ export async function sendQqParsePanel (e: Message, request: PanelRequest): Prom
   }
   // 一档都不满足体积上限：仍给出最小的一档（否则用户连解析都点不了），但要说清楚风险
   if (overflow) lines.push('所有画质都超过体积上限（' + limit + 'MB），这里只保留最小的一档，发送可能失败。')
+  /**
+   * 「打开原站」：放在表格下方（用户要求的位置）——用户看完卡片和画质后，
+   * 想直接去平台看原作品时不用再翻聊天记录找链接。
+   * 开关在 WebUI 的 QQ 适配器分组（qqPanelSourceLink，默认开）。
+   */
+  if (runtime.config.qqPanelSourceLink !== false && request.url) lines.push(sourceLink('打开原站', request.url))
   await replaceLoadingTip(e, loadingId, segment.markdown(lines.join(String.fromCharCode(10))))
   logger.debug('[QQ面板] 已发送解析面板: ' + request.platform + ' ' + request.id + '（' + shown.length + '/' + info.options.length + ' 档画质）')
   return true

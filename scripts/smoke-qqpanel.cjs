@@ -191,6 +191,13 @@ setTimeout(async () => {
     // 两个开关都满足才显示：通用里的「强制不烧录弹幕」关掉 + QQ 适配器里打开面板弹幕列
     liveRuntime.config.forceNoDanmaku = false
     liveRuntime.config.qqPanelDanmaku = true
+    check('面板下方带「打开原站」链接（默认开）', /打开原站]\(mqqapi:\/\/forward\/url\?version=1/.test(panel.markdown),
+      (panel.markdown.split('\n').find((l) => l.includes('打开原站')) || '（没有链接行）').slice(0, 120))
+    liveRuntime.config.qqPanelSourceLink = false
+    const noLink = readPanel(await runCommand('B站', target))
+    liveRuntime.config.qqPanelSourceLink = true
+    check('关掉开关后不再出现「打开原站」', !/打开原站/.test(noLink.markdown))
+
     const onPanel = readPanel(await runCommand('B站', target))
     liveRuntime.config.qqPanelDanmaku = savedPanelDanmaku
     liveRuntime.config.forceNoDanmaku = savedForce

@@ -773,6 +773,7 @@ export async function apply (ctx: Context, rawConfig: Config) {
       qqPanel: config.qqPanel !== false,
       qqFileLimitMB: Number(config.qqFileLimitMB) || 200,
       qqPanelDanmaku: config.qqPanelDanmaku === true,
+      qqPanelSourceLink: (config as any).qqPanelSourceLink !== false,
       forceNoDanmaku: (config as any).forceNoDanmaku !== false,
       qqGroupFileLimitMB: (() => {
         const raw = (config as any).qqGroupFileLimitMB
