@@ -46,6 +46,15 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
   }
 
   const webRoot = path.join(pluginRoot, 'assets', 'web')
+
+  /** 面板前端是静态包，版本号由这里注入（前端里写的是 __KKK_VERSION__ 占位符） */
+  const pluginVersion = (() => {
+    try {
+      return String(JSON.parse(fs.readFileSync(path.join(pluginRoot, 'package.json'), 'utf-8')).version || '')
+    } catch {
+      return ''
+    }
+  })()
   const MIME: Record<string, string> = {
     '.html': 'text/html; charset=utf-8',
     '.js': 'text/javascript; charset=utf-8',
@@ -319,14 +328,18 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
     if (!requestPath.startsWith('/kkk/assets/')) return next()
     if (await pageDenied(response)) return
     const relative = decodeURIComponent(requestPath.slice('/kkk/assets/'.length))
-    const file = relative ? readWebFile(relative) : null
-    if (!file) {
+    const raw = relative ? readWebFile(relative) : null
+    if (!raw) {
       // SPA 自己的前端路由（/kkk/assets/config、/kkk/assets/about 等）→ 回 index.html
       response.type = 'text/html; charset=utf-8'
       response.body = indexHtml()
       return
     }
     response.type = MIME[path.extname(relative).toLowerCase()] ?? 'application/octet-stream'
+    // 前端包里带 __KKK_VERSION__ 占位符的文件，按真实版本号替换后再发
+    const file = pluginVersion && relative.endsWith('.js') && raw.includes('__KKK_VERSION__')
+      ? Buffer.from(raw.toString('utf-8').replace(/__KKK_VERSION__/g, pluginVersion))
+      : raw
     // 不缓存：面板的前端包会被我们改动（接口路径等），浏览器缓存旧包会直接导致「打不开/接口报错」
     response.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
     response.body = file

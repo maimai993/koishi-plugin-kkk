@@ -125,10 +125,47 @@ function stripUserCard (text) {
   return text.slice(0, start) + text.slice(end + 1)
 }
 
+/* ---------------- 推送目标弹窗：推送群改手填 ---------------- */
+
+/**
+ * 原版的「推送群」是从 /kkk/v1/bots/:id/groups 拉的下拉框，
+ * 但那个接口拿不到群列表时是空的，用户根本选不了（只显示「请先选择机器人账号。」）。
+ * 这里把这一项换成纯文本输入，直接填群号；提交时也允许没有 group 对象。
+ */
+const PUSH_GROUP_SELECT = '(0,U.jsx)(hR,{description:l?`当前 Bot 已加入的群。`:`请先选择机器人账号。`,disabled:!l||h,items:C,label:`推送群`,placeholder:`选择推送群`,selectedId:d,onSelect:f})'
+const PUSH_GROUP_INPUT = [
+  '(0,U.jsxs)(`div`,{className:`flex flex-col gap-1`,children:[',
+  '(0,U.jsx)(dx,{className:`font-semibold`,children:`推送群`}),',
+  '(0,U.jsx)(`input`,{className:`w-full rounded-large border border-default-200 bg-default-100 px-3 py-2 text-sm outline-none`,placeholder:`填写群号，例如 1050229473`,value:d||``,onChange:e=>f(e.target.value)}),',
+  '(0,U.jsx)(px,{className:`text-xs`,children:`直接填群号（频道 id）即可；要指定平台时写成 平台:群号。`})',
+  ']})',
+].join('')
+
+const PUSH_SUBMIT_FROM = 'let T=()=>{if(!w||!b||!x)return;let e={groupId:x.id,botId:b.id};x.name&&(e.groupName=x.name),x.avatar&&(e.groupAvatar=x.avatar),'
+const PUSH_SUBMIT_TO = 'let T=()=>{if(!w||!b)return;let e={groupId:(x&&x.id)||String(d||``).trim(),botId:b.id};x&&x.name&&(e.groupName=x.name),x&&x.avatar&&(e.groupAvatar=x.avatar),'
+
+function patchPushDialog (text, name) {
+  let out = text
+  if (out.includes(PUSH_GROUP_SELECT)) {
+    out = out.replace(PUSH_GROUP_SELECT, PUSH_GROUP_INPUT)
+    console.log('[kkk] 「推送群」改为手填群号: ' + name)
+  }
+  if (out.includes(PUSH_SUBMIT_FROM)) out = out.replace(PUSH_SUBMIT_FROM, PUSH_SUBMIT_TO)
+  out = out.replace('先选择 Bot，再选择该 Bot 加入的群。', '先选择机器人账号，再填写要推送的群号。')
+  return out
+}
+
 /* ---------------- 全局文案替换 ---------------- */
 
 const TEXT_REPLACERS = [
   [/https:\/\/kkk\.karinjs\.com/g, 'https://kkk.tangbot.xyz'],
+  // 「关于插件」页：上游的仓库/头像/作者信息换成本项目
+  [/https:\/\/github\.com\/ikenxuan\/karin-plugin-kkk/g, 'https://github.com/maimai993/koishi-plugin-kkk'],
+  [/https:\/\/github\.com\/ikenxuan\.png/g, 'https://github.com/maimai993.png'],
+  [/ikenxuan, sj817/g, 'maimai993（Koishi 移植版；上游 karin-plugin-kkk by ikenxuan, sj817）'],
+  // 「关于插件」页的大标题（JSX 里是反引号字符串）
+  [/`karin-plugin-kkk`/g, '`koishi-plugin-kkk`'],
+  [/版本 2\.33\.0/g, '版本 __KKK_VERSION__'],
   [/Karin 插件配置管理面板/g, 'koishi-plugin-kkk 配置面板'],
   [/\bKarin\b/g, 'Koishi'],
 ]
@@ -176,6 +213,7 @@ for (const file of files) {
     const stripped = stripUserCard(text)
     if (stripped !== text) { console.log('[kkk] 已删除用户信息块: ' + name); text = stripped }
   }
+  text = patchPushDialog(text, name)
   text = applyTextReplacements(text, name)
 
   fs.writeFileSync(file, text)
