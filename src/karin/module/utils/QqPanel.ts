@@ -775,7 +775,7 @@ export async function sendQqParsePanel (e: Message, request: PanelRequest): Prom
   /**
    * 一个按钮：点下去**直接按这一档画质解析**。
    * @param burn 为 true 时命令里多带一个 `--dm=1` —— 这一档画质按「带弹幕」解析
-   *   （通用里「在线播放器」开着时是在线播放，关着时是真烧录，由 tools.ts 判定）
+   *   （通用里「弹幕重定向在线播放器」开着时是在线播放，关着时是真烧录，由 tools.ts 判定）
    */
   const cell = (command: string, id: string | number, label: string, burn = false) =>
     cmdInput(command + ' ' + (urlPart || short) + ' ' + short + ' ' + qualityFlag + id + (burn ? ' --dm=1' : ''), label)
@@ -785,17 +785,21 @@ export async function sendQqParsePanel (e: Message, request: PanelRequest): Prom
    *   - 默认（不带弹幕）：清晰度 / 大小 两列，「清晰度」本身就是按钮
    *   - 带弹幕：清晰度 / 弹幕 / 大小 三列 —— 中间那列是按这一档画质
    *     **带弹幕**解析的按钮（命令里带 `--dm=1`），原「清晰度」按钮仍是纯视频
-   * 这一列出不出现，完全由配置决定（WebUI 面板 → QQ 适配器 → 「面板显示「烧录弹幕」列」，
-   * 默认关）：关着就只有「清晰度 / 大小」两列，用户没法从面板上选弹幕。
-   *
-   * 两种模式共用这一列，只是文案和落地方式不同：
-   *   - 通用里「在线播放器」开着 → 列头/按钮写「弹幕」，点它是**在线播放**（不需要 ffmpeg）；
+   * 两种模式共用这一列，文案和落地方式不同：
+   *   - 通用里「弹幕重定向在线播放器」开着 → 列头/按钮写「弹幕」，点它是**在线播放**（不需要 ffmpeg）；
    *   - 关着 → 老流程，写「烧录弹幕」，需要机器上有 ffmpeg + 关掉「强制不烧录弹幕」。
+   *
+   * 这一列出不出现的规则（用户实测反馈过：开了在线播放器却没有按钮）：
+   *   - **在线播放模式：跟着「弹幕重定向在线播放器」走，开着就显示**
+   *     —— 用户打开这个开关的意思就是「弹幕走在线播放」，面板上当然得有入口，
+   *     再要求他去 QQ 适配器里另开一个「面板显示烧录弹幕列」是没道理的；
+   *   - 烧录模式（播放器关掉）：还是老规矩，由 QQ 适配器里的
+   *     「面板显示「烧录弹幕」列」（默认关）+ 能不能真烧（ffmpeg + 强制不烧录弹幕关掉）共同决定。
    */
   // 缺省即开启（和「打开原站」开关一个口径）：老配置里没有这个键时，列头也是「弹幕」
   const onlinePlayer = runtime.config.playerEnabled !== false
   const danmakuLabel = onlinePlayer ? '弹幕' : '烧录弹幕'
-  const danmakuEnabled = runtime.config.qqPanelDanmaku === true && (onlinePlayer || isBurnDanmakuSupported())
+  const danmakuEnabled = onlinePlayer || (runtime.config.qqPanelDanmaku === true && isBurnDanmakuSupported())
   if (danmakuEnabled) {
     lines.push('| 清晰度 | ' + danmakuLabel + ' | 大小 |')
     lines.push('| :--- | :---: | ---: |')

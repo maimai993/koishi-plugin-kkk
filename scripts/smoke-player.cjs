@@ -382,13 +382,21 @@ setTimeout(async () => {
     const savedPanelDanmaku = runtime.config.qqPanelDanmaku
     const savedForce = runtime.config.forceNoDanmaku
 
-    // 默认状态（播放器开启，不显式设置）→ 列头写「弹幕」
-    runtime.config.qqPanelDanmaku = true
+    /**
+     * 用户实测反馈：打开了「弹幕重定向在线播放器」，面板里却没有「弹幕」按钮 ——
+     * 因为这一列当时还被 QQ 适配器里的「面板显示「烧录弹幕」列」（默认关）管着。
+     * 现在在线播放模式下这一列只跟播放器开关走，所以下面**故意不设置 qqPanelDanmaku**。
+     */
+    runtime.config.qqPanelDanmaku = savedPanelDanmaku
     const playerPanel = await collect()
-    // 显式关掉播放器 + 允许烧录 → 列头写「烧录弹幕」
+    // 显式关掉播放器 + 允许烧录 → 列头写「烧录弹幕」（这时才轮到 qqPanelDanmaku 决定）
     runtime.config.playerEnabled = false
     runtime.config.forceNoDanmaku = false
+    runtime.config.qqPanelDanmaku = true
     const burnPanel = await collect()
+    // 关掉播放器、也不开「面板显示烧录弹幕列」→ 回到两列（老行为）
+    runtime.config.qqPanelDanmaku = false
+    const burnPanelOff = await collect()
 
     // 顺带验证：总开关关掉时「什么都不做」（不注册、不回复、也不动视频文件）
     const closedSent = []
@@ -408,7 +416,10 @@ setTimeout(async () => {
 
     const headerOf = (panel) => panel.markdown.split('\n').find((line) => line.startsWith('| 清晰度')) || '（没有表格）'
     const burnButtons = (panel) => panel.buttons.filter((button) => String(button.data).includes('--dm=1'))
-    check('默认（播放器开启）表头是「清晰度 | 弹幕 | 大小」', headerOf(playerPanel) === '| 清晰度 | 弹幕 | 大小 |', headerOf(playerPanel))
+    check('播放器开着就有「弹幕」列（不需要再开 QQ 适配器里的烧录列开关）',
+      headerOf(playerPanel) === '| 清晰度 | 弹幕 | 大小 |', headerOf(playerPanel))
+    check('关掉播放器 + 不开烧录列开关 → 回到两列',
+      headerOf(burnPanelOff) === '| 清晰度 | 大小 |', headerOf(burnPanelOff))
     check('默认（播放器开启）按钮文字是「弹幕」', burnButtons(playerPanel).length > 0 &&
       burnButtons(playerPanel).every((button) => button.label === '弹幕'),
       burnButtons(playerPanel).map((button) => button.label).join(' / ') || '（没有按钮）')
