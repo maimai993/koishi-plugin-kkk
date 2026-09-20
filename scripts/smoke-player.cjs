@@ -85,7 +85,19 @@ const VIDEO_SOURCE_URL = 'http://127.0.0.1:' + VIDEO_SOURCE_PORT + '/video.mp4'
 const VIDEO_SOURCE_BYTES = Buffer.alloc(4096)
 for (let i = 0; i < VIDEO_SOURCE_BYTES.length; i++) VIDEO_SOURCE_BYTES[i] = i % 251
 const VIDEO_SOURCE_SIZE_MB = 5
+/** 一张 8x8 透明 PNG：给 B站 stub 当封面（同源取的，不依赖外网） */
+const COVER_BYTES = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAgAAAAIAQMAAAD+wSzIAAAABlBMVEX///+/v7+jQ3Y5AAAADklEQVQI12P4AIX8EAgALgAD/aNpbtEAAAAASUVORK5CYII=',
+  'base64')
 const videoSourceServer = http.createServer((req, res) => {
+  // 封面也从这个本机服务取（播放页那边会把它下到会话目录，走同源地址）
+  if (String(req.url ?? '').includes('cover')) {
+    const coverHeaders = { 'Content-Type': 'image/png', 'Content-Length': String(COVER_BYTES.length) }
+    res.writeHead(200, coverHeaders)
+    if (String(req.method).toUpperCase() === 'HEAD') { res.end(); return }
+    res.end(COVER_BYTES)
+    return
+  }
   const headers = { 'Content-Type': 'video/mp4', 'Content-Length': String(VIDEO_SOURCE_BYTES.length) }
   if (String(req.method).toUpperCase() === 'HEAD') {
     res.writeHead(200, headers)
@@ -105,12 +117,13 @@ const biliInfoFixture = {
   title: '【超限转播验证】B站视频',
   desc: '这里是简介',
   desc_v2: [],
-  pic: 'https://www.w3schools.com/html/pic_trulli.jpg',
+  pic: 'http://127.0.0.1:' + VIDEO_SOURCE_PORT + '/cover.png',
   ctime: Math.floor(Date.now() / 1000) - 3600,
-  duration: 15,
-  pages: [{ cid: 67890, duration: 15 }],
-  owner: { mid: 1, name: '测试UP', face: 'https://www.w3schools.com/html/pic_trulli.jpg' },
-  stat: { view: 1, danmaku: 2, reply: 3, like: 4, coin: 5, share: 6, favorite: 7 }
+  duration: 1172,
+  pages: [{ cid: 67890, duration: 1172 }],
+  owner: { mid: 1, name: '测试UP主', face: '' },
+  // 统计数字给大一点，顺便验证「528.1万」这种B站口径的缩写
+  stat: { view: 5281000, danmaku: 4097, reply: 35000, like: 418000, coin: 146000, share: 145000, favorite: 223000 }
 }
 
 const amagi = resolveDep('@ikenxuan/amagi')
@@ -286,12 +299,107 @@ setTimeout(async () => {
     const html = page.body.toString('utf-8')
     check('返回 200', page.status === 200, 'status=' + page.status)
     check('是 HTML 页面', /text\/html/.test(String(page.headers['content-type'])), String(page.headers['content-type']))
-    check('页面含「弹幕开关」控件', html.includes('弹幕开关'))
-    check('页面含「字号」控件', html.includes('字号') && /id="dmSize"/.test(html))
-    check('页面含「透明度」控件', html.includes('透明度') && /id="dmOpacity"/.test(html))
-    check('页面自带 canvas 弹幕（不依赖外网弹幕库）', html.includes("getContext('2d')") && !/<script[^>]+src=/.test(html),
-      '外链脚本数 ' + (html.match(/<script[^>]+src=/g) || []).length)
+    /**
+     * 用户要求：播放页照 **B站播放页**（夜间模式）的 UI 做，而且**必须零外网依赖**
+     * （不引 CDN、不引第三方库、图标一律内联 SVG、封面走同源）。
+     */
+    check('弹幕控制条：开关 + 「弹幕设置」按钮',
+      /id="dmOn"/.test(html) && html.includes('弹幕设置') && !/id="dmOn"[^>]*type="range"/.test(html),
+      '开关是样式化的 switch（.sw-track/.sw-thumb）')
+    check('弹幕设置面板默认收起（点一下才展开）',
+      /id="dmPanel"[^>]*hidden/.test(html) && html.includes("getElementById('dmPanel')") &&
+      html.includes("settingsPanel.hidden = !open"))
+    check('三类控件齐备：字号 / 透明度 / 显示区域',
+      /id="dmSize"/.test(html) && html.includes('字号') &&
+      /id="dmOpacity"/.test(html) && html.includes('透明度') &&
+      /id="dmArea"/.test(html) && html.includes('显示区域'))
+    check('B站那片标题区 + 数据行', html.includes('class="title"') && html.includes('class="stats"') &&
+      /class="stat /.test(html), '标题 + 统计行（图标 + 浅灰字）')
+    // 这条会话没有作品信息：**绝不编数据** —— 不显示操作按钮排，也不显示假播放量
+    check('没有作品信息时不编造数据（不出现操作按钮 / 假统计）',
+      !html.includes('class="actions"') && !html.includes('播放量'))
+    check('图标是内联 SVG（没有 emoji 图标）',
+      html.includes('<svg viewBox="0 0 24 24"') &&
+      !/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(html))
+    {
+      // 零外网依赖：页面里不能有任何 http(s) 外链资源
+      const externals = html.match(/https?:\/\/[^"'\s)]+/g) || []
+      check('零外网依赖（HTML 里没有任何 http/https 外链）', externals.length === 0,
+        externals.length ? externals.slice(0, 3).join(' ') : '一共 0 条')
+      check('弹幕仍是 canvas 自绘', html.includes("getContext('2d')") && html.includes('strokeText'))
+    }
+    {
+      // 内联脚本有一万多字符，语法错了整页就白屏 —— 直接拿 node 解析一遍
+      const matched = /<script>([\s\S]*?)<\/script>/.exec(html)
+      const scriptFile = path.join(dataRoot, 'inline-player-script.js')
+      let syntaxOk = false
+      if (matched) {
+        fs.writeFileSync(scriptFile, matched[1])
+        try {
+          require('node:child_process').execFileSync(process.execPath, ['--check', scriptFile], { stdio: 'pipe' })
+          syntaxOk = true
+        } catch (error) {
+          console.log('     ' + String(error?.stderr ?? error?.message ?? error).slice(0, 200))
+        }
+      }
+      check('内联脚本语法正确（node --check）', syntaxOk, matched ? matched[1].length + ' 字符' : '（没找到内联脚本）')
+    }
     check('视频地址按令牌拼成绝对路径', html.includes('/kkk/player/' + token + '/video'))
+
+    console.log('\n[4b] 作品信息（B站那套：标题 / UP 主 / 播放量 / 封面 / 操作按钮排）')
+    {
+      // 一张 8x8 的透明 PNG 当封面（不依赖外网，也不依赖 ffmpeg）
+      const coverFile = path.join(dataRoot, 'cover-src.png')
+      fs.writeFileSync(coverFile, Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAgAAAAIAQMAAAD+wSzIAAAABlBMVEX///+/v7+jQ3Y5AAAADklEQVQI12P4AIX8EAgALgAD/aNpbtEAAAAASUVORK5CYII=',
+        'base64'))
+      const workSent = []
+      const workOk = await store.publishOnlinePlayer(collector(workSent), {
+        videoPath: makeVideo('tmp_player_work.mp4'),
+        title: '【独家】《凡人修仙传之慕兰之战》第16集',
+        platform: 'bilibili',
+        danmaku: [
+          { progress: 1000, mode: 1, fontsize: 25, color: 16777215, content: '第一条' },
+          { progress: 2000, mode: 5, fontsize: 36, color: 16711680, content: '顶部' }
+        ],
+        work: {
+          author: '哔哩哔哩番剧',
+          coverUrl: undefined,
+          views: 5281000,
+          platformDanmaku: 4097,
+          likes: 418000,
+          coins: 146000,
+          favorites: 223000,
+          shares: 145000,
+          comments: 35000,
+          publishedAt: Date.now() - 3 * 86400000,
+          durationSeconds: 1172
+        },
+        coverPath: coverFile
+      })
+      const workLink = /(https?:\/\/[^\s]+\/kkk\/player\/[0-9a-z]+)/.exec(workSent[1] || '')
+      const workToken = workLink ? workLink[1].split('/').pop() : ''
+      const workSession = workToken ? store.getPlayerSession(workToken) : undefined
+      check('带作品信息的会话登记成功', workOk === true && !!workSession &&
+        workSession.author === '哔哩哔哩番剧' && workSession.views === 5281000 && workSession.cover === 'cover.png',
+        workSession ? JSON.stringify({ author: workSession.author, views: workSession.views, cover: workSession.cover }) : '（没有会话）')
+      const workPage = await request('/kkk/player/' + workToken)
+      const workHtml = workPage.body.toString('utf-8')
+      check('页面显示标题 / UP 主 / 统计（按B站口径缩写）',
+        workHtml.includes('凡人修仙传') && workHtml.includes('哔哩哔哩番剧') &&
+        workHtml.includes('528.1万') && workHtml.includes('4097') && workHtml.includes('19:32'),
+        '标题 + UP 主 + 播放量 528.1万 + 时长 19:32')
+      check('页面显示操作按钮排（只用真实数据）',
+        workHtml.includes('class="actions"') && /点赞 41.8万/.test(workHtml) &&
+        /投币 14.6万/.test(workHtml) && /收藏 22.3万/.test(workHtml) && /分享 14.5万/.test(workHtml))
+      check('封面走同源地址（不引外链）',
+        workHtml.includes('/kkk/player/' + workToken + '/cover') &&
+        !/https?:\/\//.test(workHtml.match(/<img[^>]+>/)?.[0] ?? 'https://x'))
+      const coverRes = await request('/kkk/player/' + workToken + '/cover')
+      check('封面接口能取到图', coverRes.status === 200 && /image\/png/.test(String(coverRes.headers['content-type'])) &&
+        coverRes.body.length > 0, 'status=' + coverRes.status + ' ' + coverRes.headers['content-type'])
+      if (workToken) await store.deletePlayerSession(workToken)
+    }
 
     console.log('\n[5] 弹幕接口')
     const dm = await request('/kkk/player/' + token + '/danmaku')
@@ -607,8 +715,25 @@ setTimeout(async () => {
     check('弹幕也一起存了下来（这次用户并没有主动要弹幕）',
       !!biliPlayerSession && biliPlayerSession.danmakuCount > 0,
       biliPlayerSession ? biliPlayerSession.danmakuCount + ' 条' : '-')
-    const biliPage = biliToken ? await request('/kkk/player/' + biliToken) : { status: 0 }
+    const biliPage = biliToken ? await request('/kkk/player/' + biliToken) : { status: 0, body: Buffer.from('') }
     check('这条链接可以直接打开（200）', biliPage.status === 200, 'status=' + biliPage.status)
+    /**
+     * 作品信息一路带到页面上：解析链路里的 owner / stat / pic / ctime 都要落到会话里，
+     * 页面上按B站那样显示（标题、UP 主、播放量 528.1万、封面）。
+     */
+    check('会话里带着 UP 主 / 播放量 / 封面 / 时长',
+      !!biliPlayerSession && biliPlayerSession.author === '测试UP主' && biliPlayerSession.views === 5281000 &&
+      biliPlayerSession.cover === 'cover.png' && biliPlayerSession.durationSeconds === 1172,
+      biliPlayerSession ? JSON.stringify({
+        author: biliPlayerSession.author,
+        views: biliPlayerSession.views,
+        cover: biliPlayerSession.cover,
+        duration: biliPlayerSession.durationSeconds
+      }) : '（没有会话）')
+    const biliHtml = biliPage.body.toString('utf-8')
+    check('播放页按B站那样展示标题 / UP 主 / 播放量 / 时长',
+      biliHtml.includes('测试UP主') && biliHtml.includes('528.1万') && biliHtml.includes('19:32') &&
+      biliHtml.includes('/kkk/player/' + biliToken + '/cover'), '标题 + UP 主 + 528.1万 + 19:32 + 同源封面')
     if (biliToken) await store.deletePlayerSession(biliToken)
     runtime.config.qqPanel = savedQqPanelFlag
     runtime.config.playerOnOversize = savedOnOversize

@@ -24,6 +24,7 @@ import {
   getPlayerSession,
   isValidPlayerToken,
   readPlayerDanmaku,
+  resolvePlayerCover,
   resolvePlayerVideo
 } from './store'
 
@@ -121,6 +122,22 @@ function videoResponse (token: string, range?: string, head = false): PlayerHttp
   }
 }
 
+/**
+ * 封面图。
+ *
+ * 刻意走**同源**：封面本来是平台 CDN 上的外链，直接放进页面就等于页面依赖外网，
+ * 内网 / 断网部署会看到裂图。所以登记会话时就把封面下下来放进会话目录，这里原样发出去。
+ */
+function coverResponse (token: string): PlayerHttpResponse {
+  const cover = resolvePlayerCover(token)
+  if (!cover) return notFound(false)
+  return {
+    status: 200,
+    headers: { 'Content-Type': cover.type, 'Cache-Control': 'no-store' },
+    file: { path: cover.path, start: 0, end: Math.max(0, fs.statSync(cover.path).size - 1) }
+  }
+}
+
 /** 弹幕 JSON： `{ total, items: [{ time, mode, size, color, text }] }` */
 function danmakuResponse (token: string): PlayerHttpResponse {
   const data = readPlayerDanmaku(token)
@@ -164,6 +181,7 @@ export async function handlePlayerRequest (request: PlayerHttpRequest): Promise<
   }
   if (action === 'video') return videoResponse(token, request.range, method === 'HEAD')
   if (action === 'danmaku') return danmakuResponse(token)
+  if (action === 'cover') return coverResponse(token)
   return notFound(false)
 }
 

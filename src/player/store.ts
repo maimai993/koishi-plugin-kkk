@@ -56,6 +56,59 @@ export interface PlayerSession {
   createdAt: number
   /** 失效时间（到点删文件） */
   expireAt: number
+  /* ---------------- 作品信息（播放页上按B站那样展示，拿不到就不显示，绝不编数据） ---------------- */
+  /** UP 主 / 作者名 */
+  author?: string
+  /** 封面文件名（在会话目录里，页面上用同源地址 /kkk/player/<token>/cover 取） */
+  cover?: string
+  /** 播放量 */
+  views?: number
+  /** 弹幕条数（平台自己统计的那个，和实际存下来的条数可能差一点） */
+  platformDanmaku?: number
+  /** 点赞 */
+  likes?: number
+  /** 投币 */
+  coins?: number
+  /** 收藏 */
+  favorites?: number
+  /** 分享 */
+  shares?: number
+  /** 评论 */
+  comments?: number
+  /** 作品发布时间（毫秒） */
+  publishedAt?: number
+  /** 视频时长（秒） */
+  durationSeconds?: number
+}
+
+/**
+ * 登记会话时可以带进来的作品信息。
+ *
+ * 字段和解析链路里已有的结构对齐：
+ *   - B站：`infoData.data.data` 的 `title` / `owner.name` / `pic` / `stat` / `ctime` / `duration`
+ *   - 抖音：`aweme_detail` 的 `desc` / `author.nickname` / `video.cover` / `statistics` / `create_time`
+ * 全部可选：拿不到就留空，页面上不显示这一项。
+ */
+export interface PlayerWorkInfo {
+  title?: string
+  author?: string
+  /** 封面的远程地址（登记时下载到会话目录，页面用同源地址取） */
+  coverUrl?: string
+  views?: number
+  platformDanmaku?: number
+  likes?: number
+  coins?: number
+  favorites?: number
+  shares?: number
+  comments?: number
+  publishedAt?: number
+  durationSeconds?: number
+}
+
+/** 把可能为空的数字洗干净（拿不到就 undefined，别在页面上显示 NaN/undefined） */
+function optionalNumber (value: unknown): number | undefined {
+  const num = Number(value)
+  return Number.isFinite(num) && num >= 0 ? num : undefined
 }
 
 /** 有效期上下限（分钟）：配置里写歪了也按这个夹一下 */
@@ -124,7 +177,19 @@ function normalizeSession (raw: any): PlayerSession | null {
     sizeBytes: Number(raw.sizeBytes) || 0,
     danmakuCount: Number(raw.danmakuCount) || 0,
     createdAt: Number(raw.createdAt) || Date.now(),
-    expireAt: Number(raw.expireAt) || Date.now()
+    expireAt: Number(raw.expireAt) || Date.now(),
+    // 作品信息（可选）：重启后也要能还原
+    author: raw.author ? String(raw.author) : undefined,
+    cover: raw.cover ? String(raw.cover) : undefined,
+    views: optionalNumber(raw.views),
+    platformDanmaku: optionalNumber(raw.platformDanmaku),
+    likes: optionalNumber(raw.likes),
+    coins: optionalNumber(raw.coins),
+    favorites: optionalNumber(raw.favorites),
+    shares: optionalNumber(raw.shares),
+    comments: optionalNumber(raw.comments),
+    publishedAt: optionalNumber(raw.publishedAt),
+    durationSeconds: optionalNumber(raw.durationSeconds)
   }
 }
 
@@ -186,7 +251,7 @@ function createToken (): string {
  *
  * 视频会被**移动**到会话目录（同一分区是改名，几乎不耗时；跨分区退回复制 + 删源文件），
  * 这样会话目录是自包含的：到期删目录就等于把视频和弹幕一起清掉了。
- * @param input 视频路径、标题、平台、弹幕、有效期（分钟）
+ * @param input 视频路径、标题、平台、弹幕、有效期（分钟）、作品信息（可选）
  * @returns 会话；登记失败返回 null（调用方负责退回原来的发送流程）
  */
 export function registerPlayerSession (input: {
@@ -195,6 +260,10 @@ export function registerPlayerSession (input: {
   platform?: string
   danmaku?: PlayerDanmakuItem[]
   expireMinutes?: number
+  /** 作品信息：标题 / UP 主 / 播放量…（播放页上按B站那样展示用） */
+  work?: PlayerWorkInfo
+  /** 已经下载到本地的封面文件（会复制进会话目录） */
+  coverPath?: string
 }): PlayerSession | null {
   if (!storeDir) {
     logger.warn('[在线播放] 存储尚未初始化，无法登记播放会话')
@@ -222,21 +291,47 @@ export function registerPlayerSession (input: {
     const danmaku = Array.isArray(input.danmaku) ? input.danmaku : []
     fs.writeFileSync(path.join(dir, 'danmaku.json'), JSON.stringify({ total: danmaku.length, items: danmaku }))
 
+    // 封面：复制进会话目录，页面用同源地址取（不引外链，断网/内网也能看）
+    let cover: string | undefined
+    if (input.coverPath && fs.existsSync(input.coverPath)) {
+      try {
+        const ext = path.extname(input.coverPath).toLowerCase() || '.jpg'
+        cover = 'cover' + (/^\.(jpg|jpeg|png|webp|gif)$/.test(ext) ? ext : '.jpg')
+        fs.copyFileSync(input.coverPath, path.join(dir, cover))
+      } catch (error: any) {
+        cover = undefined
+        logger.debug('[在线播放] 封面复制失败（忽略）: ' + String(error?.message ?? error))
+      }
+    }
+
     const now = Date.now()
+    const work = input.work ?? {}
     const session: PlayerSession = {
       token,
-      title: String(input.title ?? ''),
+      title: String(input.title || work.title || ''),
       platform: String(input.platform ?? ''),
       dir,
       filePath: target,
       sizeBytes: Number(fs.statSync(target).size) || 0,
       danmakuCount: danmaku.length,
       createdAt: now,
-      expireAt: now + normalizeExpireMinutes(input.expireMinutes) * 60 * 1000
+      expireAt: now + normalizeExpireMinutes(input.expireMinutes) * 60 * 1000,
+      author: work.author ? String(work.author) : undefined,
+      cover,
+      views: optionalNumber(work.views),
+      platformDanmaku: optionalNumber(work.platformDanmaku),
+      likes: optionalNumber(work.likes),
+      coins: optionalNumber(work.coins),
+      favorites: optionalNumber(work.favorites),
+      shares: optionalNumber(work.shares),
+      comments: optionalNumber(work.comments),
+      publishedAt: optionalNumber(work.publishedAt),
+      durationSeconds: optionalNumber(work.durationSeconds)
     }
     sessions.set(token, session)
     persistIndex()
-    logger.mark('[在线播放] 已登记播放会话 ' + token + '（' + danmaku.length + ' 条弹幕，'
+    logger.mark('[在线播放] 已登记播放会话 ' + token + '（' + (session.title || '无标题')
+      + (session.author ? ' / ' + session.author : '') + '，' + danmaku.length + ' 条弹幕，'
       + (session.sizeBytes / 1024 / 1024).toFixed(2) + ' MB，有效期 '
       + normalizeExpireMinutes(input.expireMinutes) + ' 分钟）')
     return session
@@ -273,6 +368,25 @@ export function readPlayerDanmaku (token: unknown): { total: number, items: Play
   } catch (error: any) {
     logger.debug('[在线播放] 读取弹幕失败: ' + String(error?.message ?? error))
     return { total: 0, items: [] }
+  }
+}
+
+/** 取封面文件（会话目录里的同源图片；没有就返回 null，路由回 404） */
+export function resolvePlayerCover (token: unknown): { path: string, type: string } | null {
+  const session = getPlayerSession(token)
+  if (!session?.cover) return null
+  try {
+    const file = path.join(session.dir, session.cover)
+    if (!fs.statSync(file).isFile()) return null
+    const ext = path.extname(file).toLowerCase()
+    const type = ext === '.png'
+      ? 'image/png'
+      : ext === '.webp'
+        ? 'image/webp'
+        : ext === '.gif' ? 'image/gif' : 'image/jpeg'
+    return { path: file, type }
+  } catch {
+    return null
   }
 }
 

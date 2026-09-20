@@ -4,7 +4,7 @@ import { buildMarkdownImageMessage } from '@/module/utils/QqPanel'
 // 弹幕策略（通用里的「强制不烧录弹幕」优先；「在线播放器」开着时是在线播放，不烧录）
 import { shouldBurnDanmaku, shouldFetchDanmaku } from '@/module/utils/DanmakuPolicy'
 // 在线播放：下载完之后登记播放会话并把链接回给用户（路径不能写 @/，那指向 karin/）
-import { isOnlinePlayerRequest, publishOnlinePlayer } from '../../../player'
+import { isOnlinePlayerRequest, publishOnlinePlayer, type PlayerWorkInfo } from '../../../player'
 // 解析阶段（「下载进度」指令读的就是这里登记的状态）
 import { DOWNLOAD_STAGES, withDownloadStage } from '@/module/utils/Network/Downloader'
 import { sendParseTip } from '@/module/utils/parseTip'
@@ -49,12 +49,21 @@ import { DouyinDataTypes, DouyinIdData } from '@/types'
 
 let mp4size = ''
 let img
+
+/** 统计数字的容错取值：拿不到就 undefined（页面干脆不显示，而不是显示 0 / NaN） */
+function optionalStat (value: unknown): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined
+  const num = Number(value)
+  return Number.isFinite(num) && num >= 0 ? num : undefined
+}
 export class DouYin extends Base {
   e: Message
   type: DouyinDataTypes[keyof DouyinDataTypes]
   is_slides: boolean
   /** 强制烧录弹幕（用于 #弹幕解析 命令） */
   forceBurnDanmaku: boolean
+  /** 作品信息（标题 / 作者 / 封面 / 播放量…），在线播放页按B站那样展示用 */
+  workInfo?: PlayerWorkInfo
   /**
    * 图集/实况的图片 md 与视频**先攒着**，不在分支里立刻发 ——
    * 这样顺序才是：信息卡 -> 评论区 -> 图集图片(+提示) -> 实况视频（用户指定）。
@@ -642,6 +651,27 @@ export class DouYin extends Base {
         }
 
         /**
+         * 作品信息：在线播放页要按B站那样展示标题 / 作者 / 播放量 / 发布时间。
+         * 抖音这边字段在 aweme_detail 上（statistics / author / video），全部可选。
+         */
+        {
+          const aweme: any = VideoData.data.aweme_detail ?? {}
+          const stat: any = aweme.statistics ?? {}
+          this.workInfo = {
+            title: aweme.desc || aweme.preview_title || g_title || undefined,
+            author: aweme.author?.nickname ? String(aweme.author.nickname) : undefined,
+            coverUrl: aweme.video?.origin_cover?.url_list?.[0] ?? aweme.video?.cover?.url_list?.[0] ?? undefined,
+            views: optionalStat(stat.play_count),
+            likes: optionalStat(stat.digg_count),
+            favorites: optionalStat(stat.collect_count),
+            shares: optionalStat(stat.share_count),
+            comments: optionalStat(stat.comment_count),
+            publishedAt: Number(aweme.create_time) > 0 ? Number(aweme.create_time) * 1000 : undefined,
+            durationSeconds: Number(aweme.video?.duration) > 0 ? Math.round(Number(aweme.video.duration) / 1000) : undefined
+          }
+        }
+
+        /**
          * 先把视频下下来，再去渲染卡片（用户要求的顺序）。
          *
          * 下载是最慢、也最不能失败的一步：先做掉，后面渲染信息卡/评论区时用户不用干等；
@@ -927,9 +957,10 @@ export class DouYin extends Base {
              */
             const published = await publishOnlinePlayer(this.e, {
               videoPath: downloadedVideo.filepath,
-              title: g_title || '',
+              title: g_title || this.workInfo?.title || '',
               platform: 'douyin',
-              danmaku: danmakuList
+              danmaku: danmakuList,
+              work: this.workInfo
             })
             if (!published) {
               logger.warn('[在线播放] 播放会话登记失败，退回直接发送视频文件')

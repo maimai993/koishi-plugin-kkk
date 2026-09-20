@@ -29,7 +29,8 @@ import {
   setupPlayerStore,
   startPlayerSweeper,
   stopPlayerSweeper,
-  type PlayerDanmakuItem
+  type PlayerDanmakuItem,
+  type PlayerWorkInfo
 } from './store'
 
 export * from './store'
@@ -267,6 +268,43 @@ export function normalizePlayerDanmaku (list: any): PlayerDanmakuItem[] {
   return items
 }
 
+/**
+ * 把封面下到临时文件（失败就返回 null）。
+ *
+ * 限制得比较保守：只认图片、10 秒超时、最大 5MB —— 封面只是个装饰，
+ * 不能让它拖慢解析或者把临时目录塞满。
+ */
+const MAX_COVER_BYTES = 5 * 1024 * 1024
+
+async function downloadCoverQuietly (url?: string): Promise<string | null> {
+  const target = String(url ?? '').trim()
+  if (!/^https?:\/\//i.test(target)) return null
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 10_000)
+  try {
+    const res = await fetch(target, {
+      signal: controller.signal,
+      headers: { 'User-Agent': 'Mozilla/5.0', Referer: new URL(target).origin + '/' }
+    })
+    if (!res.ok) return null
+    const type = String(res.headers.get('content-type') ?? '')
+    if (!/^image\//i.test(type)) return null
+    const buffer = Buffer.from(await res.arrayBuffer())
+    if (!buffer.length || buffer.length > MAX_COVER_BYTES) return null
+    const ext = type.includes('png')
+      ? '.png'
+      : type.includes('webp') ? '.webp' : type.includes('gif') ? '.gif' : '.jpg'
+    const file = path.join(os.tmpdir(), 'kkk-cover-' + Date.now() + '-' + Math.random().toString(16).slice(2) + ext)
+    fs.writeFileSync(file, buffer)
+    return file
+  } catch (error: any) {
+    logger.debug('[在线播放] 封面下载失败（忽略）: ' + String(error?.message ?? error))
+    return null
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 /** 体积显示：小于 1MB 的右上限（测试/极端配置）也要看得出区别，别都显示成 0.0MB */
 function formatMB (value: number): string {
   const num = Number(value)
@@ -285,7 +323,7 @@ const TIP_PREPARING = '下载完成，正在准备在线播放…'
  * 失败不抛异常 —— 调用方拿到 false 就退回「直接发视频文件」的老流程，
  * 在线播放器坏了不能连累整条解析。
  * @param e 消息事件
- * @param input 视频路径 / 标题 / 平台 / 弹幕
+ * @param input 视频路径 / 标题 / 平台 / 弹幕 / 作品信息
  * @returns 是否成功发布了链接
  */
 export async function publishOnlinePlayer (e: any, input: {
@@ -293,6 +331,10 @@ export async function publishOnlinePlayer (e: any, input: {
   title?: string
   platform?: string
   danmaku?: any
+  /** 作品信息：UP 主 / 播放量 / 发布时间…（播放页按B站那样展示，拿不到就不显示） */
+  work?: PlayerWorkInfo
+  /** 已经下到本地的封面文件（优先用它，其次才去下 work.coverUrl） */
+  coverPath?: string
 }): Promise<boolean> {
   if (!isOnlinePlayerEnabled()) return false
   /**
@@ -322,12 +364,20 @@ export async function publishOnlinePlayer (e: any, input: {
       return false
     }
     await reply(TIP_PREPARING)
+    /**
+     * 封面：趁现在把它下到本地（会话目录里存一份），播放页用**同源**地址取 ——
+     * 直接塞平台 CDN 的外链会让页面依赖外网，内网 / 断网部署就是一张裂图。
+     * 下载失败不影响播放，页面上就不显示封面。
+     */
+    const coverPath = input.coverPath ?? await downloadCoverQuietly(input.work?.coverUrl)
     const session = registerPlayerSession({
       videoPath: input.videoPath,
       title: input.title,
       platform: input.platform,
       danmaku,
-      expireMinutes: minutes
+      expireMinutes: minutes,
+      work: input.work,
+      coverPath: coverPath ?? undefined
     })
     if (!session) {
       await reply('在线播放准备失败（详情见日志），这里直接发送视频')

@@ -8,7 +8,8 @@ import {
   isOnlinePlayerRequest,
   markOnlinePlayerOverride,
   publishOnlinePlayer,
-  shouldRedirectOversizeToPlayer
+  shouldRedirectOversizeToPlayer,
+  type PlayerWorkInfo
 } from '../../../player'
 import { ParseSteps } from '@/module/utils/ParseSteps'
 import { sendSlicedImage } from '@/module/utils/ImageSlice'
@@ -112,6 +113,13 @@ export class Bilibili extends Base {
    * 所以这里留一份给 `sendPreparedVideo` 用（只在线播放模式读，平时不占额外内存）。
    */
   danmakuList: BiliDanmakuElem[] = []
+  /**
+   * 作品信息（标题 / UP 主 / 封面 / 播放量…）。
+   *
+   * 在线播放页要按B站那样把这些展示出来，而「发送」那一步已经离开了解析上下文，
+   * 所以顺手存一份（拿不到的字段就是 undefined，页面上不显示，绝不编数据）。
+   */
+  workInfo?: PlayerWorkInfo
   /** 本次解析的内容形态，供统计埋点读取 */
   workType?: ParseWorkType
   get botadapter(): string {
@@ -152,6 +160,28 @@ export class Bilibili extends Base {
         /** 本次解析的步骤容器：单步失败只跳过、不中断，最后统一渲染一张错误卡片（见 ParseSteps） */
         const steps = new ParseSteps()
         const infoData = await this.amagi.bilibili.fetcher.fetchVideoInfo({ bvid: iddata.bvid })
+        /**
+         * 顺手把作品信息收好：在线播放页要按B站那样展示标题 / UP 主 / 播放量 / 发布时间。
+         * 字段全部可选，取不到就是 undefined（页面不显示，不编数据）。
+         */
+        {
+          const detail: any = infoData?.data?.data ?? {}
+          const stat: any = detail.stat ?? {}
+          this.workInfo = {
+            title: detail.title ? String(detail.title) : undefined,
+            author: detail.owner?.name ? String(detail.owner.name) : undefined,
+            coverUrl: detail.pic ? String(detail.pic) : undefined,
+            views: optionalStat(stat.view),
+            platformDanmaku: optionalStat(stat.danmaku),
+            likes: optionalStat(stat.like),
+            coins: optionalStat(stat.coin),
+            favorites: optionalStat(stat.favorite),
+            shares: optionalStat(stat.share),
+            comments: optionalStat(stat.reply),
+            publishedAt: Number(detail.ctime) > 0 ? Number(detail.ctime) * 1000 : undefined,
+            durationSeconds: Number(detail.duration) > 0 ? Number(detail.duration) : undefined
+          }
+        }
         const playUrlData = await this.amagi.bilibili.fetcher.fetchVideoStreamUrl({
           avid: infoData.data.data.aid,
           cid: iddata.p ? (infoData.data.data.pages[iddata.p - 1]?.cid ?? infoData.data.data.cid) : infoData.data.data.cid
@@ -270,8 +300,18 @@ export class Bilibili extends Base {
          * 结果就是要 360P 却下了个 4K：文件巨大、手机还解不出来，表现就是「只有声音没有画面」。
          */
         if (this.islogin && !useAnonymousQuality) {
-          /** 提取出视频流信息对象，并排除清晰度重复的视频流 */
-          const simplify = playUrlData.data.data.dash.video.filter((item: { id: number }, index: any, self: any[]) => {
+          /**
+           * 提取出视频流信息对象，并排除清晰度重复的视频流。
+           *
+           * 在线播放时先把 H.264 那几路排到前面：下面是「每个清晰度只留第一条」，
+           * 不排的话留下的可能是 HEVC —— 浏览器只有声音没有画面。
+           * sort 是稳定的，所以同一编码内部仍然保持接口给的画质顺序。
+           */
+          const streams = [...playUrlData.data.data.dash.video]
+          if (isOnlinePlayerRequest()) {
+            streams.sort((a, b) => (isAvcStream(b) ? 1 : 0) - (isAvcStream(a) ? 1 : 0))
+          }
+          const simplify = streams.filter((item: { id: number }, index: any, self: any[]) => {
             return (
               self.findIndex((t: { id: any }) => {
                 return t.id === item.id
@@ -1622,9 +1662,10 @@ export class Bilibili extends Base {
     if (isOnlinePlayerRequest()) {
       const published = await publishOnlinePlayer(this.e, {
         videoPath: filepath,
-        title: originTitle || this.downloadfilename,
+        title: originTitle || this.downloadfilename || this.workInfo?.title,
         platform: 'bilibili',
-        danmaku: this.danmakuList
+        danmaku: this.danmakuList,
+        work: this.workInfo
       })
       if (published) return true
       logger.warn('[在线播放] 播放会话登记失败，退回直接发送视频文件')
@@ -1876,6 +1917,35 @@ const mapping_table = (type: any): number => {
   return 1
 }
 
+/** 这一路流是不是 H.264（浏览器普遍只支持它；HEVC / AV1 在多数浏览器上「只有声音没有画面」） */
+export const isAvcStream = (video: any): boolean => /^avc1/i.test(String(video?.codecs ?? ''))
+
+/**
+ * 在线播放模式下的选流偏好：同一个清晰度有多路编码时，**优先取 H.264 那一路**。
+ *
+ * 实测：B站 360P 会同时给出 avc1 和 hev1 两路，接口常把 hev1 排前面，
+ * 结果在线播放页在 Chrome / Edge 上只有声音没有画面（用户实测反馈过）。
+ * 非在线播放（正常发视频）时不动这个偏好，保持上游行为。
+ * @param video 已经挑中的那路流
+ * @param list 同一清晰度的所有流（用于找 H.264 的那一路）
+ */
+export const preferAvcStream = <T>(video: T, list: T[]): T => {
+  if (!isOnlinePlayerRequest()) return video
+  if (isAvcStream(video)) return video
+  const avc = list.find((item) => (item as any)?.id === (video as any)?.id && isAvcStream(item))
+  return avc ?? video
+}
+
+/**
+ * 统计数字的容错取值：拿不到（undefined / 空串 / NaN / 负数）就返回 undefined，
+ * 让播放页干脆不显示这一项，而不是显示 0 或者 NaN。
+ */
+function optionalStat (value: unknown): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined
+  const num = Number(value)
+  return Number.isFinite(num) && num >= 0 ? num : undefined
+}
+
 /**
  * 根据动态类型获取对应的oid（对象ID），用于后续评论接口调用
  * @param dynamicType 动态类型
@@ -1947,6 +2017,9 @@ export const bilibiliProcessVideos = async (
         matchedVideo = sortedVideos[0]
       }
     }
+
+    // 在线播放：同一清晰度有多路编码时挑 H.264（否则浏览器只有声音没画面）
+    matchedVideo = preferAvcStream(matchedVideo, videoList)
 
     // 更新视频列表和清晰度描述
     // accept_description 在免登录 / 只给 durl 的画质下可能是 undefined，
