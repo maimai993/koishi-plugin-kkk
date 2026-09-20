@@ -693,7 +693,6 @@ export async function sendQqParsePanel (e: Message, request: PanelRequest, optio
 
   // 按钮发出去的就是「用户视角的指令」，前缀按 Koishi 当前配置来（配了空前缀就是不带前缀的裸指令）
   const parseCommand = commandInvocation('解析')
-  const danmakuCommand = commandInvocation('弹幕解析')
 
   /**
    * 面板只由「卡片图片 + 按钮」组成，不带任何说明文字：
@@ -721,31 +720,47 @@ export async function sendQqParsePanel (e: Message, request: PanelRequest, optio
   const urlPart = request.url && request.url.length <= 120 ? request.url : ''
   const short = '--p=' + token
   const qualityFlag = request.platform === 'bilibili' ? '--qn=' : '--q='
-  /** 一个按钮：点下去**直接按这一档画质解析** */
-  const cell = (command: string, id: string | number, label: string) =>
-    cmdInput(command + ' ' + (urlPart || short) + ' ' + short + ' ' + qualityFlag + id, label)
+  /**
+   * 一个按钮：点下去**直接按这一档画质解析**。
+   * @param burn 为 true 时命令里多带一个 `--dm=1` —— 这一档画质解析完把弹幕一起烧进视频
+   */
+  const cell = (command: string, id: string | number, label: string, burn = false) =>
+    cmdInput(command + ' ' + (urlPart || short) + ' ' + short + ' ' + qualityFlag + id + (burn ? ' --dm=1' : ''), label)
+
+  /**
+   * 「是否显示烧录弹幕」的开关按钮。
+   *
+   * 面板本身不记状态：开关就编在按钮的 `--panel=1`（开）/ `--panel=0`（关）里，
+   * 点一下由插件重新渲染一张面板，宿主重启后点旧面板也照样工作。
+   * @param on 当前是否已经显示烧录弹幕选项
+   */
+  const toggleButton = (on: boolean) =>
+    cmdInput(
+      parseCommand + ' ' + (urlPart || short) + ' ' + short + ' --panel=' + (on ? 0 : 1),
+      on ? '关闭烧录弹幕选项' : '显示烧录弹幕选项'
+    )
 
   /**
    * 表格排版。
-   *   - 开启弹幕解析：清晰度 / 视频 / 弹幕 / 大小 四列（清晰度是文字，后两列是按钮）
-   *   - **关闭**弹幕解析：去掉弹幕列，且「清晰度」本身就是按钮（配置项 enableDanmakuParse）
+   *   - 默认（关闭烧录弹幕）：清晰度 / 大小 两列，「清晰度」本身就是按钮
+   *   - 打开烧录弹幕：清晰度 / 烧录弹幕 / 大小 三列 —— 中间那列是按这一档画质
+   *     **带弹幕**解析的按钮（命令里带 `--dm=1`），原「清晰度」按钮仍是纯视频
+   * 开关由表下的按钮切换（见 toggleButton）。机器上没装 ffmpeg 的部署不出现这个开关：
+   * 点了也烧不出来，不如不给，免得用户以为点坏了。
    */
-  /**
-   * 弹幕功能已整体移除：这里恒为 false，面板只保留「清晰度=按钮 + 大小」两列。
-   * （卡片上方的热门弹幕是渲染层面的事，不在这个面板里，不受影响）
-   */
-  const danmakuEnabled = false
+  const danmakuEnabled = options.danmaku && DANMAKU_SUPPORTED
   if (danmakuEnabled) {
-    lines.push('| 清晰度 | 视频 | 弹幕 | 大小 |')
-    lines.push('| :--- | :---: | :---: | ---: |')
+    lines.push('| 清晰度 | 烧录弹幕 | 大小 |')
+    lines.push('| :--- | :---: | ---: |')
     for (const option of shown) {
       const size = Math.round(option.sizeMB) + 'M'
-      const videoCell = cell(parseCommand, option.id, '视频')
-      const danmakuCell = cell(danmakuCommand, option.id, '弹幕')
-      lines.push('| ' + option.label + ' | ' + videoCell + ' | ' + danmakuCell + ' | ' + size + ' |')
+      lines.push(
+        '| ' + cell(parseCommand, option.id, option.label) + ' | ' +
+        cell(parseCommand, option.id, '烧录弹幕', true) + ' | ' + size + ' |'
+      )
     }
   } else {
-    // 没有弹幕可选时，画质名直接当按钮，省掉中间那一步
+    // 没开弹幕时，画质名直接当按钮，省掉中间那一步
     lines.push('| 清晰度 | 大小 |')
     lines.push('| :--- | ---: |')
     for (const option of shown) {
@@ -753,6 +768,9 @@ export async function sendQqParsePanel (e: Message, request: PanelRequest, optio
       lines.push('| ' + cell(parseCommand, option.id, option.label) + ' | ' + size + ' |')
     }
   }
+  // 一档都不满足体积上限：仍给出最小的一档（否则用户连解析都点不了），但要说清楚风险
+  if (overflow) lines.push('所有画质都超过体积上限（' + limit + 'MB），这里只保留最小的一档，发送可能失败。')
+  if (DANMAKU_SUPPORTED) lines.push(toggleButton(danmakuEnabled))
   await replaceLoadingTip(e, loadingId, segment.markdown(lines.join(String.fromCharCode(10))))
   logger.debug('[QQ面板] 已发送解析面板: ' + request.platform + ' ' + request.id + '（' + shown.length + '/' + info.options.length + ' 档画质）')
   return true

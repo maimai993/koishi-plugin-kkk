@@ -27,7 +27,15 @@ config.pushlist = { douyin: [], bilibili: [] }
 fs.writeFileSync(path.join(cfgDir, 'config.json'), JSON.stringify(config, null, 2))
 
 // 1) 让 getDouyinID 的短链解析不依赖外网（伪造重定向后的长链）
-const axios = require(path.join(pluginRoot, 'node_modules/axios'))
+/** 依赖可能在本包 node_modules，也可能被提升到宿主 node_modules，两处都试 */
+const resolveDep = (name) => {
+  try {
+    return require(path.join(pluginRoot, 'node_modules', name))
+  } catch {
+    return require(name)
+  }
+}
+const axios = resolveDep('axios')
 const LONG_URL = 'https://www.douyin.com/video/7123456789012345678'
 axios.get = async () => ({ request: { res: { responseUrl: LONG_URL } }, data: '' })
 

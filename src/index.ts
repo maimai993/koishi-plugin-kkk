@@ -305,7 +305,7 @@ const MANUAL_COMMAND_NAMES: Record<string, string[]> = {
 const COMMAND_DESCRIPTIONS: Record<string, string> = {
   解析: '解析消息或引用里的链接（抖音 / B站 / 快手 / 小红书）',
   kkk解析: '「解析」的别名',
-  弹幕解析: '解析链接并把弹幕烧录进视频（当前移植版未接入 ffmpeg，会退化为纯视频）',
+  弹幕解析: '解析链接并把弹幕烧录进视频（机器上没有 ffmpeg 时会退化成纯视频）',
   kkk帮助: '查看插件帮助',
   kkk版本: '查看运行环境与版本信息',
   kkk更新日志: '查看更新日志',
@@ -473,14 +473,6 @@ function registerCommands (
     }
     for (const name of names) {
       if (registered.has(name)) continue
-      /**
-       * 弹幕功能已整体移除（用户要求）：弹幕解析指令不注册，发出来没有任何反应，
-       * 控制台的指令列表里也不会出现它。卡片上方的热门弹幕不受影响。
-       */
-      if (/^#?弹幕解析$/.test(name.trim())) {
-        logger.debug('弹幕功能已移除，跳过注册指令 %s', name)
-        continue
-      }
       registered.add(name)
       const description = COMMAND_DESCRIPTIONS[name] ?? ('koishi-plugin-kkk: ' + (registration.options?.name ?? name))
       // 解析类指令接一段自由文本（链接 / BV 号 / 参数），声明出来控制台里能看清用法；

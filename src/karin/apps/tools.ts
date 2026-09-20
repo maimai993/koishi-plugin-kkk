@@ -137,10 +137,11 @@ const handleDouyin = wrapWithErrorHandler(
 
     // 是否为弹幕解析：用 \`弹幕解析\` 指令触发，或面板按钮里带了 --dm=1
     /**
-     * 弹幕功能已整体移除：这里恒为 false，无论指令、--dm=1 还是配置都不会触发烧录。
-     * （卡片上方的热门弹幕是另一条链路，不受影响）
+    /**
+     * 是否为弹幕解析：指令 `弹幕解析 <链接>` 触发，或者画质面板里点了「烧录弹幕」（命令里带 --dm=1）。
+     * 能不能真的烧由 resolveBurnDanmaku 兜底：机器上没装 ffmpeg 时会提示一句并降级成纯视频。
      */
-    const requestBurnDanmaku = false
+    const requestBurnDanmaku = flags.override.burnDanmaku === true || /^#?弹幕解析/.test(e.msg)
 
     const urlMatch = e.msg.match(/(https?:\/\/[^\s]*\.(douyin|iesdouyin)\.com[^\s]*)/gi)
     if (!urlMatch) {
@@ -207,8 +208,11 @@ const handleBilibili = wrapWithErrorHandler(
     e.msg = e.msg.replace(/\\/g, '') // 移除消息中的反斜杠
 
     // 是否为弹幕解析（通过 #弹幕解析 命令触发，或面板里选了「视频＋弹幕」）
-    /** 弹幕功能已移除：恒为 false */
-    const requestBurnDanmaku = false
+    /**
+     * 是否为弹幕解析：指令 `弹幕解析 <链接>` 触发，或者画质面板里点了「烧录弹幕」（命令里带 --dm=1）。
+     * 能不能真的烧由 resolveBurnDanmaku 兜底：机器上没装 ffmpeg 时会提示一句并降级成纯视频。
+     */
+    const requestBurnDanmaku = flags.override.burnDanmaku === true || /^#?弹幕解析/.test(e.msg)
 
     const urlRegex = /(https?:\/\/(?:(?:www\.|m\.|t\.)?bilibili\.com|b23\.tv|bili2233\.cn)\/[a-zA-Z0-9_\-.~:/?#[\]@!$&'()*+,;=]+)/
     const bvRegex = /^BV[1-9a-zA-Z]{10}$/

@@ -21,7 +21,15 @@ const target = 'https://www.bilibili.com/video/BV1xx411c7mD'
 /* ------------------------------------------------------------------ *
  * 抖音侧固定数据（没有 Cookie 时抖音接口必被风控，这里只验证展示与选档逻辑）
  * ------------------------------------------------------------------ */
-const axios = require(path.join(pluginRoot, 'node_modules/axios'))
+/** 依赖可能在本包 node_modules，也可能被提升到宿主 node_modules，两处都试 */
+const resolveDep = (name) => {
+  try {
+    return require(path.join(pluginRoot, 'node_modules', name))
+  } catch {
+    return require(name)
+  }
+}
+const axios = resolveDep('axios')
 const realAxiosGet = axios.get
 const LONG_URL = 'https://www.douyin.com/video/7123456789012345678'
 axios.get = async (url, options) => {
@@ -65,6 +73,12 @@ const realFactory = amagi.default
 amagi.default = function (options) {
   const client = realFactory(options)
   client.douyin.fetcher.parseWork = async () => ({ success: true, code: 200, message: 'OK', data: { aweme_detail: douyinDetail } })
+  // 弹幕列表给空：这一节只验证「--dm=1 有没有被识别成烧录请求」，不想真去拉抖音接口、也不想真烧
+  client.douyin.fetcher.fetchDanmakuList = async () => ({ success: true, code: 200, message: 'OK', data: { danmaku_list: [] } })
+  // 评论 / 表情 / 用户资料也固定住：否则没 Cookie 的接口会先抛错，流程根本走不到「发送视频」那一步
+  client.douyin.fetcher.fetchWorkComments = async () => ({ success: true, code: 200, message: 'OK', data: { comments: [], cursor: 0, has_more: 0, total: 0 } })
+  client.douyin.fetcher.fetchEmojiList = async () => ({ success: true, code: 200, message: 'OK', data: { emoji_list: [] } })
+  client.douyin.fetcher.fetchUserProfile = async () => ({ success: true, code: 200, message: 'OK', data: { user: { uid: '1', sec_uid: 'SEC', nickname: '测试作者', avatar_thumb: { url_list: ['https://www.w3schools.com/html/pic_trulli.jpg'] }, follower_count: 1 } } })
   return client
 }
 
@@ -126,12 +140,16 @@ setTimeout(async () => {
     console.log('\n[1] QQ 平台发 B站链接 → 只回面板（不解析、不下载）')
     const sent = await runCommand('B站', target)
     const panel = readPanel(sent)
-    check('只发了 1 条消息', sent.length === 1, '共 ' + sent.length + ' 条')
-    check('含 markdown 段', /解析设置/.test(panel.markdown))
+    // 面板是「先发一条加载中…，拿到数据后原地替换」——所以发出 2 条属于预期
+    check('发出了面板（加载提示 + 替换后的面板）', sent.length >= 1 && /\| 清晰度 \| 大小 \|/.test(panel.markdown),
+      '共 ' + sent.length + ' 条 / 表头 ' + (panel.markdown.split('\n').find((l) => l.startsWith('| 清晰度')) || '（无）'))
     check('用的是 markdown 指令标签 <qqbot-cmd-input>', panel.buttons.length > 0, panel.buttons.length + ' 个按钮')
     check('不再发原生 keyboard 按钮', !panel.flat.some((el) => el && el.type === 'button-group'))
     check('按钮文字是画质（不是整条指令）', panel.buttons.every((b) => b.label && !b.label.startsWith('#') && !/https?:/.test(b.label)), panel.buttons.map((b) => b.label).join(' / '))
-    check('按钮里不带链接（只放短令牌）', panel.buttons.every((b) => !/https?:/.test(b.data)), panel.buttons[0] && panel.buttons[0].data)
+    // 按钮里带的是**规范链接**（不超过 120 字符，见 QqPanel 的 urlPart 说明）或短令牌，
+    // 不是用户发的那种带一堆参数的长分享链接 —— 短链接放进按钮是为了宿主重启后仍能解析
+    check('按钮里不带超长原始链接', panel.buttons.every((b) => String(b.data).length < 200),
+      '最长 ' + Math.max(...panel.buttons.map((b) => String(b.data).length)))
     console.log('  —— markdown ——\n' + panel.markdown.split('\n').map((l) => '     ' + l).join('\n'))
     console.log('  —— 按钮 ——')
     for (const b of panel.buttons) console.log('     [' + b.label + '] → ' + b.data)
@@ -147,14 +165,32 @@ setTimeout(async () => {
     check('最多保留 1 档画质（两行各一个按钮）', distinct.length <= 1, distinct.join(' / ') || '（无）')
     check('markdown 给出「发送可能失败」的提示', /可能失败/.test(tiny.markdown), tiny.markdown.match(/⚠️.*/)?.[0] ?? '（无提示）')
 
-    console.log('\n[3] 每个按钮都直接解析（没有「切换面板」的按钮）')
-    const videoLine = panel.markdown.split('\n').find((line) => line.includes('**纯视频**')) || ''
-    const danmakuLine = panel.markdown.split('\n').find((line) => line.includes('视频 + 弹幕')) || ''
-    const videoButtons = panel.buttons.filter((b) => String(b.data).startsWith('解析 '))
-    const danmakuButtons = panel.buttons.filter((b) => String(b.data).startsWith('弹幕解析 '))
-    check('纯视频那一行的按钮发「解析」指令', videoLine.includes('qqbot-cmd-input') && videoButtons.length > 0, videoButtons.map((b) => b.data).join(' | '))
-    check('弹幕那一行的按钮发「弹幕解析」指令', danmakuLine.includes('qqbot-cmd-input') && danmakuButtons.length > 0, danmakuButtons.map((b) => b.data).join(' | '))
-    check('没有任何按钮带 --panel（点了不会再弹面板）', panel.buttons.every((b) => !String(b.data).includes('--panel')), panel.buttons.map((b) => b.data).join(' | '))
+    console.log('\n[3] 烧录弹幕开关：默认「清晰度 | 大小」，开启后多一列「烧录弹幕」')
+    const { DANMAKU_SUPPORTED } = require(path.join(pluginRoot, 'lib/karin/module/utils/QqPanel.js'))
+    check('本机 ffmpeg 可用（否则面板不会给出弹幕选项）', DANMAKU_SUPPORTED === true, 'DANMAKU_SUPPORTED=' + DANMAKU_SUPPORTED)
+    const offTable = panel.markdown.split('\n').filter((line) => line.startsWith('|'))
+    check('默认表头是「清晰度 | 大小」两列', offTable[0] === '| 清晰度 | 大小 |', offTable[0])
+    check('默认没有烧录弹幕按钮', !panel.buttons.some((b) => String(b.data).includes('--dm=1')))
+    const toggleOff = panel.buttons.filter((b) => String(b.data).includes('--panel=1'))
+    check('有一个「显示烧录弹幕选项」的开关按钮', toggleOff.length === 1 && toggleOff[0].label === '显示烧录弹幕选项',
+      toggleOff.map((b) => '[' + b.label + '] → ' + b.data).join(' | '))
+    check('开关按钮带的是同一条解析命令（点一下只是重发面板）', /^解析 /.test(String(toggleOff[0] && toggleOff[0].data)) && !String(toggleOff[0] && toggleOff[0].data).includes('--dm=1'),
+      toggleOff[0] && toggleOff[0].data)
+
+    const onPanel = readPanel(await runCommand('B站', target + ' --panel=1'))
+    const onTable = onPanel.markdown.split('\n').filter((line) => line.startsWith('|'))
+    check('开启后表头是「清晰度 | 烧录弹幕 | 大小」三列', onTable[0] === '| 清晰度 | 烧录弹幕 | 大小 |', onTable[0])
+    const burnButtons = onPanel.buttons.filter((b) => String(b.data).includes('--dm=1'))
+    check('每档画质都有一个「烧录弹幕」按钮', burnButtons.length > 0 && burnButtons.every((b) => b.label === '烧录弹幕'),
+      burnButtons.map((b) => b.data).join(' | '))
+    check('烧录按钮同时带着画质参数', burnButtons.every((b) => /--qn=\d+/.test(String(b.data))), burnButtons[0] && burnButtons[0].data)
+    const qualityButtonsOff = panel.buttons.filter((b) => /M$/.test(b.label) || b.label.includes('P'))
+    check('烧录按钮数量 = 画质档数', burnButtons.length === qualityButtonsOff.length,
+      burnButtons.length + ' / ' + qualityButtonsOff.length)
+    const toggleOn = onPanel.buttons.filter((b) => String(b.data).includes('--panel=0'))
+    check('开关按钮变成「关闭烧录弹幕选项」', toggleOn.length === 1 && toggleOn[0].label === '关闭烧录弹幕选项',
+      toggleOn.map((b) => '[' + b.label + '] → ' + b.data).join(' | '))
+    console.log('  —— 开启后的 markdown ——\n' + onPanel.markdown.split('\n').map((l) => '     ' + l).join('\n'))
 
     console.log('\n[4] 参数覆盖：按钮选的画质要真的作用到解析链路')
     const { runWithParseOverride } = require(path.join(pluginRoot, 'lib/karin/module/utils/ParseOverride.js'))
@@ -171,15 +207,32 @@ setTimeout(async () => {
     console.log('\n[5] 抖音：同一套面板 + 200MB 硬限制过滤（固定数据）')
     const dySent = await runCommand('抖音', 'https://v.douyin.com/iFakeTest/')
     const dy = readPanel(dySent)
-    check('只发了 1 条消息（面板）', dySent.length === 1, '共 ' + dySent.length + ' 条')
-    check('面板标题是作品文案', /面板验证/.test(dy.markdown), dy.markdown.split('\n')[1])
-    const dyQuality = dy.buttons.filter((b) => /M/.test(b.label))
+    check('发出了面板（加载提示 + 替换后的面板）', dySent.length >= 1 && /\| 清晰度 \| 大小 \|/.test(dy.markdown),
+      '共 ' + dySent.length + ' 条 / 表头 ' + (dy.markdown.split('\n').find((l) => l.startsWith('| 清晰度')) || '（无）'))
+    const dyQuality = dy.buttons.filter((b) => /^(4K|1080P|720P|540P|480P)$/.test(b.label))
     console.log('     画质按钮：' + dyQuality.map((b) => b.label).join(' / '))
     check('300MB 的 4K 档被隐藏', !dyQuality.some((b) => b.label.includes('4K')), dyQuality.map((b) => b.label).join(' / '))
     check('80MB 的 1080P 档保留', dyQuality.some((b) => b.label.includes('1080P')), dyQuality.map((b) => b.label).join(' / '))
     check('画质参数用抖音的 --q=', dyQuality.some((b) => String(b.data).includes('--q=1080p')), dyQuality[0] && dyQuality[0].data)
 
-    console.log('\n[6] 非 QQ 平台 / 关掉开关 → 不发面板')
+    console.log('\n[6] --dm=1 真的被识别为「要烧录弹幕」')
+    {
+      const logs = []
+      const originalLog = console.log
+      console.log = (...args) => { logs.push(args.map((item) => String(item)).join(' ')) }
+      try {
+        await runCommand('抖音', 'https://v.douyin.com/iFakeTest/ --dm=1')
+      } catch (error) {
+        logs.push('ERR ' + (error && error.message))
+      }
+      console.log = originalLog
+      const joined = logs.join('\n')
+      check('日志里 forceBurnDanmaku=true（--dm=1 生效）', /forceBurnDanmaku=true/.test(joined),
+        (joined.match(/\[抖音\][^\n]*/) || ['（没有抖音日志）'])[0].slice(0, 160))
+      check('没有出现「未接入 ffmpeg」的降级提示', !/未接入 ffmpeg/.test(joined))
+    }
+
+    console.log('\n[7] 非 QQ 平台 / 关掉开关 → 不发面板')
     const { sendQqParsePanel } = require(path.join(pluginRoot, 'lib/karin/module/utils/QqPanel.js'))
     const { Message } = require(path.join(pluginRoot, 'lib/compat/node-karin.js'))
     const makeMessage = (platform) => Message.fromSession({

@@ -31,7 +31,15 @@ config.pushlist = { douyin: [], bilibili: [] }
 fs.writeFileSync(path.join(dataRoot, 'koishi-plugin-kkk', 'config', 'config.json'), JSON.stringify(config, null, 2))
 
 // 1) 短链解析不走外网
-const axios = require(path.join(pluginRoot, 'node_modules/axios'))
+/** 依赖可能在本包 node_modules，也可能被提升到宿主 node_modules，两处都试 */
+const resolveDep = (name) => {
+  try {
+    return require(path.join(pluginRoot, 'node_modules', name))
+  } catch {
+    return require(name)
+  }
+}
+const axios = resolveDep('axios')
 const LONG_URL = 'https://www.douyin.com/video/' + AWEME_ID
 axios.get = async () => ({ request: { res: { responseUrl: LONG_URL } }, data: '' })
 
