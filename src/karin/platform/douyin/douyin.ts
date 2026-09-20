@@ -1,6 +1,8 @@
 import fs from 'node:fs'
 import { sendSlicedImage } from '@/module/utils/ImageSlice'
 import { buildMarkdownImageMessage } from '@/module/utils/QqPanel'
+// 弹幕烧录的总开关（通用里的「强制不烧录弹幕」优先级最高，平台配置也压不过）
+import { shouldBurnDanmaku } from '@/module/utils/DanmakuPolicy'
 import { sendParseTip } from '@/module/utils/parseTip'
 import { sendParseTip } from '@/module/utils/parseTip'
 
@@ -801,7 +803,7 @@ export class DouYin extends Base {
         if (sendvideofile && isVideo && !isArticle && Config.douyin.sendContent.includes('video')) {
           // 获取弹幕数据（如果开启弹幕烧录）
           let danmakuList: DouyinDanmakuElem[] = []
-          if ((this.forceBurnDanmaku || Config.douyin.burnDanmaku) && video) {
+          if (shouldBurnDanmaku(this.forceBurnDanmaku || Config.douyin.burnDanmaku) && video) {
             try {
               const duration = video.duration // 视频时长（毫秒）
               logger.mark(`[抖音] 视频时长: ${duration}ms, 开始获取弹幕数据`)
@@ -834,14 +836,14 @@ export class DouYin extends Base {
           }
 
           // 如果需要烧录弹幕，先下载视频再烧录
-          if (!(this.forceBurnDanmaku || Config.douyin.burnDanmaku) || danmakuList.length === 0) {
+          if (!shouldBurnDanmaku(this.forceBurnDanmaku || Config.douyin.burnDanmaku) || danmakuList.length === 0) {
             logger.mark(
               '[抖音] 跳过烧录：forceBurnDanmaku=' + String(this.forceBurnDanmaku) +
               ' 配置burnDanmaku=' + String(Config.douyin.burnDanmaku) +
               ' 弹幕数=' + danmakuList.length
             )
           }
-          if ((this.forceBurnDanmaku || Config.douyin.burnDanmaku) && danmakuList.length > 0) {
+          if (shouldBurnDanmaku(this.forceBurnDanmaku || Config.douyin.burnDanmaku) && danmakuList.length > 0) {
             const videoFile = await downloadFile(g_video_url, {
               title: `Douyin_V_tmp_${Date.now()}.mp4`,
               headers: { ...baseHeaders, Referer: 'https://www.douyin.com' }

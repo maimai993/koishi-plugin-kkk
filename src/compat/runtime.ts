@@ -23,6 +23,10 @@ export interface KkkRuntimeConfig {
   qqFileLimitMB?: number
   /** 视频体积超过该值（MB）时改走群文件；0 表示关闭。QQ 默认 30 */
   qqGroupFileLimitMB?: number
+  /** 解析面板里是否显示「烧录弹幕」列（默认关） */
+  qqPanelDanmaku?: boolean
+  /** 强制不烧录弹幕（默认开）：优先级最高，指令 / 面板 / 平台配置都压不过它 */
+  forceNoDanmaku?: boolean
 }
 
 export interface KkkRuntime {

@@ -1,5 +1,7 @@
 import fs from 'node:fs'
 import { buildMarkdownImageMessage } from '@/module/utils/QqPanel'
+// 弹幕烧录的总开关（通用里的「强制不烧录弹幕」优先级最高，平台配置也压不过）
+import { shouldBurnDanmaku } from '@/module/utils/DanmakuPolicy'
 import { sendSlicedImage } from '@/module/utils/ImageSlice'
 
 import {
@@ -369,7 +371,7 @@ export class Bilibili extends Base {
             }
             // 获取弹幕数据
             let danmakuList: BiliDanmakuElem[] = []
-            if (this.forceBurnDanmaku || Config.bilibili.burnDanmaku) {
+            if shouldBurnDanmaku(this.forceBurnDanmaku || Config.bilibili.burnDanmaku) {
               const cid = iddata.p ? (infoData.data.data.pages[iddata.p - 1]?.cid ?? infoData.data.data.cid) : infoData.data.data.cid
               const duration = iddata.p
                 ? (infoData.data.data.pages[iddata.p - 1]?.duration ?? infoData.data.data.duration)
@@ -521,7 +523,7 @@ export class Bilibili extends Base {
          * 这里和普通视频分支一样，按当前这一集的 cid 拉一份。
          */
         let bangumiDanmakuList: BiliDanmakuElem[] = []
-        if (this.forceBurnDanmaku || Config.bilibili.burnDanmaku) {
+        if shouldBurnDanmaku(this.forceBurnDanmaku || Config.bilibili.burnDanmaku) {
           const currentEpisode = videoInfo.data.result.episodes[Number(Episode) - 1] as any
           const epDuration = Number(currentEpisode?.duration ?? 0) || 0
           bangumiDanmakuList = await this.fetchVideoDanmakuList(currentEpisode.cid, epDuration)
@@ -1350,7 +1352,7 @@ export class Bilibili extends Base {
 
         if (bmp4.filepath) {
           // 根据是否有弹幕数据选择合成方式
-          const hasDanmaku = (this.forceBurnDanmaku || Config.bilibili.burnDanmaku) && danmakuList.length > 0
+          const hasDanmaku = shouldBurnDanmaku(this.forceBurnDanmaku || Config.bilibili.burnDanmaku) && danmakuList.length > 0
           const resultPath =
             Common.tempDri.video +
             `Bil_Result_${this.Type === 'one_video' ? infoData && infoData.data.bvid : infoData && infoData.result.season_id}.mp4`
@@ -1440,7 +1442,7 @@ export class Bilibili extends Base {
           return false
         }
         // 如果需要烧录弹幕，先下载视频再烧录
-        if ((this.forceBurnDanmaku || Config.bilibili.burnDanmaku) && danmakuList.length > 0) {
+        if (shouldBurnDanmaku(this.forceBurnDanmaku || Config.bilibili.burnDanmaku) && danmakuList.length > 0) {
           const videoFile = await downloadFile(directUrl, {
             title: `Bil_V_tmp_${Date.now()}.mp4`,
             headers: this.headers

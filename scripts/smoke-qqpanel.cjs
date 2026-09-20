@@ -165,32 +165,48 @@ setTimeout(async () => {
     check('最多保留 1 档画质（两行各一个按钮）', distinct.length <= 1, distinct.join(' / ') || '（无）')
     check('markdown 给出「发送可能失败」的提示', /可能失败/.test(tiny.markdown), tiny.markdown.match(/⚠️.*/)?.[0] ?? '（无提示）')
 
-    console.log('\n[3] 烧录弹幕开关：默认「清晰度 | 大小」，开启后多一列「烧录弹幕」')
-    const { DANMAKU_SUPPORTED } = require(path.join(pluginRoot, 'lib/karin/module/utils/QqPanel.js'))
-    check('本机 ffmpeg 可用（否则面板不会给出弹幕选项）', DANMAKU_SUPPORTED === true, 'DANMAKU_SUPPORTED=' + DANMAKU_SUPPORTED)
-    const offTable = panel.markdown.split('\n').filter((line) => line.startsWith('|'))
-    check('默认表头是「清晰度 | 大小」两列', offTable[0] === '| 清晰度 | 大小 |', offTable[0])
-    check('默认没有烧录弹幕按钮', !panel.buttons.some((b) => String(b.data).includes('--dm=1')))
-    const toggleOff = panel.buttons.filter((b) => String(b.data).includes('--panel=1'))
-    check('有一个「显示烧录弹幕选项」的开关按钮', toggleOff.length === 1 && toggleOff[0].label === '显示烧录弹幕选项',
-      toggleOff.map((b) => '[' + b.label + '] → ' + b.data).join(' | '))
-    check('开关按钮带的是同一条解析命令（点一下只是重发面板）', /^解析 /.test(String(toggleOff[0] && toggleOff[0].data)) && !String(toggleOff[0] && toggleOff[0].data).includes('--dm=1'),
-      toggleOff[0] && toggleOff[0].data)
+    console.log('\n[3] 烧录弹幕列：由配置面板决定（默认不显示），通用里的强制开关优先级最高')
+    const { isBurnDanmakuSupported, isBurnDanmakuForbidden } = require(path.join(pluginRoot, 'lib/karin/module/utils/DanmakuPolicy.js'))
+    const liveRuntime = getRuntime()
+    const savedForce = liveRuntime.config.forceNoDanmaku
+    const savedPanelDanmaku = liveRuntime.config.qqPanelDanmaku
 
-    const onPanel = readPanel(await runCommand('B站', target + ' --panel=1'))
-    const onTable = onPanel.markdown.split('\n').filter((line) => line.startsWith('|'))
-    check('开启后表头是「清晰度 | 烧录弹幕 | 大小」三列', onTable[0] === '| 清晰度 | 烧录弹幕 | 大小 |', onTable[0])
+    liveRuntime.config.forceNoDanmaku = false
+    const supportedWhenAllowed = isBurnDanmakuSupported()
+    liveRuntime.config.forceNoDanmaku = savedForce
+    check('关掉强制开关后判定为可烧录（本机有 ffmpeg）', supportedWhenAllowed === true, 'isBurnDanmakuSupported=' + supportedWhenAllowed)
+    check('默认强制不烧录弹幕（通用里的开关默认开）', savedForce !== false && isBurnDanmakuForbidden() === true,
+      'forceNoDanmaku=' + savedForce)
+    check('默认面板不显示「烧录弹幕」列', savedPanelDanmaku !== true, 'qqPanelDanmaku=' + savedPanelDanmaku)
+
+    const tableOf = (p) => p.markdown.split('\n').find((line) => line.startsWith('| 清晰度'))
+    const hasBurnButton = (p) => p.buttons.some((b) => String(b.data).includes('--dm=1'))
+    const hasToggleButton = (p) => p.buttons.some((b) => String(b.data).includes('--panel='))
+
+    check('默认两列「清晰度 | 大小」', tableOf(panel) === '| 清晰度 | 大小 |', tableOf(panel))
+    check('默认没有烧录弹幕按钮', !hasBurnButton(panel))
+    check('面板里没有「是否显示」的开关按钮（由配置决定，不是面板按钮）', !hasToggleButton(panel),
+      panel.buttons.map((b) => b.data).join(' | '))
+
+    // 两个开关都满足才显示：通用里的「强制不烧录弹幕」关掉 + QQ 适配器里打开面板弹幕列
+    liveRuntime.config.forceNoDanmaku = false
+    liveRuntime.config.qqPanelDanmaku = true
+    const onPanel = readPanel(await runCommand('B站', target))
+    liveRuntime.config.qqPanelDanmaku = savedPanelDanmaku
+    liveRuntime.config.forceNoDanmaku = savedForce
+    check('两个开关都打开后是三列「清晰度 | 烧录弹幕 | 大小」', tableOf(onPanel) === '| 清晰度 | 烧录弹幕 | 大小 |', tableOf(onPanel))
     const burnButtons = onPanel.buttons.filter((b) => String(b.data).includes('--dm=1'))
-    check('每档画质都有一个「烧录弹幕」按钮', burnButtons.length > 0 && burnButtons.every((b) => b.label === '烧录弹幕'),
+    check('每档画质都有「烧录弹幕」按钮', burnButtons.length > 0 && burnButtons.every((b) => b.label === '烧录弹幕'),
       burnButtons.map((b) => b.data).join(' | '))
-    check('烧录按钮同时带着画质参数', burnButtons.every((b) => /--qn=\d+/.test(String(b.data))), burnButtons[0] && burnButtons[0].data)
-    const qualityButtonsOff = panel.buttons.filter((b) => /M$/.test(b.label) || b.label.includes('P'))
-    check('烧录按钮数量 = 画质档数', burnButtons.length === qualityButtonsOff.length,
-      burnButtons.length + ' / ' + qualityButtonsOff.length)
-    const toggleOn = onPanel.buttons.filter((b) => String(b.data).includes('--panel=0'))
-    check('开关按钮变成「关闭烧录弹幕选项」', toggleOn.length === 1 && toggleOn[0].label === '关闭烧录弹幕选项',
-      toggleOn.map((b) => '[' + b.label + '] → ' + b.data).join(' | '))
-    console.log('  —— 开启后的 markdown ——\n' + onPanel.markdown.split('\n').map((l) => '     ' + l).join('\n'))
+    check('烧录按钮带着画质参数', burnButtons.every((b) => /--qn=\d+/.test(String(b.data))), burnButtons[0] && burnButtons[0].data)
+
+    liveRuntime.config.qqPanelDanmaku = true
+    liveRuntime.config.forceNoDanmaku = true
+    const forcedPanel = readPanel(await runCommand('B站', target))
+    liveRuntime.config.qqPanelDanmaku = savedPanelDanmaku
+    liveRuntime.config.forceNoDanmaku = savedForce
+    check('强制不烧录时，即使配置打开也只有两列', tableOf(forcedPanel) === '| 清晰度 | 大小 |', tableOf(forcedPanel))
+    check('强制不烧录时没有任何烧录按钮', !hasBurnButton(forcedPanel))
 
     console.log('\n[4] 参数覆盖：按钮选的画质要真的作用到解析链路')
     const { runWithParseOverride } = require(path.join(pluginRoot, 'lib/karin/module/utils/ParseOverride.js'))
@@ -215,21 +231,36 @@ setTimeout(async () => {
     check('80MB 的 1080P 档保留', dyQuality.some((b) => b.label.includes('1080P')), dyQuality.map((b) => b.label).join(' / '))
     check('画质参数用抖音的 --q=', dyQuality.some((b) => String(b.data).includes('--q=1080p')), dyQuality[0] && dyQuality[0].data)
 
-    console.log('\n[6] --dm=1 真的被识别为「要烧录弹幕」')
+    console.log('\n[6] 烧录请求的优先级：强制不烧录 > ffmpeg > 用户请求')
     {
-      const logs = []
-      const originalLog = console.log
-      console.log = (...args) => { logs.push(args.map((item) => String(item)).join(' ')) }
-      try {
-        await runCommand('抖音', 'https://v.douyin.com/iFakeTest/ --dm=1')
-      } catch (error) {
-        logs.push('ERR ' + (error && error.message))
+      const runWithCapture = async (command) => {
+        const logs = []
+        const originalLog = console.log
+        console.log = (...args) => { logs.push(args.map((item) => String(item)).join(' ')) }
+        let sent = []
+        try {
+          sent = await runCommand('抖音', command)
+        } catch (error) {
+          logs.push('ERR ' + (error && error.message))
+        }
+        console.log = originalLog
+        return { logs: logs.join('\n'), sent }
       }
-      console.log = originalLog
-      const joined = logs.join('\n')
-      check('日志里 forceBurnDanmaku=true（--dm=1 生效）', /forceBurnDanmaku=true/.test(joined),
-        (joined.match(/\[抖音\][^\n]*/) || ['（没有抖音日志）'])[0].slice(0, 160))
-      check('没有出现「未接入 ffmpeg」的降级提示', !/未接入 ffmpeg/.test(joined))
+
+      // 1) 默认状态：通用里「强制不烧录弹幕」是开的 → 带了 --dm=1 也不烧，并回一句说明
+      const forced = await runWithCapture('https://v.douyin.com/iFakeTest/ --dm=1')
+      check('强制不烧录时 --dm=1 不生效', /forceBurnDanmaku=false/.test(forced.logs),
+        (forced.logs.match(/\[抖音\] 跳过烧录[^\n]*/) || ['（没有跳过烧录日志）'])[0].slice(0, 160))
+      check('强制不烧录时会说明一句', JSON.stringify(forced.sent).includes('已关闭弹幕烧录'),
+        (JSON.stringify(forced.sent).match(/已关闭弹幕烧录[^"]*/) || ['（没有说明）'])[0].slice(0, 120))
+
+      // 2) 关掉强制开关后 → 这次才真的请求烧录
+      liveRuntime.config.forceNoDanmaku = false
+      const allowed = await runWithCapture('https://v.douyin.com/iFakeTest/ --dm=1')
+      liveRuntime.config.forceNoDanmaku = savedForce
+      check('关掉强制开关后 --dm=1 生效', /forceBurnDanmaku=true/.test(allowed.logs),
+        (allowed.logs.match(/\[抖音\] 跳过烧录[^\n]*/) || ['（没有跳过烧录日志）'])[0].slice(0, 160))
+      check('没有出现「未接入 ffmpeg」的降级提示', !/未接入 ffmpeg/.test(allowed.logs))
     }
 
     console.log('\n[7] 非 QQ 平台 / 关掉开关 → 不发面板')
@@ -240,10 +271,10 @@ setTimeout(async () => {
       bot: { selfId: '10000', platform, status: 1, ctx, sendMessage: async () => ['x'] },
       author: { nick: 's' }, username: 's', event: {}, send: async () => ['y']
     })
-    const onebot = await sendQqParsePanel(makeMessage('onebot'), { platform: 'bilibili', url: target, id: 'BV1xx411c7mD' }, { danmaku: false })
+    const onebot = await sendQqParsePanel(makeMessage('onebot'), { platform: 'bilibili', url: target, id: 'BV1xx411c7mD' })
     check('onebot 平台不发面板', onebot === false)
     runtime.config.qqPanel = false
-    const disabled = await sendQqParsePanel(makeMessage('qqguild'), { platform: 'bilibili', url: target, id: 'BV1xx411c7mD' }, { danmaku: false })
+    const disabled = await sendQqParsePanel(makeMessage('qqguild'), { platform: 'bilibili', url: target, id: 'BV1xx411c7mD' })
     runtime.config.qqPanel = true
     check('qqPanel=false 时不发面板', disabled === false)
 

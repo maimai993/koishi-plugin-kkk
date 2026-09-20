@@ -74,6 +74,14 @@
     "description": "群里转发过来的分享卡片没有链接，只能靠截图识别出标题和作者再去搜索。填自己的免费密钥更稳定：https://ocr.space/ocrapi 。留空会用公共测试密钥，容易被限流。"
   },
   {
+    "key": "qqPanelDanmaku",
+    "group": "解析面板",
+    "type": "boolean",
+    "default": false,
+    "label": "面板显示「烧录弹幕」列",
+    "description": "打开后，QQ 里的解析面板会多一列「烧录弹幕」：用户点它就按那一档画质把弹幕烧进视频再发。关着就只有「清晰度 / 大小」两列，谁也没法从面板上选烧弹幕。"
+  },
+  {
     "key": "qqGroupFileLimitMB",
     "group": "视频发送",
     "type": "number",
@@ -82,5 +90,14 @@
     "max": 2000,
     "label": "群文件发送阈值（MB）",
     "description": "视频体积超过这个值时，改用「群文件」发送。QQ 对富媒体视频会压缩、改名甚至丢掉后缀，走群文件才能原样发出去；填 0 表示不启用。"
+  },
+  {
+    "key": "forceNoDanmaku",
+    "group": "通用",
+    "renderIn": "app",
+    "type": "boolean",
+    "default": true,
+    "label": "强制不烧录弹幕",
+    "description": "优先级最高的总开关：打开时无论指令、面板按钮还是平台配置，都不会烧录弹幕，一律按纯视频解析。要用弹幕功能时先把它关掉。"
   }
 ]

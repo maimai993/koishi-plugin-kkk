@@ -11,12 +11,12 @@ import { acquireParseLock } from '@/module/utils/ParseLock'
 // 那个目录不存在，会让整个 tools 应用加载失败（解析指令全部消失）。
 import { parseParseFlags, runWithParseOverride } from '@/module/utils/ParseOverride'
 import {
-  DANMAKU_SUPPORTED,
   resolvePanelQualitySize,
   resolvePanelToken,
   sendQqParsePanel,
   type PanelRequest
 } from '@/module/utils/QqPanel'
+import { isBurnDanmakuForbidden, isBurnDanmakuSupported } from '@/module/utils/DanmakuPolicy'
 import { wrapWithErrorHandler } from '@/module/utils/ErrorHandler'
 import { Bilibili, getBilibiliID } from '@/platform/bilibili'
 import { DouYin, getDouyinID } from '@/platform/douyin'
@@ -65,17 +65,22 @@ const recordParseStat = async (
 }
 
 /**
- * 弹幕烧录在当前部署是否真的可用。
+ * 弹幕烧录在当前部署能不能真的跑。
  *
- * 上游走的是 `node-karin` 的 ffmpeg 封装，Koishi 兼容层里它是抛错的占位实现，
- * 所以这里直接把请求降级成「纯视频」并提示一句 —— 比丢一张看不懂的报错卡片强。
+ * 优先级从高到低：通用里的「强制不烧录弹幕」（默认开，开了连指令都烧不了）→
+ * 机器上有没有 ffmpeg → 这次用户有没有主动要。降级时只回一句话说明，不丢报错卡片。
  * @param e 消息事件
+ * @param requested 用户或配置是否要了弹幕
  * @returns 是否仍然按弹幕解析
  */
 const resolveBurnDanmaku = async (e: Message, requested: boolean): Promise<boolean> => {
-  if (!requested || DANMAKU_SUPPORTED) return requested
+  if (!requested) return false
+  let tip = ''
+  if (isBurnDanmakuForbidden()) tip = '本部署已关闭弹幕烧录（通用设置里的「强制不烧录弹幕」），本次按纯视频解析'
+  else if (!isBurnDanmakuSupported()) tip = '当前部署未接入 ffmpeg，弹幕烧录暂不可用，本次按纯视频解析'
+  if (!tip) return true
   try {
-    await e.reply('⚠️ 当前部署未接入 ffmpeg，弹幕烧录暂不可用，本次按纯视频解析')
+    await e.reply(tip)
   } catch (error) {
     logger.debug('发送弹幕不可用提示失败: ' + String(error))
   }
@@ -115,12 +120,11 @@ const tryQqPanel = async (
   request: PanelRequest,
   flags: ReturnType<typeof parseParseFlags>
 ): Promise<boolean> => {
-  // 面板按钮的「切换解析内容」必须排在「弹幕解析」判断之前：
-  // 按钮发的是 \`弹幕解析 <链接> --panel=1\`，它只是想换个面板，不该直接开解析
-  if (flags.panel !== undefined) return await sendQqParsePanel(e, request, { danmaku: flags.panel === 1 })
+  // 番剧分集按钮发的是 \`解析 <链接> --panel=1\`，它只是想重发一次面板，不该直接开解析
+  if (flags.panel !== undefined) return await sendQqParsePanel(e, request)
   if (/^#?弹幕解析/.test(e.msg)) return false
   if (flags.hasAny) return false
-  return await sendQqParsePanel(e, request, { danmaku: false })
+  return await sendQqParsePanel(e, request)
 }
 
 // 包装抖音处理函数

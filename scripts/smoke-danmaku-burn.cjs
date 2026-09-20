@@ -34,8 +34,11 @@ if (fs.existsSync(out)) fs.unlinkSync(out)
 const luma = (file, at) => {
   const text = run(ffmpeg, ['-hide_banner', '-ss', String(at), '-i', file, '-frames:v', '1',
     '-vf', 'crop=iw:ih/2:0:0,signalstats,metadata=print:file=-', '-f', 'null', '-'])
-  const m = text.match(/lavfi\.signalstats\.YAVG=([\d.]+)/)
-  return m ? Number(m[1]) : NaN
+  const avg = text.match(/lavfi\.signalstats\.YAVG=([\d.]+)/)
+  const max = text.match(/lavfi\.signalstats\.YMAX=([\d.]+)/)
+  // 平均亮度对「小字号弹幕」太迟钝（640x360 下字号只有 11px，均值只涨 0.7），
+  // 所以主判据用 YMAX：纯黑测试片上只要画了白色文字，最大亮度必然远高于背景。
+  return { avg: avg ? Number(avg[1]) : NaN, max: max ? Number(max[1]) : NaN }
 }
 
 const danmaku = [
@@ -60,8 +63,15 @@ const check = (name, ok, extra = '') => {
     fs.writeFileSync(path.join(work, 'preview.ass'), generateBiliASS(danmaku, 640, 360, {}))
     console.log('样本 ASS 已生成：' + path.join(work, 'preview.ass'))
 
-    const srcLuma = luma(src, 1)
-    console.log('源视频 1s 上半部分亮度：' + srcLuma)
+    /**
+     * 取样点要避开「弹幕还没进画面」的时刻：滚动弹幕从右边界外飘进来，
+     * 1s 时第一条才刚露头，亮度几乎不变（会误判成没烧上）。
+     * 所以取 2s / 3s / 5s 三帧的最大值 —— 分别对应顶部固定弹幕、大字滚动弹幕、底部固定弹幕。
+     */
+    const sampleLuma = (file) => [2, 3, 5].map((at) => luma(file, at))
+    const brightest = (samples) => samples.reduce((best, item) => (item.max > best.max ? item : best))
+    const srcSamples = sampleLuma(src)
+    console.log('源视频亮度（2/3/5s）：' + srcSamples.map((s) => s.avg.toFixed(2) + '/' + s.max).join('  '))
 
     const ok = await burnBiliDanmaku(src, danmaku, out, { videoCodec: codec, danmakuArea: 0.5 })
     check('burnBiliDanmaku 返回成功', ok === true, 'status=' + ok)
@@ -71,14 +81,18 @@ const check = (name, ok, extra = '') => {
     } else {
       const info = run(ffprobe, ['-v', 'error', '-show_entries', 'format=duration,size', '-of', 'json', out])
       const parsed = JSON.parse(info).format
-      const dstLuma = luma(out, 1)
-      console.log('输出文件：' + (parsed.size / 1024).toFixed(0) + 'KB，时长 ' + Number(parsed.duration).toFixed(2) + 's，1s 亮度 ' + dstLuma)
+      const dstSamples = sampleLuma(out)
+      const srcBest = brightest(srcSamples)
+      const dstBest = brightest(dstSamples)
+      console.log('输出文件：' + (parsed.size / 1024).toFixed(0) + 'KB，时长 ' + Number(parsed.duration).toFixed(2) + 's，亮度 ' +
+        dstSamples.map((s) => s.avg.toFixed(2) + '/' + s.max).join('  '))
       check('输出文件存在且非空', Number(parsed.size) > 10240, String(parsed.size) + ' 字节')
       check('时长与原片接近', Math.abs(Number(parsed.duration) - 6) < 1, parsed.duration + 's')
       const hasAudio = run(ffprobe, ['-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', out]).trim()
       check('音轨保留', hasAudio.length > 0, hasAudio)
-      check('弹幕真的烧进了画面（亮度上升）', dstLuma > srcLuma + 1,
-        '源 ' + srcLuma + ' → 输出 ' + dstLuma)
+      check('弹幕真的烧进了画面（最亮像素远高于纯黑背景）', dstBest.max > srcBest.max + 20,
+        '源最高 ' + srcBest.max + ' → 输出最高 ' + dstBest.max +
+        '（平均 ' + srcBest.avg.toFixed(2) + ' → ' + dstBest.avg.toFixed(2) + '）')
     }
   } catch (error) {
     console.error('弹幕烧录冒烟测试异常:', error && error.stack ? error.stack : error)

@@ -169,7 +169,7 @@ export const usage = `
 | 指令 | 作用 |
 | --- | --- |
 | \`解析 <链接>\` / \`kkk解析\` | 解析作品（QQ 上先出交互面板） |
-| \`弹幕解析 <链接>\` | 把弹幕烧进视频，引用一条消息使用 |
+| \`弹幕解析 <链接>\` | 把弹幕烧进视频（需要先关掉通用里的「强制不烧录弹幕」） |
 | \`kkk帮助\` | 查看命令菜单 |
 | \`kkk版本\` | 运行环境诊断卡片 |
 | \`kkk解析统计\` / \`kkk全局解析统计\` | 查看解析统计（后者仅主人） |
@@ -189,6 +189,18 @@ export const usage = `
 
 视频体积较大时（默认超过 30MB，可在面板的「QQ 适配器」里调）会改用**群文件**发送，
 避免 QQ 压缩画质或改掉文件名。
+
+## 弹幕烧录
+
+两个开关都在配置面板里，默认状态是「不烧弹幕」：
+
+- **通用 → 强制不烧录弹幕**（默认开启）：总开关。开着时不管是指令、面板还是平台配置，
+  都不会烧录弹幕，一律按纯视频解析 —— 优先级最高。要用弹幕就先把这一项关掉。
+- **QQ 适配器 → 面板显示「烧录弹幕」列**（默认关闭）：打开后，QQ 里的解析面板会从
+  「清晰度 / 大小」两列变成「清晰度 / 烧录弹幕 / 大小」三列，用户可以自己选一档带弹幕解析。
+
+关掉总开关之后，也可以直接用 \`弹幕解析 <链接>\` 指令烧弹幕。烧录需要机器上装了 ffmpeg，
+没有的话会提示一句并退回纯视频。
 `
 
 /**
@@ -760,6 +772,8 @@ export async function apply (ctx: Context, rawConfig: Config) {
       dataPath: config.dataPath,
       qqPanel: config.qqPanel !== false,
       qqFileLimitMB: Number(config.qqFileLimitMB) || 200,
+      qqPanelDanmaku: config.qqPanelDanmaku === true,
+      forceNoDanmaku: (config as any).forceNoDanmaku !== false,
       qqGroupFileLimitMB: (() => {
         const raw = (config as any).qqGroupFileLimitMB
         if (raw === undefined || raw === null || raw === '') return 30

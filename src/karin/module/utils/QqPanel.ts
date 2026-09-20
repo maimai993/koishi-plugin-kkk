@@ -14,15 +14,18 @@
  * @see https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_users_user_openid_files.post.html
  *
  * ## 无状态
- * 面板本身不记录任何会话状态：当前选择（纯视频 / 带弹幕）编码在按钮的 \`action.data\` 里，
- * 点「＋弹幕」就是把带 \`--panel=1\` 的同一条命令再发一次，由插件重新渲染面板。
- * 好处是重启、多实例、按钮点两次都不会串状态。
+ * 面板本身不记录任何会话状态：用户的选择全部编码在按钮的 data 里（画质、要不要烧弹幕都是参数），
+ * 重启 / 多实例 / 重复点击都不会串状态。
+ *
+ * 「烧录弹幕」那一列出不出现由**配置**决定（见 DanmakuPolicy），面板里没有开关按钮：
+ * 关着就只有「清晰度 / 大小」两列，用户点哪个都是纯视频。
  */
-import { isFfmpegAvailable, logger, segment, type Message } from 'node-karin'
+import { logger, segment, type Message } from 'node-karin'
 import fs from 'node:fs'
 
 import { commandInvocation, tryGetRuntime } from '../../../compat/runtime'
 import { getParseOverride } from './ParseOverride'
+import { isBurnDanmakuSupported } from './DanmakuPolicy'
 import { Config } from './Config'
 import { getDouyinQualityLevel } from '@/platform/douyin/videoQuality'
 import { getImageMetadata, Render } from '@/module/utils/Render'
@@ -163,15 +166,6 @@ export function resolvePanelToken (token: string | undefined): string {
 /** 面板信息缓存（点「＋弹幕」会重新渲染面板，没必要再打一次接口） */
 const infoCache = new Map<string, { at: number; info: PanelInfo | null }>()
 const INFO_TTL = 5 * 60 * 1000
-
-/**
- * 当前部署能不能烧录弹幕。
- *
- * 上游的弹幕烧录全部经由 `node-karin` 的 `ffmpeg()` 封装。
- * 兼容层现在给的是**真实现**（子进程跑 ffmpeg / ffprobe），所以这里按「机器上到底有没有 ffmpeg」
- * 动态判断：有就正常提供弹幕选项，没有才降级提示「未接入 ffmpeg」。
- */
-export const DANMAKU_SUPPORTED = isFfmpegAvailable()
 
 /** 是否 QQ 平台（官方适配器 platform 为 qqguild / qq / qqbot） */
 export function isQqPlatform (e: Message): boolean {
@@ -671,12 +665,14 @@ export async function sendBangumiPanel (e: Message, episodes: any[], cardData: a
 
 /**
  * 生成并发送解析面板。
+ *
+ * 面板长什么样完全由配置决定（画质档位来自接口，弹幕列来自 `qqPanelDanmaku` + 强制开关），
+ * 调用方不需要、也不应该传「要不要弹幕」—— 那是配置的事，不是这一次解析的事。
  * @param e 消息事件
  * @param request 作品信息
- * @param options.danmaku 当前是否为「视频 + 弹幕」
  * @returns 是否已经发出面板（false 时调用方应继续正常解析）
  */
-export async function sendQqParsePanel (e: Message, request: PanelRequest, options: { danmaku: boolean }): Promise<boolean> {
+export async function sendQqParsePanel (e: Message, request: PanelRequest): Promise<boolean> {
   const runtime = tryGetRuntime()
   if (!runtime) return false
   if (runtime.config.qqPanel === false) return false
@@ -728,27 +724,15 @@ export async function sendQqParsePanel (e: Message, request: PanelRequest, optio
     cmdInput(command + ' ' + (urlPart || short) + ' ' + short + ' ' + qualityFlag + id + (burn ? ' --dm=1' : ''), label)
 
   /**
-   * 「是否显示烧录弹幕」的开关按钮。
-   *
-   * 面板本身不记状态：开关就编在按钮的 `--panel=1`（开）/ `--panel=0`（关）里，
-   * 点一下由插件重新渲染一张面板，宿主重启后点旧面板也照样工作。
-   * @param on 当前是否已经显示烧录弹幕选项
-   */
-  const toggleButton = (on: boolean) =>
-    cmdInput(
-      parseCommand + ' ' + (urlPart || short) + ' ' + short + ' --panel=' + (on ? 0 : 1),
-      on ? '关闭烧录弹幕选项' : '显示烧录弹幕选项'
-    )
-
-  /**
    * 表格排版。
    *   - 默认（关闭烧录弹幕）：清晰度 / 大小 两列，「清晰度」本身就是按钮
    *   - 打开烧录弹幕：清晰度 / 烧录弹幕 / 大小 三列 —— 中间那列是按这一档画质
    *     **带弹幕**解析的按钮（命令里带 `--dm=1`），原「清晰度」按钮仍是纯视频
-   * 开关由表下的按钮切换（见 toggleButton）。机器上没装 ffmpeg 的部署不出现这个开关：
-   * 点了也烧不出来，不如不给，免得用户以为点坏了。
+   * 这一列出不出现，完全由配置决定（WebUI 面板 → QQ 适配器 → 「面板显示「烧录弹幕」列」，
+   * 默认关）：关着就只有「清晰度 / 大小」两列，用户没法从面板上选烧弹幕；
+   * 通用里的「强制不烧录弹幕」（默认开）优先级更高，开着时即使配置打开也不显示这一列。
    */
-  const danmakuEnabled = options.danmaku && DANMAKU_SUPPORTED
+  const danmakuEnabled = runtime.config.qqPanelDanmaku === true && isBurnDanmakuSupported()
   if (danmakuEnabled) {
     lines.push('| 清晰度 | 烧录弹幕 | 大小 |')
     lines.push('| :--- | :---: | ---: |')
@@ -770,7 +754,6 @@ export async function sendQqParsePanel (e: Message, request: PanelRequest, optio
   }
   // 一档都不满足体积上限：仍给出最小的一档（否则用户连解析都点不了），但要说清楚风险
   if (overflow) lines.push('所有画质都超过体积上限（' + limit + 'MB），这里只保留最小的一档，发送可能失败。')
-  if (DANMAKU_SUPPORTED) lines.push(toggleButton(danmakuEnabled))
   await replaceLoadingTip(e, loadingId, segment.markdown(lines.join(String.fromCharCode(10))))
   logger.debug('[QQ面板] 已发送解析面板: ' + request.platform + ' ' + request.id + '（' + shown.length + '/' + info.options.length + ' 档画质）')
   return true
