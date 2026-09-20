@@ -107,8 +107,13 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
 
   /* ---------------- 登录策略 ---------------- */
 
-  /** 只有启用 auth 插件才需要登录；当前部署是关的 → 免登录 */
-  const authRequired = () => !!(ctx as any).get?.('auth')
+  /**
+   * 面板（/kkk）是否需要登录。
+   *
+   * 默认**免登录**：装了 auth 插件的生产环境也会直接进界面（否则用户要先登控制台才能改配置，很别扭）。
+   * 要恢复成「必须登录控制台」，把配置里的 `webUiAuth` 打开即可。
+   */
+  const authRequired = () => (config as any)?.webUiAuth === true
 
   /** 控制台登录态：auth 插件的 cookie 形如 name=id:token，用它查 token 表 */
   const consoleAuthed = async (request: any): Promise<boolean> => {

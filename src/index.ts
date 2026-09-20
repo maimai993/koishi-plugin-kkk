@@ -23,8 +23,40 @@ import { applyUpstreamOverrides } from './configBridge'
 import { resolveQqCardContent } from './karin/module/utils/QqCardResolve'
 import { buildUpstreamSchema } from './schema'
 
-/** 插件根目录（编译产物在 lib/ 下，向上一级即包根） */
-const pluginRootDir = path.resolve(__dirname, '..')
+/**
+ * 插件根目录。
+ *
+ * 通常编译产物在 `lib/index.js`，向上一级就是包根；但生产环境不一定按这个位置加载
+ * （打包 / 转译缓存 / pnpm 的不同布局 / 直接跑源码都会让 `__dirname` 落到别处），
+ * 一旦猜错，`/kkk` 面板就会报「assets/web/index.html 缺失」。
+ *
+ * 所以这里从 `__dirname` 逐级向上找，直到找到带 `assets/web/index.html` 的那一层，
+ * 再兜底试「按包名解析」和「cwd / cwd/node_modules」。
+ */
+function resolvePluginRoot (): string {
+  const marker = path.join('assets', 'web', 'index.html')
+  const candidates: string[] = []
+  let dir = __dirname
+  for (let i = 0; i < 6; i++) {
+    candidates.push(dir)
+    const parent = path.dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  try {
+    candidates.push(path.dirname(require.resolve('koishi-plugin-kkk/package.json')))
+  } catch { /* 本地链接安装时解析不到，正常 */ }
+  candidates.push(process.cwd(), path.join(process.cwd(), 'node_modules', 'koishi-plugin-kkk'))
+
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(path.join(candidate, marker))) return candidate
+    } catch { /* 权限之类的问题跳过 */ }
+  }
+  return path.resolve(__dirname, '..')
+}
+
+const pluginRootDir = resolvePluginRoot()
 
 /**
  * 网络兜底：优先 IPv4。
@@ -63,6 +95,8 @@ export interface Config {
   debug: boolean
   /** 消息里的链接自动解析 */
   autoParse: boolean
+  /** 配置面板（/kkk）是否要求先登录 Koishi 控制台（默认关，即免登录） */
+  webUiAuth: boolean
   /** QQ 平台解析前先发交互面板（Markdown + 按钮）让用户选解析内容和画质 */
   qqPanel: boolean
   /** QQ 面板里隐藏超过该体积（MB）的画质按钮 */
@@ -91,7 +125,7 @@ export interface Config {
  * 这里能改的项会被写回数据目录的 config.json（见 configBridge），在那之前 config.json 仍是权威来源。
  */
 /** 摊平后由「Koishi 原生设置」分组提供的字段 */
-const NATIVE_KEYS = ['masters', 'dataPath', 'debug', 'autoParse']
+const NATIVE_KEYS = ['masters', 'dataPath', 'debug', 'autoParse', 'webUiAuth']
 
 export const Config: Schema<Config> = Schema.intersect([
   Schema.object({
@@ -105,6 +139,7 @@ export const Config: Schema<Config> = Schema.intersect([
     dataPath: Schema.string().default('data').description('数据目录：配置、数据库、临时文件都放在这里'),
     debug: Schema.boolean().default(false).description('在日志里输出调试信息，排查问题时才需要打开'),
     autoParse: Schema.boolean().default(true).description('群里有人发链接（或回复一条带链接的消息）就自动解析，不用打指令'),
+    webUiAuth: Schema.boolean().default(false).description('配置面板 /kkk 是否要求先登录 Koishi 控制台。默认关（免登录，打开就能改配置）；装了 auth 插件且希望面板也走登录时再打开'),
     }).collapse().description('Koishi 原生设置（一般不用改，已折叠）'),
   }),
   Schema.object({
@@ -612,6 +647,10 @@ function registerCommands (
 export async function apply (ctx: Context, rawConfig: Config) {
   const logger = ctx.logger('kkk')
   setLogger(logger)
+  {
+    const ok = fs.existsSync(path.join(pluginRootDir, 'assets', 'web', 'index.html'))
+    logger.info('[kkk] 插件根目录: ' + pluginRootDir + (ok ? '' : '（警告：这里没有 assets/web/index.html，/kkk 面板会打不开）'))
+  }
 
   /**
    * 控制台表单把选项分成两个折叠组（「QQ 适配器」和「Koishi 原生设置」），
