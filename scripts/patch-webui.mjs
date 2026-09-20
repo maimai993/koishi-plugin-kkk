@@ -33,6 +33,23 @@ const fields = JSON.parse(fs.readFileSync(path.join(pluginRoot, 'src', 'qqFields
 const q = (value) => BT + String(value) + BT
 const arr = (items) => '[' + items.map(q).join(',') + ']'
 
+/** 指定渲染到「通用」分类的字段（配置本身还在 qq.* 里，只是界面挪个位置） */
+const APP_FIELDS = fields.filter((field) => field.renderIn === 'app')
+const QQ_FIELDS_ONLY = fields.filter((field) => field.renderIn !== 'app')
+
+/** 「通用 → 交互设置」里追加的字段（用该分类自己的渲染器：s = 开关，c = 文本框） */
+const APP_FIELDS_CODE = APP_FIELDS.map((field) => {
+  const path = '[' + [q('qq'), q(field.key)].join(',') + ']'
+  if (field.type === 'boolean') return 's(' + path + ',' + q(field.label) + ',' + q(field.description) + ')'
+  const opts = ["type:" + q(field.type === 'number' ? 'number' : 'text')]
+  if (field.type === 'number') {
+    opts.push('fallback:' + Number(field.default))
+    if (field.min !== undefined) opts.push('min:' + field.min)
+    if (field.max !== undefined) opts.push('max:' + field.max)
+  }
+  return 'c(' + path + ',' + q(field.label) + ',' + q(field.description) + ',{' + opts.join(',') + '})'
+}).join(',')
+
 /** 一个字段 → 一行渲染器调用 */
 function renderField (field) {
   const target = arr(['qq', field.key])
@@ -50,7 +67,7 @@ function renderField (field) {
 }
 
 const groups = []
-for (const field of fields) {
+for (const field of QQ_FIELDS_ONLY) {
   let group = groups.find((item) => item.name === field.group)
   if (!group) groups.push(group = { name: field.group, fields: [] })
   group.fields.push(field)
@@ -252,13 +269,17 @@ const LOG_MODES = '[{value:`trigger`,label:`触发者所在的群`},{value:`admi
 /** 用「前缀定位 + 括号配对」替换调用（压缩代码里正则很容易写不中） */
 function replaceCall (text, prefix, build) {
   let out = text
+  let from = 0
   for (;;) {
-    const at = out.indexOf(prefix)
+    const at = out.indexOf(prefix, from)
     if (at < 0) return out
     const open = out.indexOf('(', at)
     const close = matchParen(out, open)
     if (open < 0 || close < 0) return out
-    out = out.slice(0, at) + build() + out.slice(close + 1)
+    const replacement = build()
+    out = out.slice(0, at) + replacement + out.slice(close + 1)
+    // 游标往后挪：替换后的文本可能同样以该前缀开头，从头找会死循环
+    from = at + replacement.length
   }
 }
 
@@ -310,8 +331,11 @@ function stripMarked (text, from, to) {
 
 function patchPermFields (text, name) {
   const perm = (platform) => 't.renderPermField([' + BT + platform + BT + ',' + BT + 'loginPerm' + BT + '],' + BT + '谁可以触发扫码登录' + BT + ',' + BT + PERM_DESC + BT + ',{modes:' + PERM_MODES + '})'
-  const log = 't.renderPermField([' + BT + 'app' + BT + ',' + BT + 'errorLogSendTo' + BT + '],' + BT + '错误日志' + BT + ',' + BT + LOG_DESC + BT + ',{list:true,modes:' + LOG_MODES + '})'
-  let out = stripBarePermField(stripMarked(text, PERM_START, PERM_END))
+  const APP_START = '/*KKK-APP-START*/'
+  const APP_END = '/*KKK-APP-END*/'
+  const logCall = 't.renderPermField([' + BT + 'app' + BT + ',' + BT + 'errorLogSendTo' + BT + '],' + BT + '错误日志' + BT + ',' + BT + LOG_DESC + BT + ',{list:true,modes:' + LOG_MODES + '})'
+  const log = logCall + (APP_FIELDS_CODE ? ',' + APP_START + APP_FIELDS_CODE + APP_END : '')
+  let out = stripBarePermField(stripMarked(stripMarked(text, PERM_START, PERM_END), '/*KKK-APP-START*/', '/*KKK-APP-END*/'))
   const before = out
   for (const [prefix, build] of [
     ['l([' + BT + 'bilibili' + BT + ',' + BT + 'loginPerm' + BT + '],', () => perm('bilibili')],
@@ -320,6 +344,7 @@ function patchPermFields (text, name) {
     ['o([' + BT + 'douyin' + BT + ',' + BT + 'loginPerm' + BT + '],', () => perm('douyin')],
     ['c([' + BT + 'app' + BT + ',' + BT + 'errorLogSendTo' + BT + '],', () => log],
     ['n([' + BT + 'app' + BT + ',' + BT + 'errorLogSendTo' + BT + '],', () => log],
+    ['t.renderPermField([' + BT + 'app' + BT + ',' + BT + 'errorLogSendTo' + BT + '],', () => log],
   ]) out = replaceCall(out, prefix, build)
   if (out !== before) console.log('[kkk] 权限字段改为「选 id 才出输入框」: ' + name)
   if (!out.includes(PERM_START)) {

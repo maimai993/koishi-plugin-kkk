@@ -13,7 +13,8 @@
     "type": "boolean",
     "default": true,
     "label": "自动撤回面板",
-    "description": "用户在面板上点完按钮后，自动把上一条面板消息撤回，群里不会堆着一排旧面板。"
+    "description": "用户在面板上点完按钮后，自动把上一条提示 / 选择消息撤回，群里不会堆着一排旧提示和选择。",
+    "renderIn": "app"
   },
   {
     "key": "qqFileLimitMB",
