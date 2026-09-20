@@ -10,6 +10,9 @@ import { recallLastPanel } from '@/module/utils/QqPanel'
 import type { pushlistConfig } from '@/types/config/pushlist'
 
 import { AmagiBase } from './amagiClient'
+// 群文件阈值来自 Koishi 侧配置：Config 是上游 config.json 的 Proxy，
+// 取不到 qqGroupFileLimitMB 时会返回 {}，Number({}) 就是 NaN —— 阈值失效的元凶
+import { tryGetRuntime } from '../../../compat/runtime'
 
 type uploadFileOptions = {
   /** 是否使用群文件上传 */
@@ -261,7 +264,17 @@ export const uploadFile = async (event: Message, file: fileInfo, videoUrl: strin
     (event as any)?.bot?.bot?.platform ?? (event as any)?.platform ?? (event as any)?.bot?.platform ?? ''
   )
   const isQqPlatform = /qqguild|qqbot|^qq$/i.test(platform) || /qq/i.test(platform) || /official/i.test(platform)
-  const qqLimit = Number((Config as any).qqGroupFileLimitMB ?? 30)
+  const rawQqLimit = (() => {
+    try {
+      return (tryGetRuntime()?.config as any)?.qqGroupFileLimitMB
+    } catch {
+      return undefined
+    }
+  })()
+  const parsedQqLimit = Number(rawQqLimit)
+  const qqLimit = rawQqLimit === undefined || rawQqLimit === null || rawQqLimit === ''
+    ? 30
+    : (Number.isFinite(parsedQqLimit) && parsedQqLimit >= 0 ? parsedQqLimit : 30)
   const useGroupFile = isQqPlatform && qqLimit > 0
     ? newFileSize > qqLimit
     : Config.app.usegroupfile && newFileSize > Config.app.groupfilevalue

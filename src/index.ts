@@ -768,6 +768,12 @@ export async function apply (ctx: Context, rawConfig: Config) {
       dataPath: config.dataPath,
       qqPanel: config.qqPanel !== false,
       qqFileLimitMB: Number(config.qqFileLimitMB) || 200,
+      qqGroupFileLimitMB: (() => {
+        const raw = (config as any).qqGroupFileLimitMB
+        if (raw === undefined || raw === null || raw === '') return 30
+        const n = Number(raw)
+        return Number.isFinite(n) && n >= 0 ? n : 30
+      })(),
       recallPanel: config.recallPanel !== false,
       bangumiPanelCols: Number(config.bangumiPanelCols) || 5,
       bangumiPanelRows: Number(config.bangumiPanelRows) || 4

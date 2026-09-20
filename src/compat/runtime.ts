@@ -21,6 +21,8 @@ export interface KkkRuntimeConfig {
   qqPanel?: boolean
   /** QQ 面板里隐藏超过该体积（MB）的画质按钮；QQ 富媒体视频硬限制为 200MB */
   qqFileLimitMB?: number
+  /** 视频体积超过该值（MB）时改走群文件；0 表示关闭。QQ 默认 30 */
+  qqGroupFileLimitMB?: number
 }
 
 export interface KkkRuntime {
