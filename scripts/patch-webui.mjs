@@ -44,22 +44,27 @@ const QQ_FIELDS_ONLY = fields.filter((field) => field.renderIn !== 'app')
  * 不带 section 的直接跟在「交互设置」里 —— 和原来一样。
  */
 /**
- * 「弹幕功能开着吗」的表达式。
+ * 「不可编辑」的表达式。
  *
- * 通用里的「强制不烧录弹幕」关掉 = 弹幕烧录打开；带 `editableWhen: 'danmaku'` 的字段
- * （在线播放器那一组）只有在这时才能编辑（面板里灰掉，不给改）。
+ * 语义：带 `editableWhen: 'danmaku'` 的字段（目前只有「弹幕重定向在线播放器」那一个开关），
+ * **只有把通用里的「强制不烧录弹幕」关掉（= 打开弹幕功能）之后才能改**；
+ * 开着「强制不烧录弹幕」时锁住（读不到这个键时按默认值 true 处理，同样锁住）。
+ *
+ * 注意极性：Q 取到的是当前值，`===!0` 表示「强制不烧录弹幕开着」= 要锁住。
+ * （之前这里写成了 `===!1`，于是「关掉强制不烧录弹幕」反而把字段锁住了。）
  */
-const DANMAKU_OPEN = 'Q(e,' + arr(['qq', 'forceNoDanmaku']) + ',!0)===!1'
+const DANMAKU_LOCKED = 'Q(e,' + arr(['qq', 'forceNoDanmaku']) + ',!0)===!0'
 
-/** 字段被锁住时在标题上补一句说明，免得用户以为是界面坏了 */
-const SECTION_LOCK_HINT = '（需先关闭「强制不烧录弹幕」）'
+/** 锁住时在字段说明后面补一句，免得用户以为是界面坏了 */
+const LOCK_HINT = '（这一项要先关掉上面的「强制不烧录弹幕」（也就是打开弹幕功能）才能改）'
 
 const appFieldCall = (field) => {
   const path = '[' + [q('qq'), q(field.key)].join(',') + ']'
-  const disabled = field.editableWhen === 'danmaku' ? DANMAKU_OPEN : ''
+  const locked = field.editableWhen === 'danmaku'
+  const description = q(String(field.description) + (locked ? LOCK_HINT : ''))
   // renderSwitch 的第 4 个参数、renderTextField 的 options.disabled 都是「不可编辑」
   if (field.type === 'boolean') {
-    return 's(' + path + ',' + q(field.label) + ',' + q(field.description) + (disabled ? ',' + disabled : '') + ')'
+    return 's(' + path + ',' + q(field.label) + ',' + description + (locked ? ',' + DANMAKU_LOCKED : '') + ')'
   }
   const opts = ["type:" + q(field.type === 'number' ? 'number' : 'text')]
   if (field.type === 'number') {
@@ -67,14 +72,14 @@ const appFieldCall = (field) => {
     if (field.min !== undefined) opts.push('min:' + field.min)
     if (field.max !== undefined) opts.push('max:' + field.max)
   }
-  if (disabled) opts.push('disabled:' + disabled)
-  return 'c(' + path + ',' + q(field.label) + ',' + q(field.description) + ',{' + opts.join(',') + '})'
+  if (locked) opts.push('disabled:' + DANMAKU_LOCKED)
+  return 'c(' + path + ',' + q(field.label) + ',' + description + ',{' + opts.join(',') + '})'
 }
 const sectionFields = (section) => APP_FIELDS.filter((field) => field.section === section)
 const APP_FIELDS_CODE = [
   ...APP_FIELDS.filter((field) => !field.section).map(appFieldCall),
   ...[...new Set(APP_FIELDS.filter((field) => field.section).map((field) => field.section))].map((section) =>
-    'o(' + q(section + (sectionFields(section).some((field) => field.editableWhen === 'danmaku') ? SECTION_LOCK_HINT : ''))
+    'o(' + q(section)
     + ',(0,U.jsx)(U.Fragment,{children:['
     + sectionFields(section).map(appFieldCall).join(',')
     + ']}))'),

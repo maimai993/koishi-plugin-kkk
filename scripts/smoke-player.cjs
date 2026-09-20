@@ -424,9 +424,30 @@ setTimeout(async () => {
     console.log('\n[10] 在线播放最大文件：留空跟随全局，超限就不走在线播放')
     const { QQ_FIELDS } = require(path.join(pluginRoot, 'lib/qqOptions.js'))
     const playerFields = QQ_FIELDS.filter((field) => field.key.startsWith('player'))
-    check('播放器那组字段都要求先开启弹幕功能才能编辑（editableWhen=danmaku）',
-      playerFields.length === 6 && playerFields.every((field) => field.editableWhen === 'danmaku'),
-      playerFields.map((field) => field.key + ':' + field.editableWhen).join(' | '))
+    /**
+     * 用户实测反馈的 bug：这一组原来**全都被**绑到「强制不烧录弹幕」上，
+     * 而且判断还写反了（关掉强制不烧录反而变灰）。现在只有总开关联动，其余字段随时可改。
+     */
+    const gated = playerFields.filter((field) => field.editableWhen === 'danmaku')
+    check('只有「弹幕重定向在线播放器」这一个开关和「强制不烧录弹幕」联动',
+      playerFields.length === 6 && gated.length === 1 && gated[0].key === 'playerEnabled',
+      playerFields.map((field) => field.key + ':' + (field.editableWhen || '-')).join(' | '))
+    check('总开关名字改成了「弹幕重定向在线播放器」',
+      playerFields.find((field) => field.key === 'playerEnabled')?.label === '弹幕重定向在线播放器',
+      playerFields.find((field) => field.key === 'playerEnabled')?.label)
+    // WebUI 面板里的门控是 patch-webui 生成到前端包里的，这里直接检查产物：
+    // 方向必须是「开着强制不烧录弹幕时锁住」（===!0），写反了就会复现用户报的那个 bug
+    const webAssetsDir = path.join(pluginRoot, 'assets', 'web', 'assets')
+    const bundleName = fs.readdirSync(webAssetsDir).find((name) => /^index-.*\.js$/.test(name))
+    const bundleText = bundleName ? fs.readFileSync(path.join(webAssetsDir, bundleName), 'utf-8') : ''
+    const lockedMarker = 'Q(e,[' + "`" + 'qq' + "`" + ',' + "`" + 'forceNoDanmaku' + "`" + '],!0)===!0'
+    const openMarker = 'Q(e,[' + "`" + 'qq' + "`" + ',' + "`" + 'forceNoDanmaku' + "`" + '],!0)===!1'
+    check('WebUI 里「强制不烧录弹幕」开着时该开关是锁住的（方向正确）',
+      !!bundleText && bundleText.split(lockedMarker).length - 1 === 1 && !bundleText.includes(openMarker),
+      '锁住表达式 ' + (bundleText.split(lockedMarker).length - 1) + ' 处 / 反向 ' + (bundleText.split(openMarker).length - 1) + ' 处')
+    check('其余在线播放字段没有被灰掉（前端包里只有这一处 disabled）',
+      !!bundleText && bundleText.split('disabled:' + lockedMarker).length - 1 === 0,
+      '（文本框/数字框都不带 disabled）')
     check('「在线播放最大文件」默认 0 = 跟随全局', QQ_DEFAULTS.playerMaxFileMB === 0,
       'default=' + QQ_DEFAULTS.playerMaxFileMB)
     check('「超限转在线播放」默认关', QQ_DEFAULTS.playerOnOversize === false,
