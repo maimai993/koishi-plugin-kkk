@@ -46,6 +46,19 @@ export class ParseSteps {
     }
   }
 
+  /**
+   * 只记录一次失败、不打断当前流程。
+   *
+   * 给**已经有 try/catch** 的位置用（那些地方自己会兜底，只是原来选择把异常吞掉或重新抛出）：
+   * 调用它就能让这次失败在最后统一报出来，又不用改括号结构。
+   * @param name 步骤名
+   * @param error 捕获到的错误
+   */
+  fail (name: string, error: unknown): void {
+    this.failures.push({ name, error })
+    logger.warn('[解析] 步骤「' + name + '」失败，已跳过并继续后面的步骤: ' + messageOf(error))
+  }
+
   /** 有没有步骤失败过 */
   get hasFailures (): boolean {
     return this.failures.length > 0

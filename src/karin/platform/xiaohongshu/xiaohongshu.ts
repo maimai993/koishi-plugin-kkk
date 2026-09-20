@@ -15,13 +15,16 @@ import {
   Common,
   downloadFile,
   type downLoadFileOptions,
-  downloadVideo,
+  downloadVideoFile,
+  type fileInfo,
   type LiveImageMergeOptions,
   loopVideoWithTransition,
   processLocalImageFile,
   processImageUrl,
-  Render
+  Render,
+  uploadFile
 } from '@/module'
+import { ParseSteps } from '@/module/utils/ParseSteps'
 import type { ParseWorkType } from '@/module/db'
 import { Config } from '@/module/utils/Config'
 
@@ -85,6 +88,8 @@ export class Xiaohongshu extends Base {
   }
 
   async XiaohongshuHandler(data: XiaohongshuIdData) {
+    /** 本次解析的步骤容器：单步失败只跳过、不中断，最后统一渲染一张错误卡片（见 ParseSteps） */
+    const steps = new ParseSteps()
     // 诊断：把入参和每一步的结果打出来，定位「只提示不解析」卡在哪
     logger.mark('[小红书] 开始解析: note_id=' + String(data?.note_id ?? '（空）') + ' xsec_token=' + (data?.xsec_token ? '有' : '（空）') + ' type=' + String(this.type))
     if (Config.amagi.cookies.xiaohongshu === '') {
@@ -138,6 +143,69 @@ export class Xiaohongshu extends Base {
     // 注意必须是**数组**：buildXiaohongshuRichText 会直接迭代它（给 {} 会报 emojiData is not iterable）
     let formattedEmojis: any[] = []
 
+    /**
+     * 视频笔记：**先把视频选好、下下来，再去渲染卡片**（用户要求，和抖音/B站同一套顺序）。
+     *
+     * 选流逻辑原来在整个函数末尾（卡片、评论区、图文图片之后），现在整体搬到这里：
+     * 下载最慢也最不能失败，先做掉；下好的文件留给末尾发送，卡片渲染失败也不影响视频。
+     */
+    const willSendVideo = Boolean(noteCard.video) && Config.xiaohongshu.sendContent.includes('video')
+    let downloadedVideo: fileInfo | null = null
+    /** 本次要发送的视频地址（选中的流；选不出来时用兜底字段） */
+    let xhsVideoUrl = ''
+    if (willSendVideo) {
+      const video = noteCard.video
+      const stream = video.media?.stream ?? video.stream
+      logger.mark('[小红书] 视频结构: video键=' + JSON.stringify(Object.keys(video ?? {}).slice(0, 10)) +
+        ' media键=' + JSON.stringify(Object.keys(video?.media ?? {}).slice(0, 8)) +
+        ' stream键=' + JSON.stringify(Object.keys(stream ?? {}).slice(0, 8)) +
+        ' h264数=' + (Array.isArray(stream?.h264) ? stream.h264.length : 0) +
+        ' h265数=' + (Array.isArray(stream?.h265) ? stream.h265.length : 0))
+      /**
+       * **不再按字段名找流**：小红书现在把这些数组放在 EF4/EF5/EF6/EF7 之类的键下，
+       * 老代码只认 h264/h265，自然一个都选不出来（诊断日志里 h264数=0 h265数=0）。
+       * 这里把 stream 下**所有数组**拍平，交给选择逻辑。
+       */
+      const allStreams: XhsVideoStream[] = Object.values(stream ?? {})
+        .flat()
+        .filter((item: any) => item && typeof item === 'object' && (item.master_url || item.url))
+      logger.mark('[小红书] 可用视频流: ' + allStreams.length + ' 条')
+      const streamForSelect: any = {
+        h264: allStreams.filter((s: any) => !/h265|hevc/i.test(String(s.video_codec ?? ''))),
+        h265: allStreams.filter((s: any) => /h265|hevc/i.test(String(s.video_codec ?? '')))
+      }
+      const selectedVideo = xiaohongshuProcessVideos(
+        allStreams.length ? streamForSelect : stream,
+        Config.xiaohongshu.videoQuality,
+        Config.xiaohongshu.maxAutoVideoSize
+      )
+      /** 兜底：选流失败时按几种已知字段顺序找地址（原来是选流失败分支里的行为） */
+      xhsVideoUrl = selectedVideo?.master_url ??
+        video.url_default ??
+        allStreams[allStreams.length - 1]?.master_url ??
+        allStreams[0]?.master_url ??
+        video.media?.video?.url ??
+        ''
+      if (xhsVideoUrl) {
+        downloadedVideo = (await steps.run('下载视频', () =>
+          downloadVideoFile(this.e, {
+            video_url: xhsVideoUrl,
+            title: {
+              timestampTitle: `tmp_${Date.now()}.mp4`,
+              originTitle: `${selectedVideo?.stream_desc ?? 'xiaohongshu'}.mp4`
+            },
+            headers: {
+              ...baseHeaders,
+              Referer: 'https://www.xiaohongshu.com',
+              Cookie: Config.amagi.cookies.xiaohongshu
+            }
+          })
+        )) ?? null
+      } else {
+        logger.warn('[小红书] 找不到任何可用的视频地址')
+      }
+    }
+
     // 笔记信息
     if (Config.xiaohongshu.sendContent.some((item) => item === 'info')) {
       logger.mark('[小红书] 准备渲染详情卡片: title=' + String(noteCard.title ?? '').slice(0, 20) +
@@ -168,9 +236,8 @@ export class Xiaohongshu extends Base {
         is_video: Boolean(noteCard.video)
         })
       } catch (error: any) {
-        // 渲染失败要看得见，别又变成「提示解析中然后没反应」
-        logger.error('[小红书] 详情卡片渲染失败: ' + String(error?.message ?? error))
-        throw error
+        // 渲染失败不再中断整条解析：记进步骤，视频照发，最后统一报错
+        steps.fail('渲染详情卡片', error)
       }
       logger.mark('[小红书] 详情卡片渲染完成，准备发送')
       await this.e.reply(noteInfoImg)
@@ -458,82 +525,32 @@ export class Xiaohongshu extends Base {
       }
     }
 
-    // 视频笔记
-    if (noteCard.video && Config.xiaohongshu.sendContent.includes('video')) {
-      const video = noteCard.video
-
-      /**
-       * 诊断：把视频流结构打出来（小红书这几版接口字段一直在变）。
-       * 结构：video.media.stream = { h264: [...], h265: [...], av1: [...] }
-       */
-      const stream = video.media?.stream ?? video.stream
-      logger.mark('[小红书] 视频结构: video键=' + JSON.stringify(Object.keys(video ?? {}).slice(0, 10)) +
-        ' media键=' + JSON.stringify(Object.keys(video?.media ?? {}).slice(0, 8)) +
-        ' stream键=' + JSON.stringify(Object.keys(stream ?? {}).slice(0, 8)) +
-        ' h264数=' + (Array.isArray(stream?.h264) ? stream.h264.length : 0) +
-        ' h265数=' + (Array.isArray(stream?.h265) ? stream.h265.length : 0))
-      /**
-       * **不再按字段名找流**：小红书现在把这些数组放在 EF4/EF5/EF6/EF7 之类的键下，
-       * 老代码只认 h264/h265，自然一个都选不出来（诊断日志里 h264数=0 h265数=0）。
-       * 这里把 stream 下**所有数组**拍平，按码率从低到高排序后交给选择逻辑。
-       */
-      const allStreams: XhsVideoStream[] = Object.values(stream ?? {})
-        .flat()
-        .filter((item: any) => item && typeof item === 'object' && (item.master_url || item.url))
-      logger.mark('[小红书] 可用视频流: ' + allStreams.length + ' 条' +
-        (allStreams.length ? '（码率 ' + allStreams.map((s: any) => s.video_bitrate ?? s.bitrate ?? '?').join('/') + '）' : ''))
-      const streamForSelect: any = {
-        h264: allStreams.filter((s: any) => !/h265|hevc/i.test(String(s.video_codec ?? ''))),
-        h265: allStreams.filter((s: any) => /h265|hevc/i.test(String(s.video_codec ?? '')))
-      }
-      // 使用新的视频选择逻辑
-      const selectedVideo = xiaohongshuProcessVideos(
-        allStreams.length ? streamForSelect : stream,
-        Config.xiaohongshu.videoQuality,
-        Config.xiaohongshu.maxAutoVideoSize
-      )
-
-      if (selectedVideo) {
-        await downloadVideo(
-          this.e,
-          {
-            video_url: selectedVideo.master_url,
-            title: {
-              timestampTitle: `tmp_${Date.now()}.mp4`,
-              originTitle: `${selectedVideo.stream_desc}.mp4`
-            },
-            headers: {
-              ...baseHeaders,
-              Referer: 'https://www.xiaohongshu.com',
-              Cookie: Config.amagi.cookies.xiaohongshu
-            }
-          },
-          {
-            message_id: this.e.messageId
-          }
-        )
-      } else {
-        /**
-         * 兜底：按几种已知字段顺序找视频地址。
-         * 原来只取 video.url_default，取不到就 segment.video(undefined)，
-         * 直接在 Satori 里抛 `Cannot read properties of undefined (reading 'startsWith')`。
-         */
-        const fallbackUrl =
-          video.url_default ??
-          allStreams[allStreams.length - 1]?.master_url ??
-          allStreams[0]?.master_url ??
-          video.media?.video?.url ??
-          ''
-        if (fallbackUrl) {
-          logger.mark('[小红书] 视频流选择失败，改用兜底地址发送')
-          await this.e.reply(segment.video(fallbackUrl))
+    /**
+     * 视频笔记：下载已经在前面（渲染卡片之前）做完了，这里只负责发送。
+     *
+     * - 下载成功 → 上传本地文件；
+     * - 下载失败/被跳过 → 退回直链发送（原来选流失败时的兜底行为），
+     *   失败本身已经记在 steps 里，最后统一报错。
+     */
+    if (willSendVideo) {
+      await steps.run('发送视频', async () => {
+        if (downloadedVideo) {
+          await uploadFile(this.e, downloadedVideo, xhsVideoUrl, { message_id: this.e.messageId })
+        } else if (xhsVideoUrl) {
+          logger.mark('[小红书] 视频没有下载成功，改用直链发送')
+          await this.e.reply(segment.video(xhsVideoUrl))
         } else {
           // 实在拿不到地址就明确报错（用户要求：拿不到就直接报错，别静默）
-          logger.warn('[小红书] 找不到任何可用的视频地址')
           await this.e.reply('这条小红书视频没能取到可下载的地址，稍后再试试 ~')
         }
-      }
+      })
     }
+
+    /**
+     * 整个流程跑完再统一报错：中间失败过的步骤合成一个错误抛出去，
+     * 由 ErrorHandler 渲染**一张**错误卡片（此时能发的卡片/图片/视频都已经发出去了）。
+     */
+    steps.throwIfFailed()
     return true
   }
 }

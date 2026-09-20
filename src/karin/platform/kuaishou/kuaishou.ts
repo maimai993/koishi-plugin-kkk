@@ -1,7 +1,8 @@
 import type { KuaishouVideoWorkResponse } from '@ikenxuan/amagi'
 import { logger, type Message } from 'node-karin'
 
-import { Base, downloadVideo, extractTotalBytesFromHeaders, Networks, Render } from '@/module'
+import { Base, downloadVideoFile, extractTotalBytesFromHeaders, Networks, Render, uploadFile } from '@/module'
+import { ParseSteps } from '@/module/utils/ParseSteps'
 // sendParseTip 单独导入：它在一个无依赖的叶子模块里，避免和平台模块形成循环 import
 import { sendParseTip } from '@/module/utils/parseTip'
 import type { ParseWorkType } from '@/module/db'
@@ -98,11 +99,28 @@ export class Kuaishou extends Base {
       return true
     }
     this.workType = 'video'
+    /** 本次解析的步骤容器：单步失败只跳过、不中断，最后统一渲染一张错误卡片（见 ParseSteps） */
+    const steps = new ParseSteps()
     await sendParseTip(this.e, '快手')
     // 表情接口没换，还是 graphql 那条，`data.visionBaseEmoticons` 两层照旧
     const transformedData = Object.entries(payload.EmojiData.data.visionBaseEmoticons.iconUrls).map(([name, path]) => {
       return { name, url: `https:${path}` }
     })
+    /**
+     * **先把视频下下来，再渲染卡片**（用户要求，和抖音/B站/小红书同一套顺序）。
+     * 下载最慢也最不能失败，放前面；卡片渲染失败不影响视频，最后统一报错。
+     */
+    const downloadedVideo = (await steps.run('下载视频', () =>
+      downloadVideoFile(this.e, {
+        video_url,
+        title: {
+          timestampTitle: `tmp_${Date.now()}.mp4`,
+          originTitle: `${work.photo.caption}.mp4`
+        }
+      })
+    )) ?? null
+
+    await steps.run('渲染评论区', async () => {
     const CommentsData = await kuaishouComments(payload.CommentsData, transformedData)
     const fileHeaders = await new Networks({ url: video_url, headers: this.headers }).getHeaders()
     const fileSizeContent = extractTotalBytesFromHeaders(fileHeaders)
@@ -118,13 +136,15 @@ export class Kuaishou extends Base {
       likeCount: work.photo.likeCount
     })
     await this.e.reply(img)
-    await downloadVideo(this.e, {
-      video_url,
-      title: {
-        timestampTitle: `tmp_${Date.now()}.mp4`,
-        originTitle: `${work.photo.caption}.mp4`
-      }
     })
+
+    if (downloadedVideo) {
+      await steps.run('发送视频', () => uploadFile(this.e, downloadedVideo, video_url, { message_id: this.e.messageId }))
+    } else {
+      logger.warn('[快手] 视频没有下载成功，跳过发送')
+    }
+
+    steps.throwIfFailed()
     return true
   }
 }
