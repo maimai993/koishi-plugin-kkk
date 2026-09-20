@@ -164,8 +164,8 @@ function patchPushDialog (text, name) {
  * 现在都换成文本框：可以填 * （谁都可以）、关键字，也可以直接写 QQ 号，多个用逗号分隔。
  * 服务端保存时会把「错误日志」这一项的字符串拆成数组。
  */
-const PERM_DESC = '可填 all（所有人，等同 *）或 admin（权限等级 4 及以上的账号）；也可以直接写账号（QQ 号），多个用逗号分隔。'
-const LOG_DESC = '谁来接收错误日志。可填 master（第一个主人）、allMasters（所有主人）、admin（权限等级 4 及以上）、trigger（触发者所在的群），也可以直接写账号（QQ 号）；多个用逗号分隔。'
+const PERM_DESC = '选「指定账号」后填 QQ 号，多个用逗号分隔。'
+const LOG_DESC = '谁来接收错误日志，选「指定账号」后填 QQ 号，多个用逗号分隔。'
 
 const TEXT_SWAPS = [
   [
@@ -209,6 +209,68 @@ function patchTextFields (text, name) {
       out = out.split(from).join(target)
       console.log('[kkk] 改成手填: ' + name + ' :: ' + from.slice(0, 34) + '…')
     }
+  }
+  return out
+}
+
+/* ---------------- 权限 / 错误日志：下拉选模式，选「指定账号」才出输入框 ---------------- */
+
+/**
+ * 给渲染器工厂加一个 renderPermField：
+ *   一个下拉（所有人 / 管理员（权限等级 4 及以上）/ 指定账号；错误日志那项是 触发者所在的群 / 管理员 / 指定账号），
+ *   只有选中「指定账号」时才出现输入框，填 QQ 号、多个用逗号分隔。
+ * 之所以要塞进工厂：只有工厂里拿得到 config（e）和写值函数（i）。
+ */
+const RENDER_PERM_FIELD = [
+  'renderPermField:(t,r,s,c)=>{c=c||{};',
+  'const p=t,list=!!c.list,modes=c.modes||[],raw=Q(e,p,list?[]:`all`),',
+  'arr0=list?(Array.isArray(raw)?raw.map(String):(raw?[String(raw)]:[])):[],',
+  'ids=list?arr0.filter(x=>/^\\d+$/.test(x)):[],',
+  'numText=list?ids.join(`, `):([`all`,`admin`].includes(String(raw))?``:String(raw||``)),',
+  'kw=list?(arr0.find(x=>!/^\\d+$/.test(x))||``):([`all`,`admin`].includes(String(raw))?String(raw):``),',
+  'guess=(kw===`trigger`)?`trigger`:(kw||(String(numText).trim()?`id`:(list?`trigger`:`all`))),',
+  'pair=(0,v.useState)(null),mode=pair[0]||guess,setMode=pair[1],',
+  'apply=n=>{setMode(n);if(n===`id`){i(p,list?ids:String(numText))}else{i(p,list?[n]:n)}},',
+  'setIds=n=>{i(p,list?String(n).split(/[,，\\s]+/).map(x=>x.trim()).filter(Boolean):n)},',
+  'box=(0,U.jsxs)(`div`,{className:n.field,children:[',
+  '(0,U.jsx)(dx,{className:`font-semibold`,children:r}),',
+  '(0,U.jsx)(`select`,{className:`w-full rounded-lg border border-default-200 bg-default-100 px-3 py-2 text-sm`,value:mode,onChange:e=>apply(e.target.value),children:modes.map(m=>(0,U.jsx)(`option`,{value:m.value,children:m.label},m.value))}),',
+  'mode===`id`?(0,U.jsx)(`input`,{className:`w-full rounded-lg border border-default-200 bg-default-100 px-3 py-2 text-sm`,placeholder:c.placeholder||`填写账号（QQ 号），多个用逗号分隔`,value:numText,onChange:e=>setIds(e.target.value)}):null,',
+  'a(s)]});return o(box,t,!1)},',
+].join('')
+
+const PERM_MODES = '[{value:`all`,label:`所有人`},{value:`admin`,label:`管理员（权限等级 4 及以上）`},{value:`id`,label:`指定账号`}]'
+const LOG_MODES = '[{value:`trigger`,label:`触发者所在的群`},{value:`admin`,label:`管理员（权限等级 4 及以上）`},{value:`id`,label:`指定账号`}]'
+
+/** 用「前缀定位 + 括号配对」替换调用（压缩代码里正则很容易写不中） */
+function replaceCall (text, prefix, build) {
+  let out = text
+  for (;;) {
+    const at = out.indexOf(prefix)
+    if (at < 0) return out
+    const open = out.indexOf('(', at)
+    const close = matchParen(out, open)
+    if (open < 0 || close < 0) return out
+    out = out.slice(0, at) + build() + out.slice(close + 1)
+  }
+}
+
+function patchPermFields (text, name) {
+  const perm = (platform) => 't.renderPermField([' + BT + platform + BT + ',' + BT + 'loginPerm' + BT + '],' + BT + '谁可以触发扫码登录' + BT + ',' + BT + PERM_DESC + BT + ',{modes:' + PERM_MODES + '})'
+  const log = 't.renderPermField([' + BT + 'app' + BT + ',' + BT + 'errorLogSendTo' + BT + '],' + BT + '错误日志' + BT + ',' + BT + LOG_DESC + BT + ',{list:true,modes:' + LOG_MODES + '})'
+  let out = text
+  const before = out
+  for (const [prefix, build] of [
+    ['l([' + BT + 'bilibili' + BT + ',' + BT + 'loginPerm' + BT + '],', () => perm('bilibili')],
+    ['o([' + BT + 'bilibili' + BT + ',' + BT + 'loginPerm' + BT + '],', () => perm('bilibili')],
+    ['l([' + BT + 'douyin' + BT + ',' + BT + 'loginPerm' + BT + '],', () => perm('douyin')],
+    ['o([' + BT + 'douyin' + BT + ',' + BT + 'loginPerm' + BT + '],', () => perm('douyin')],
+    ['c([' + BT + 'app' + BT + ',' + BT + 'errorLogSendTo' + BT + '],', () => log],
+    ['n([' + BT + 'app' + BT + ',' + BT + 'errorLogSendTo' + BT + '],', () => log],
+  ]) out = replaceCall(out, prefix, build)
+  if (out !== before) console.log('[kkk] 权限字段改为「选 id 才出输入框」: ' + name)
+  if (!out.includes('renderPermField:(')) {
+    out = out.replace(',renderPageHeader:(e,n)=>', ',' + RENDER_PERM_FIELD + 'renderPageHeader:(e,n)=>')
   }
   return out
 }
@@ -273,6 +335,7 @@ for (const file of files) {
   }
   text = patchPushDialog(text, name)
   text = patchTextFields(text, name)
+  text = patchPermFields(text, name)
   text = patchDescriptions(text, name)
   text = applyTextReplacements(text, name)
 
