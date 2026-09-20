@@ -255,11 +255,21 @@ export const uploadFile = async (event: Message, file: fileInfo, videoUrl: strin
    * 原因是 QQ 对富媒体视频会压缩、改名甚至丢掉后缀，几十 MB 的视频走「视频」通道基本没法看；
    * 其它平台仍旧按上游的「群文件上传」开关 + `groupfilevalue` 走。
    */
-  const platform = String((event as any)?.platform ?? (event as any)?.bot?.platform ?? '')
+  // 平台名要和插件其它地方保持一致：适配器真实平台在 event.bot.bot.platform 上
+  // （只写 event.platform 会取到空值，导致判定成「不是 QQ」而永远走不到群文件分支）
+  const platform = String(
+    (event as any)?.bot?.bot?.platform ?? (event as any)?.platform ?? (event as any)?.bot?.platform ?? ''
+  )
+  const isQqPlatform = /qqguild|qqbot|^qq$/i.test(platform) || /qq/i.test(platform) || /official/i.test(platform)
   const qqLimit = Number((Config as any).qqGroupFileLimitMB ?? 30)
-  const useGroupFile = /qq/i.test(platform) && qqLimit > 0
+  const useGroupFile = isQqPlatform && qqLimit > 0
     ? newFileSize > qqLimit
     : Config.app.usegroupfile && newFileSize > Config.app.groupfilevalue
+  logger.info(
+    '[视频发送] 平台=' + (platform || '(未知)') + ' 体积=' + newFileSize.toFixed(1) + 'MB' +
+    (isQqPlatform ? ' QQ阈值=' + qqLimit + 'MB' : ' 上游阈值=' + Config.app.groupfilevalue + 'MB') +
+    ' 走群文件=' + useGroupFile
+  )
   if (options) options.useGroupFile = useGroupFile
 
   if (Config.app.videoSendMode === 'base64' && !useGroupFile) {
