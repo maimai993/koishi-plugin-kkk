@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import { buildMarkdownImageMessage } from '@/module/utils/QqPanel'
 // 弹幕烧录的总开关（通用里的「强制不烧录弹幕」优先级最高，平台配置也压不过）
 import { shouldBurnDanmaku } from '@/module/utils/DanmakuPolicy'
+import { ParseSteps } from '@/module/utils/ParseSteps'
 import { sendSlicedImage } from '@/module/utils/ImageSlice'
 
 import {
@@ -35,6 +36,7 @@ import {
   Count,
   downloadFile,
   downloadVideo,
+  downloadVideoFile,
   extractTotalBytesFromHeaders,
   fileInfo,
   fixM4sFile,
@@ -124,6 +126,8 @@ export class Bilibili extends Base {
     }
     switch (this.Type) {
       case 'one_video': {
+        /** 本次解析的步骤容器：单步失败只跳过、不中断，最后统一渲染一张错误卡片（见 ParseSteps） */
+        const steps = new ParseSteps()
         const infoData = await this.amagi.bilibili.fetcher.fetchVideoInfo({ bvid: iddata.bvid })
         const playUrlData = await this.amagi.bilibili.fetcher.fetchVideoStreamUrl({
           avid: infoData.data.data.aid,
@@ -162,9 +166,15 @@ export class Bilibili extends Base {
           headers: this.headers
         }).getData()) as AmagiSuccess<BiliBiliVideoPlayurlNoLogin>
 
-        // 如果配置项不存在或长度为0，则不显示任何内容
+        /**
+         * 信息卡：这里**只定义、不执行**。
+         *
+         * 顺序按用户要求改成「先把视频下下来，再渲染卡片」：下载最慢也最不能失败，
+         * 先做掉；卡片渲染失败也不会连累视频（见下面 await steps.run('渲染作品信息卡', …)）。
+         */
         // fromPanel：面板里已经发过这张卡片了，别再发一遍
-        if (!fromPanel && Config.bilibili.sendContent.some((content) => content === 'info')) {
+        const renderInfoCard = async () => {
+          if (fromPanel || !Config.bilibili.sendContent.some((content) => content === 'info')) return
           if (Config.bilibili.videoInfoMode === 'text') {
             // 构建回复内容数组
             const replyContent: SendMessage = []
@@ -272,7 +282,47 @@ export class Bilibili extends Base {
            */
           videoSize = ((nockData?.data?.durl?.[0]?.size ?? 0) / (1024 * 1024)).toFixed(2)
         }
-        if (Config.bilibili.sendContent.some((content) => content === 'comment')) {
+
+        /**
+         * 视频这一步：体积检查 → 拿弹幕 → **先把视频下下来**（合成 / 烧录也在这里做完）。
+         *
+         * 顺序是用户要求的：下载最快不起来、又最不能失败，所以提到渲染卡片之前；
+         * 下好的文件先存着，等卡片和评论区都发完再上传（见下面的「发送视频」）。
+         */
+        const videoOversize = Config.app.usefilelimit && Number(videoSize) > Number(Config.app.filelimit) && !Config.app.compress
+        const willSendVideo = Config.bilibili.sendContent.some((content) => content === 'video')
+        /** 本次要烧录的弹幕（烧录在下载那一步里完成，所以这里先拿到） */
+        let danmakuList: BiliDanmakuElem[] = []
+        if (willSendVideo && !videoOversize) {
+          if (useAnonymousQuality) {
+            this.islogin = false
+          }
+          if (shouldBurnDanmaku(this.forceBurnDanmaku || Config.bilibili.burnDanmaku)) {
+            const cid = iddata.p ? (infoData.data.data.pages[iddata.p - 1]?.cid ?? infoData.data.data.cid) : infoData.data.data.cid
+            const duration = iddata.p
+              ? (infoData.data.data.pages[iddata.p - 1]?.duration ?? infoData.data.data.duration)
+              : infoData.data.data.duration
+            danmakuList = (await steps.run('获取弹幕', () => this.fetchVideoDanmakuList(cid, duration))) ?? []
+          }
+          await steps.run('下载视频', () =>
+            this.prepareVideo(
+              // Koishi 移植修正：原实现这里传的是 `nockData.data`，但下载读的是
+              // `playUrlData.data.durl`（与上面的 `nockData.data.durl` 同一层），传内层会取不到 durl。
+              useAnonymousQuality
+                // 免登录分支优先用 html5 播放接口的 durl；那个请求偶发失败（风控/超时），
+                // 此时退回 amagi 拿到的 durl，别让「提示开始解析然后没下文」再发生
+                ? { playUrlData: (nockData?.data?.durl?.length ? nockData : playUrlData) as any, danmakuList }
+                : { infoData: infoData.data, playUrlData: playUrlData.data, danmakuList }
+            )
+          )
+        }
+
+        // 视频下好了才渲染信息卡（渲染失败只跳过卡片，视频照发）
+        await steps.run('渲染作品信息卡', renderInfoCard)
+
+        // 评论区同样只跳过自身
+        await steps.run('渲染评论区', async () => {
+        if (!Config.bilibili.sendContent.some((content) => content === 'comment')) return
           const commentsData = await softFetch(
             () =>
               this.amagi.bilibili.fetcher.fetchComments(
@@ -356,39 +406,26 @@ export class Bilibili extends Base {
               await sendSlicedImage(this.e, img)
             }
           }
-        }
+        })
 
-        if (Config.bilibili.sendContent.some((content) => content === 'video')) {
-          if (Config.app.usefilelimit && Number(videoSize) > Number(Config.app.filelimit) && !Config.app.compress) {
+        if (willSendVideo) {
+          if (videoOversize) {
             this.e.reply(
               `设定的最大上传大小为 ${Config.app.filelimit}MB\n当前解析到的视频大小为 ${Number(videoSize)}MB\n` +
                 '视频太大了，还是去B站看吧~',
               { reply: true }
             )
           } else {
-            if (useAnonymousQuality) {
-              this.islogin = false
-            }
-            // 获取弹幕数据
-            let danmakuList: BiliDanmakuElem[] = []
-            if shouldBurnDanmaku(this.forceBurnDanmaku || Config.bilibili.burnDanmaku) {
-              const cid = iddata.p ? (infoData.data.data.pages[iddata.p - 1]?.cid ?? infoData.data.data.cid) : infoData.data.data.cid
-              const duration = iddata.p
-                ? (infoData.data.data.pages[iddata.p - 1]?.duration ?? infoData.data.data.duration)
-                : infoData.data.data.duration
-              danmakuList = await this.fetchVideoDanmakuList(cid, duration)
-            }
-            await this.getvideo(
-              // Koishi 移植修正：原实现这里传的是 \`nockData.data\`，但 getvideo() 读的是
-              // \`playUrlData.data.durl\`（与上面的 \`nockData.data.durl\` 同一层），传内层会取不到 durl。
-              useAnonymousQuality
-                // 免登录分支优先用 html5 播放接口的 durl；那个请求偶发失败（风控/超时），
-                // 此时退回 amagi 拿到的 durl，别让「提示开始解析然后没下文」再发生
-                ? { playUrlData: (nockData?.data?.durl?.length ? nockData : playUrlData) as any, danmakuList }
-                : { infoData: infoData.data, playUrlData: playUrlData.data, danmakuList }
-            )
+            // 视频在前面那一步就已经下好（需要的话也合成/烧录完了），这里只管上传
+            await steps.run('发送视频', () => this.sendPreparedVideo())
           }
         }
+
+        /**
+         * 整个流程跑完再统一报错：中间失败过的步骤合成一个错误抛出去，
+         * 由 ErrorHandler 渲染**一张**错误卡片 —— 此时能发的卡片/评论/视频都已经发出去了。
+         */
+        steps.throwIfFailed()
         break
       }
       case 'bangumi_video_info': {
@@ -523,7 +560,7 @@ export class Bilibili extends Base {
          * 这里和普通视频分支一样，按当前这一集的 cid 拉一份。
          */
         let bangumiDanmakuList: BiliDanmakuElem[] = []
-        if shouldBurnDanmaku(this.forceBurnDanmaku || Config.bilibili.burnDanmaku) {
+        if (shouldBurnDanmaku(this.forceBurnDanmaku || Config.bilibili.burnDanmaku)) {
           const currentEpisode = videoInfo.data.result.episodes[Number(Episode) - 1] as any
           const epDuration = Number(currentEpisode?.duration ?? 0) || 0
           bangumiDanmakuList = await this.fetchVideoDanmakuList(currentEpisode.cid, epDuration)
@@ -1278,7 +1315,24 @@ export class Bilibili extends Base {
     }
   }
 
-  async getvideo({
+  /**
+   * 「先下载、后发送」流程里的下载产物。
+   *
+   * prepareVideo() 把视频下下来（需要的话合成音轨、烧录弹幕）后放这里，
+   * sendPreparedVideo() 再上传。两种形态：
+   *   - 本地文件（登录态合成/烧录的产物、免登录时提前下好的直链）；
+   *   - 没有下载产物时保持 null（例如体积超限根本没下）。
+   */
+  protected preparedVideo: { filepath: string; totalBytes: number; originTitle: string; videoUrl?: string } | null = null
+
+  /**
+   * 下载视频（含合成音轨、烧录弹幕），**不发送**。
+   *
+   * 解析流程按用户要求改成「先下载视频、再渲染卡片」：下载最慢、又最不能失败，先做掉；
+   * 卡片渲染失败也不会连累视频。产物存在 this.preparedVideo，由 sendPreparedVideo() 发出。
+   * @returns 是否准备好了一个可发送的视频
+   */
+  async prepareVideo({
     infoData,
     playUrlData,
     danmakuList = []
@@ -1316,8 +1370,8 @@ export class Bilibili extends Base {
           `Bil_V_${this.Type === 'one_video' ? infoData && infoData.data.bvid : infoData && infoData.result.season_id}.mp4`
         const videoFixed = await fixM4sFile(bmp4Raw.filepath, videoPath)
         if (!videoFixed) {
-          logger.error('视频文件修复失败')
-          return false
+          // 抛出去而不是静默 return：这样会被 steps 记成「下载视频」失败，最后统一报错
+          throw new Error('视频流修复失败（m4s → mp4）')
         }
         // 删除原始 m4s 文件
         await Common.removeFile(bmp4Raw.filepath, true)
@@ -1340,8 +1394,7 @@ export class Bilibili extends Base {
             `Bil_A_${this.Type === 'one_video' ? infoData && infoData.data.bvid : infoData && infoData.result.season_id}.m4a`
           const audioFixed = await fixM4sFile(bmp3Raw.filepath, audioPath)
           if (!audioFixed) {
-            logger.error('音频文件修复失败')
-            return false
+            throw new Error('音频流修复失败（m4s → m4a）')
           }
           // 删除原始 m4s 文件
           await Common.removeFile(bmp3Raw.filepath, true)
@@ -1409,15 +1462,8 @@ export class Bilibili extends Base {
 
             const stats = fs.statSync(filePath)
             const fileSizeInMB = Number((stats.size / (1024 * 1024)).toFixed(2))
-            if (fileSizeInMB > Config.app.groupfilevalue) {
-              // 使用文件上传
-              await uploadFile(this.e, { filepath: filePath, totalBytes: fileSizeInMB, originTitle: this.downloadfilename }, '', {
-                useGroupFile: true
-              })
-            } else {
-              /** 因为本地合成，没有视频直链 */
-              await uploadFile(this.e, { filepath: filePath, totalBytes: fileSizeInMB, originTitle: this.downloadfilename }, '')
-            }
+            // 本地合成的没有视频直链，交给 sendPreparedVideo 上传
+            this.preparedVideo = { filepath: filePath, totalBytes: fileSizeInMB, originTitle: this.downloadfilename }
           } else {
             await Common.removeFile(bmp4.filepath, true)
             if (bmp3) await Common.removeFile(bmp3.filepath, true)
@@ -1463,28 +1509,69 @@ export class Bilibili extends Base {
               await Common.removeFile(videoFile.filepath, true)
               const stats = fs.statSync(filePath)
               const fileSizeInMB = Number((stats.size / (1024 * 1024)).toFixed(2))
-              if (fileSizeInMB > Config.app.groupfilevalue) {
-                await uploadFile(this.e, { filepath: filePath, totalBytes: fileSizeInMB, originTitle: this.downloadfilename }, '', {
-                  useGroupFile: true
-                })
-              } else {
-                await uploadFile(this.e, { filepath: filePath, totalBytes: fileSizeInMB, originTitle: this.downloadfilename }, '')
-              }
+              this.preparedVideo = { filepath: filePath, totalBytes: fileSizeInMB, originTitle: this.downloadfilename }
             } else {
               await Common.removeFile(videoFile.filepath, true)
             }
           }
         } else {
-          await downloadVideo(this.e, {
+          /**
+           * 不烧录：直链也**提前下好**，这样后面的卡片渲染不影响视频，
+           * 而且上传时不用再等一次下载（直链照旧带给 uploadFile，发送分支行为不变）。
+           */
+          const downloaded = await downloadVideoFile(this.e, {
             video_url: directUrl,
             title: { timestampTitle: `tmp_${Date.now()}.mp4`, originTitle: `${this.downloadfilename}.mp4` }
           })
+          if (downloaded) {
+            this.preparedVideo = {
+              filepath: downloaded.filepath,
+              totalBytes: Number(downloaded.totalBytes),
+              originTitle: this.downloadfilename,
+              videoUrl: directUrl
+            }
+          }
         }
         break
       }
       default:
         break
     }
+    return this.preparedVideo !== null
+  }
+
+  /**
+   * 把 {@link prepareVideo} 下好的视频发出去。
+   *
+   * 放在流程末尾调用：此时信息卡、评论区都已经发完，视频最后出场；
+   * 体积超过「群文件阈值」时按群文件发（和原来判定一致）。
+   * @returns 是否真的发出去了
+   */
+  async sendPreparedVideo (): Promise<boolean> {
+    const prepared = this.preparedVideo
+    this.preparedVideo = null
+    if (!prepared) return false
+    const { filepath, totalBytes, originTitle, videoUrl } = prepared
+    if (totalBytes > Config.app.groupfilevalue) {
+      await uploadFile(this.e, { filepath, totalBytes, originTitle }, videoUrl ?? '', { useGroupFile: true })
+    } else {
+      await uploadFile(this.e, { filepath, totalBytes, originTitle }, videoUrl ?? '')
+    }
+    return true
+  }
+
+  /**
+   * 下载 + 上传（一步到位的旧接口，番剧那条分支还在用）。
+   * 单视频走的是「prepareVideo → 渲染卡片 → sendPreparedVideo」，不再用这个。
+   */
+  async getvideo (args: {
+    infoData?: BilibiliBangumiInfoResponse | BilibiliVideoInfoResponse
+    playUrlData: BilibiliVideoStreamResponse | BiliBiliVideoPlayurlNoLogin | BilibiliBangumiStreamResponse
+    danmakuList?: BiliDanmakuElem[]
+  }): Promise<boolean> {
+    const ok = await this.prepareVideo(args)
+    if (!ok) return false
+    return await this.sendPreparedVideo()
   }
 }
 

@@ -22,6 +22,7 @@ import {
   Count,
   downloadFile,
   downloadVideo,
+  downloadVideoFile,
   fileInfo,
   type LiveImageMergeOptions,
   loopVideoWithTransition,
@@ -34,6 +35,7 @@ import {
 import { Config } from '@/module/utils/Config'
 import { EmojiReactionManager, getEmojiId } from '@/module/utils/EmojiReaction'
 import { getParseOverride } from '@/module/utils/ParseOverride'
+import { ParseSteps } from '@/module/utils/ParseSteps'
 import { douyinComments } from '@/platform/douyin'
 import { burnDouyinDanmaku, type DouyinDanmakuElem } from '@/platform/douyin/danmaku'
 import { renderWorkImage } from '@/platform/douyin/push/render'
@@ -86,6 +88,10 @@ export class DouYin extends Base {
     await sendParseTip(this.e, '抖音')
     switch (this.type) {
       case 'one_work': {
+        /**
+         * 本次解析的步骤容器：单步失败只跳过、不中断，最后统一渲染一张错误卡片（见 ParseSteps）。
+         */
+        const steps = new ParseSteps()
         const VideoData = await this.amagi.douyin.fetcher.parseWork({
           aweme_id: data.aweme_id
         })
@@ -633,11 +639,35 @@ export class DouYin extends Base {
         }
 
         /**
+         * 先把视频下下来，再去渲染卡片（用户要求的顺序）。
+         *
+         * 下载是最慢、也最不能失败的一步：先做掉，后面渲染信息卡/评论区时用户不用干等；
+         * 反过来，卡片渲染失败也不会连累视频 —— 下载结果留着给下面的发送步骤用。
+         * 下载本身失败不抛出（steps 会记下来），最后统一报错。
+         */
+        let downloadedVideo: fileInfo | null = null
+        const willSendVideo = sendvideofile && isVideo && !isArticle && Config.douyin.sendContent.includes('video')
+        if (willSendVideo && g_video_url) {
+          downloadedVideo = (await steps.run('下载视频', () =>
+            downloadVideoFile(this.e, {
+              video_url: g_video_url,
+              title: {
+                timestampTitle: `tmp_${Date.now()}.mp4`,
+                originTitle: `${g_title}.mp4`
+              },
+              headers: { ...baseHeaders, Referer: 'https://www.douyin.com' }
+            })
+          )) ?? null
+        }
+
+        /**
          * 从面板点进来的解析：卡片在面板里已经发过了，这里不再重复发一张。
          * （bilibili 那边同样处理，见 bilibili.ts 的 fromPanel 判断）
          */
         const fromPanelDouyin = getParseOverride()?.fromPanel === true
         if (!fromPanelDouyin && Config.douyin.sendContent.includes('info')) {
+          // 卡片渲染失败只跳过卡片，视频照发（最后统一报错）
+          await steps.run('渲染作品信息卡', async () => {
           if (Config.douyin.videoInfoMode === 'text') {
             // 构建回复内容数组
             const replyContent: SendMessage = []
@@ -687,9 +717,12 @@ export class DouYin extends Base {
             })
             await this.e.reply(workInfoImg)
           }
+          })
         }
 
         if (Config.douyin.sendContent.includes('comment')) {
+          // 评论拉取/渲染失败只跳过评论区，视频照发
+          await steps.run('渲染评论区', async () => {
           const EmojiData = await this.amagi.douyin.fetcher.fetchEmojiList()
           const list = Emoji(EmojiData.data)
           const douyinCommentsRes = await douyinComments(CommentsData.data, list)
@@ -765,6 +798,7 @@ export class DouYin extends Base {
             // 评论卡可能极长（实测 2880x40000），交给切片+md 拼接发送，避免 QQ 拒收
             await sendSlicedImage(this.e, img)
           }
+          })
         }
 
         /**
@@ -799,8 +833,14 @@ export class DouYin extends Base {
           }
         }
 
-        /** 发送视频 */
-        if (sendvideofile && isVideo && !isArticle && Config.douyin.sendContent.includes('video')) {
+        /** 发送视频（视频已经在上面的「下载视频」步骤里下好了，这里只负责烧录/上传） */
+        if (willSendVideo) {
+          await steps.run('发送视频', async () => {
+          // 下载失败了就没有东西可发 —— 失败已经记在 steps 里，最后一起报
+          if (!downloadedVideo) {
+            logger.warn('[抖音] 视频还没下载成功，跳过发送')
+            return
+          }
           // 获取弹幕数据（如果开启弹幕烧录）
           let danmakuList: DouyinDanmakuElem[] = []
           if (shouldBurnDanmaku(this.forceBurnDanmaku || Config.douyin.burnDanmaku) && video) {
@@ -844,10 +884,8 @@ export class DouYin extends Base {
             )
           }
           if (shouldBurnDanmaku(this.forceBurnDanmaku || Config.douyin.burnDanmaku) && danmakuList.length > 0) {
-            const videoFile = await downloadFile(g_video_url, {
-              title: `Douyin_V_tmp_${Date.now()}.mp4`,
-              headers: { ...baseHeaders, Referer: 'https://www.douyin.com' }
-            })
+            // 直接用上面下好的文件，不再重复下载一遍
+            const videoFile = downloadedVideo
             if (videoFile.filepath) {
               const resultPath = Common.tempDri.video + `Douyin_Result_${Date.now()}.mp4`
               logger.mark(`[抖音] 开始烧录 ${danmakuList.length} 条弹幕...`)
@@ -876,26 +914,17 @@ export class DouYin extends Base {
               }
             }
           } else {
-            // 不烧录弹幕，直接下载发送
-            await downloadVideo(
-              this.e,
-              {
-                video_url: g_video_url,
-                title: {
-                  timestampTitle: `tmp_${Date.now()}.mp4`,
-                  originTitle: `${g_title}.mp4`
-                },
-                headers: {
-                  ...baseHeaders,
-                  Referer: 'https://www.douyin.com'
-                }
-              },
-              {
-                message_id: this.e.messageId
-              }
-            )
+            // 不烧录弹幕：视频在「下载视频」那一步就已经落地了，这里直接上传
+            await uploadFile(this.e, downloadedVideo, g_video_url, { message_id: this.e.messageId })
           }
+          })
         }
+
+        /**
+         * 所有步骤跑完再统一报错：中间有失败就把它们合成一个错误抛出去，
+         * 由 ErrorHandler 渲染**一张**错误卡片（此时能发的视频/卡片都已经发出去了）。
+         */
+        steps.throwIfFailed()
         return true
       }
 

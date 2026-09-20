@@ -373,13 +373,16 @@ export const uploadFile = async (event: Message, file: fileInfo, videoUrl: strin
 }
 
 /**
- * 下载视频并上传到群
- * @param event 事件
+ * 只把视频下到本地，**不发送**。
+ *
+ * 解析流程改成「先下载视频、再渲染卡片」之后，下载这一步会被提前调用：
+ * 下载是最慢的一步，早点开始、失败了也不影响后面的卡片/评论照常发，
+ * 最后再由调用方统一报错（见 ParseSteps）。
+ * @param event 事件（体积超限时要回一句话）
  * @param downloadOpt 下载参数
- * @param uploadOpt 上传参数
- * @returns
+ * @returns 下载结果（含文件名信息）；超出体积上限时返回 null，并已经回过提示
  */
-export const downloadVideo = async (event: Message, downloadOpt: downloadFileOptions, uploadOpt?: uploadFileOptions): Promise<boolean> => {
+export const downloadVideoFile = async (event: Message, downloadOpt: downloadFileOptions): Promise<fileInfo | null> => {
   /** 获取文件大小 */
   const fileHeaders = await new Networks({
     url: downloadOpt.video_url,
@@ -398,7 +401,7 @@ export const downloadVideo = async (event: Message, downloadOpt: downloadFileOpt
     const contact = event.contact || karin.contactGroup(uploadOpt?.activeOption?.group_id as string) || karin.contactFriend(selfId)
 
     await karin.sendMsg(selfId, contact, message)
-    return false
+    return null
   }
 
   // 下载文件，视频URL，标题和自定义headers
@@ -409,6 +412,19 @@ export const downloadVideo = async (event: Message, downloadOpt: downloadFileOpt
   res = { ...res, ...downloadOpt.title }
   // 将下载的文件大小转换为MB并保留两位小数
   res.totalBytes = Number((res.totalBytes / (1024 * 1024)).toFixed(2))
+  return res
+}
+
+/**
+ * 下载视频并上传到群。
+ * @param event 事件
+ * @param downloadOpt 下载参数
+ * @param uploadOpt 上传参数
+ * @returns
+ */
+export const downloadVideo = async (event: Message, downloadOpt: downloadFileOptions, uploadOpt?: uploadFileOptions): Promise<boolean> => {
+  const res = await downloadVideoFile(event, downloadOpt)
+  if (!res) return false
   /** 上传视频 */
   return await uploadFile(event, res, downloadOpt.video_url, uploadOpt)
 }
