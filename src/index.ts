@@ -130,20 +130,22 @@ const NATIVE_KEYS = ['masters', 'dataPath', 'debug', 'autoParse', 'webUiAuth']
 export const Config: Schema<Config> = Schema.intersect([
   Schema.object({
     webuiGuide: Schema.const('').description(
-      '**QQ 相关的开关都在下面的「QQ 适配器」分组里**（解析面板、画质档、图片切片、番剧选集表格、卡片识别）。' +
-      '也可以直接在浏览器打开 **/kkk** 改 —— 左侧边栏「kkk 配置」就是它，免登录、改完立即生效。'
+      '**本插件的配置都在配置面板里改**：Koishi 控制台左侧边栏 →「**kkk 配置**」。\n\n' +
+      '（原版配置面板：接口库 / 通用 / 抖音 / 哔哩哔哩 / 快手 / 小红书 / **QQ 适配器** / 推送列表，' +
+      '改完点右下角保存即可，写回 koishi.yml 并热重载，不用重启。）'
     ),
-    qq: buildQqSchema(Schema).description('QQ 适配器（只对 QQ 平台生效）'),
+    // 全部隐藏：控制台表单里不显示，配置统一在控制台侧边栏的「kkk 配置」面板里改
+    qq: buildQqSchema(Schema).hidden().description('QQ 适配器（只对 QQ 平台生效）'),
     advanced: Schema.object({
     masters: Schema.array(Schema.string()).default([]).description('主人账号（QQ 号）：接收报错通知，以及执行只有主人能用的指令'),
     dataPath: Schema.string().default('data').description('数据目录：配置、数据库、临时文件都放在这里'),
     debug: Schema.boolean().default(false).description('在日志里输出调试信息，排查问题时才需要打开'),
     autoParse: Schema.boolean().default(true).description('群里有人发链接（或回复一条带链接的消息）就自动解析，不用打指令'),
     webUiAuth: Schema.boolean().default(true).description('配置面板 /kkk 是否要求先登录 Koishi 控制台（默认开）。装了 auth 插件的部署只有登录后才能打开面板；没装 auth 插件时本来就没有登录这一说，这里不生效'),
-    }).collapse().description('Koishi 原生设置（一般不用改，已折叠）'),
+    }).collapse().hidden().description('Koishi 原生设置（一般不用改，已折叠）'),
   }),
   Schema.object({
-    upstream: buildUpstreamSchema(pluginRootDir).description(
+    upstream: buildUpstreamSchema(pluginRootDir).hidden().description(
       '插件自身的配置（与 Karin 版 config.json 一致）。每项都带着上游默认值，枚举型字段是下拉框；' +
       '**与默认值不同**的项会在启动时写回 config.json，保持默认值的项不写（这样你直接改文件的内容不会被覆盖）'
     )
@@ -151,6 +153,11 @@ export const Config: Schema<Config> = Schema.intersect([
 ])
 
 export const usage = `
+> **配置全部在配置面板里改**：Koishi 控制台左侧边栏 →「**kkk 配置**」（就是插件自带的那套原版面板：
+> 接口库 / 通用 / 抖音 / 哔哩哔哩 / 快手 / 小红书 / **QQ 适配器** / 推送列表，改完点右下角保存即可）。
+>
+> 下面这个插件配置页里的设置项**已全部隐藏**，避免两处各改一半；配置统一在面板里维护。
+
 本插件是 **koishi-plugin-kkk** 的 Koishi 移植版：抖音 / B站 / 快手 / 小红书 视频解析与动态推送。
 
 ## 指令
