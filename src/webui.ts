@@ -414,16 +414,10 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
   const pageDenied = async (response: any): Promise<boolean> => {
     if (!authRequired()) return false
     if (await consoleAuthed(response)) return false
-    response.status = 401
-    response.type = 'text/html; charset=utf-8'
-    response.body = [
-      '<!doctype html><meta charset="utf-8">',
-      '<div style="font-family:system-ui;padding:40px;line-height:1.8">',
-      '<h2>需要先登录 Koishi 控制台</h2>',
-      '<p>配置面板已开启登录校验（插件配置里的 <code>webUiAuth</code>）。</p>',
-      '<p><a href="/">去登录控制台</a>，登录后再回到本页面。</p>',
-      '</div>',
-    ].join('')
+    // 直接当成「没有这个页面」：面板只从控制台侧边栏进，独立 URL 不给任何提示
+    response.status = 404
+    response.type = 'text/plain; charset=utf-8'
+    response.body = 'Not Found'
     return true
   }
 
@@ -482,7 +476,8 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
 
   /* ---------------- 简易编辑页（改插件配置） ---------------- */
 
-  server.get('/kkk/edit', (response: any) => {
+  server.get('/kkk/edit', async (response: any) => {
+    if (await pageDenied(response)) return
     let body: string
     try {
       body = fs.readFileSync(path.join(pluginRoot, 'assets', 'webui.html'), 'utf-8')

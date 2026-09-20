@@ -248,16 +248,25 @@ export const uploadFile = async (event: Message, file: fileInfo, videoUrl: strin
     await karin.sendMsg(selfId, contact, message2)
   }
 
-  // 判断是否使用群文件上传
-  if (options) {
-    options.useGroupFile = Config.app.usegroupfile && newFileSize > Config.app.groupfilevalue
-  }
+  /**
+   * 判断是否使用群文件上传。
+   *
+   * QQ 单独一套阈值（配置项 `qqGroupFileLimitMB`，默认 30）：超过就按群文件发。
+   * 原因是 QQ 对富媒体视频会压缩、改名甚至丢掉后缀，几十 MB 的视频走「视频」通道基本没法看；
+   * 其它平台仍旧按上游的「群文件上传」开关 + `groupfilevalue` 走。
+   */
+  const platform = String((event as any)?.platform ?? (event as any)?.bot?.platform ?? '')
+  const qqLimit = Number((Config as any).qqGroupFileLimitMB ?? 30)
+  const useGroupFile = /qq/i.test(platform) && qqLimit > 0
+    ? newFileSize > qqLimit
+    : Config.app.usegroupfile && newFileSize > Config.app.groupfilevalue
+  if (options) options.useGroupFile = useGroupFile
 
-  if (Config.app.videoSendMode === 'base64' && !options?.useGroupFile) {
+  if (Config.app.videoSendMode === 'base64' && !useGroupFile) {
     const videoBuffer = fs.readFileSync(file.filepath)
     File = `base64://${videoBuffer.toString('base64')}`
     logger.mark(`已开启视频文件 base64转换 正在进行${logger.yellow('base64转换中')}...`)
-  } else File = options?.useGroupFile ? file.filepath : `file://${file.filepath}`
+  } else File = useGroupFile ? file.filepath : `file://${file.filepath}`
 
   /**
    * 发送前：撤掉上一条「收到请求，开始下载」，并回一句「发送中…」。
@@ -269,7 +278,7 @@ export const uploadFile = async (event: Message, file: fileInfo, videoUrl: strin
   try {
     if (!options?.active) {
       await recallLastPanel(event)
-      const tipText = options?.useGroupFile
+      const tipText = useGroupFile
         ? '发送中…（超过 QQ 限制，将以群文件发送）'
         : '发送中…'
       const tip: any = await event.reply(tipText)
@@ -282,7 +291,7 @@ export const uploadFile = async (event: Message, file: fileInfo, videoUrl: strin
   try {
     // 是主动消息
     if (options?.active) {
-      if (options.useGroupFile) {
+      if (useGroupFile) {
         // 是群文件
         const bot = karin.getBot(String(options.activeOption?.uin))!
         logger.mark(`${logger.blue('主动消息:')} 视频大小: ${newFileSize.toFixed(1)}MB 正在通过${logger.yellow('bot.uploadFile')}回复...`)
@@ -295,7 +304,7 @@ export const uploadFile = async (event: Message, file: fileInfo, videoUrl: strin
       }
     } else {
       // 不是主动消息
-      if (options?.useGroupFile) {
+      if (useGroupFile) {
         // 是文件
         logger.mark(`${logger.blue('被动消息:')} 视频大小: ${newFileSize.toFixed(1)}MB 正在通过${logger.yellow('e.bot.uploadFile')}回复...`)
         await event.bot.uploadFile(event.contact, File, file.originTitle ? `${file.originTitle}.mp4` : `${File.split('/').pop()}`)

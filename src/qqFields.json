@@ -71,5 +71,15 @@
     "label": "卡片文字识别密钥",
     "secret": true,
     "description": "群里转发过来的分享卡片没有链接，只能靠截图识别出标题和作者再去搜索。填自己的免费密钥更稳定：https://ocr.space/ocrapi 。留空会用公共测试密钥，容易被限流。"
+  },
+  {
+    "key": "qqGroupFileLimitMB",
+    "group": "视频发送",
+    "type": "number",
+    "default": 30,
+    "min": 0,
+    "max": 2000,
+    "label": "群文件发送阈值（MB）",
+    "description": "视频体积超过这个值时，改用「群文件」发送。QQ 对富媒体视频会压缩、改名甚至丢掉后缀，走群文件才能原样发出去；填 0 表示不启用。"
   }
 ]
