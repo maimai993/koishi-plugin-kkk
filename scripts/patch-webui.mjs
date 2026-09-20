@@ -232,12 +232,19 @@ const RENDER_PERM_FIELD = [
   'pair=(0,v.useState)(null),mode=pair[0]||guess,setMode=pair[1],',
   'apply=n=>{setMode(n);if(n===`id`){i(p,list?ids:String(numText))}else{i(p,list?[n]:n)}},',
   'setIds=n=>{i(p,list?String(n).split(/[,，\\s]+/).map(x=>x.trim()).filter(Boolean):n)},',
-  'box=(0,U.jsxs)(`div`,{className:n.field,children:[',
+  'sel=(0,U.jsxs)(Ax,{fullWidth:!0,name:p.join(`.`),placeholder:r,value:mode,variant:`secondary`,onChange:e=>{e===null||Array.isArray(e)||apply(String(e))},children:[',
   '(0,U.jsx)(dx,{className:`font-semibold`,children:r}),',
-  '(0,U.jsx)(`select`,{className:`w-full rounded-lg border border-default-200 bg-default-100 px-3 py-2 text-sm`,value:mode,onChange:e=>apply(e.target.value),children:modes.map(m=>(0,U.jsx)(`option`,{value:m.value,children:m.label},m.value))}),',
-  'mode===`id`?(0,U.jsx)(`input`,{className:`w-full rounded-lg border border-default-200 bg-default-100 px-3 py-2 text-sm`,placeholder:c.placeholder||`填写账号（QQ 号），多个用逗号分隔`,value:numText,onChange:e=>setIds(e.target.value)}):null,',
-  'a(s)]});return o(box,t,!1)},',
+  '(0,U.jsxs)(Ax.Trigger,{children:[(0,U.jsx)(Ax.Value,{}),(0,U.jsx)(Ax.Indicator,{})]}),',
+  'a(s),',
+  '(0,U.jsx)(Ax.Popover,{children:(0,U.jsx)(wx,{children:modes.map(m=>(0,U.jsx)(wx.Item,{id:m.value,textValue:m.label,children:m.label},m.value))})})]}),',
+  'inp=mode===`id`?(0,U.jsxs)(lx,{fullWidth:!0,name:p.join(`.`),value:numText,onChange:e=>setIds(e),children:[',
+  '(0,U.jsx)(dx,{className:`font-semibold`,children:list?`接收账号`:`允许的账号`}),',
+  '(0,U.jsx)(cx,{variant:`secondary`,placeholder:`填写 QQ 号，多个用逗号分隔`})]}):null,',
+  'box=(0,U.jsxs)(`div`,{className:n.field,children:[sel,inp]});return o(box,t,!1)},',
 ].join('')
+
+const PERM_START = '/*KKK-PERM-START*/'
+const PERM_END = '/*KKK-PERM-END*/'
 
 const PERM_MODES = '[{value:`all`,label:`所有人`},{value:`admin`,label:`管理员（权限等级 4 及以上）`},{value:`id`,label:`指定账号`}]'
 const LOG_MODES = '[{value:`trigger`,label:`触发者所在的群`},{value:`admin`,label:`管理员（权限等级 4 及以上）`},{value:`id`,label:`指定账号`}]'
@@ -255,10 +262,56 @@ function replaceCall (text, prefix, build) {
   }
 }
 
+/** 从 start 处的 '{' 开始做花括号配对（跳过字符串字面量），返回对应的 '}' 下标 */
+function matchBrace (text, start) {
+  let depth = 0
+  let quote = ''
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i]
+    if (quote) {
+      if (ch === '\\') { i++; continue }
+      if (ch === quote) quote = ''
+      continue
+    }
+    if (ch === '`' || ch === '"' || ch === "'") { quote = ch; continue }
+    if (ch === '{') depth++
+    else if (ch === '}') { depth--; if (depth === 0) return i }
+  }
+  return -1
+}
+
+/** 删掉旧版注入（没有标记的那种：renderPermField:...） */
+function stripBarePermField (text) {
+  let out = text
+  for (;;) {
+    const at = out.indexOf('renderPermField:(')
+    if (at < 0) return out
+    const braceAt = out.indexOf('{', at)
+    if (braceAt < 0) return out
+    const end = matchBrace(out, braceAt)
+    if (end < 0) return out
+    let to = end + 1
+    if (out[to] === ',') to += 1
+    out = out.slice(0, at) + out.slice(to)
+  }
+}
+
+/** 删掉上次注入的片段（按标记），这样改了实现也能覆盖进去 */
+function stripMarked (text, from, to) {
+  let out = text
+  for (;;) {
+    const a = out.indexOf(from)
+    if (a < 0) return out
+    const b = out.indexOf(to, a)
+    if (b < 0) return out
+    out = out.slice(0, a) + out.slice(b + to.length)
+  }
+}
+
 function patchPermFields (text, name) {
   const perm = (platform) => 't.renderPermField([' + BT + platform + BT + ',' + BT + 'loginPerm' + BT + '],' + BT + '谁可以触发扫码登录' + BT + ',' + BT + PERM_DESC + BT + ',{modes:' + PERM_MODES + '})'
   const log = 't.renderPermField([' + BT + 'app' + BT + ',' + BT + 'errorLogSendTo' + BT + '],' + BT + '错误日志' + BT + ',' + BT + LOG_DESC + BT + ',{list:true,modes:' + LOG_MODES + '})'
-  let out = text
+  let out = stripBarePermField(stripMarked(text, PERM_START, PERM_END))
   const before = out
   for (const [prefix, build] of [
     ['l([' + BT + 'bilibili' + BT + ',' + BT + 'loginPerm' + BT + '],', () => perm('bilibili')],
@@ -269,8 +322,8 @@ function patchPermFields (text, name) {
     ['n([' + BT + 'app' + BT + ',' + BT + 'errorLogSendTo' + BT + '],', () => log],
   ]) out = replaceCall(out, prefix, build)
   if (out !== before) console.log('[kkk] 权限字段改为「选 id 才出输入框」: ' + name)
-  if (!out.includes('renderPermField:(')) {
-    out = out.replace(',renderPageHeader:(e,n)=>', ',' + RENDER_PERM_FIELD + 'renderPageHeader:(e,n)=>')
+  if (!out.includes(PERM_START)) {
+    out = out.replace(',renderPageHeader:(e,n)=>', ',' + PERM_START + RENDER_PERM_FIELD + PERM_END + 'renderPageHeader:(e,n)=>')
   }
   return out
 }
