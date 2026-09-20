@@ -60,6 +60,27 @@ export function isOnlinePlayerRequest (): boolean {
   return getParseOverride()?.onlinePlayer === true
 }
 
+/**
+ * 浏览器**明令禁止访问**的端口（WHATWG 那份 + Chrome/Edge/Firefox 都用它）。
+ *
+ * 踩过的坑：把播放器端口配成 6666（IRC 段 6665-6669）之后，链接在浏览器里直接
+ * `ERR_UNSAFE_PORT`，页面根本打不开 —— 服务端其实一切正常，纯浏览器侧的拦截。
+ * 这里用来在启动/生成链接时提醒管理员换端口（反向代理场景可以不换，见 setupOnlinePlayer）。
+ */
+export const UNSAFE_PORTS = new Set<number>([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95,
+  101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143, 161,
+  179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531, 532, 540, 548, 554, 556, 563,
+  587, 601, 636, 989, 990, 993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060,
+  5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080
+])
+
+/** 这个端口浏览器会不会直接拒绝（ERR_UNSAFE_PORT） */
+export function isUnsafePlayerPort (port: unknown): boolean {
+  const num = Number(port)
+  return Number.isInteger(num) && UNSAFE_PORTS.has(num)
+}
+
 /** 链接 / 文件有效期（分钟），配置里写歪了会被夹到 1~1440 */
 export function playerExpireMinutes (): number {
   return normalizeExpireMinutes((tryGetRuntime()?.config as any)?.playerExpireMinutes)
@@ -152,10 +173,24 @@ function localAddress (): string {
   return '127.0.0.1'
 }
 
-/** Koishi 自己监听的端口（playerPort 为 0 时链接得指向它） */
+/**
+ * Koishi 自己监听的端口（playerPort 为 0、或者端口不安全退回时，链接得指向它）。
+ *
+ * **优先读 `ctx.server.port`** —— 那才是真正 listen 的端口
+ * （@cordisjs/plugin-server 在 ready 时写入）。配置树里那份 `port` 常常取不到：
+ * 这台部署的端口是写在 server 插件自己的作用域里的（`group:server → server.port: 5200`），
+ * 只读 `ctx.config / ctx.root.config` 会拿到默认值 5140，链接就指错端口了（真踩过）。
+ * 注意 ready 之前 `server.port` 还是 undefined，所以这里保留后面的兜底。
+ */
 function koishiPort (): number {
   const ctx: any = tryGetRuntime()?.ctx
-  const candidates = [ctx?.config?.port, ctx?.root?.config?.port, ctx?.app?.options?.port, process.env.PORT]
+  const candidates = [
+    ctx?.server?.port,
+    ctx?.config?.port,
+    ctx?.root?.config?.port,
+    ctx?.app?.options?.port,
+    process.env.PORT
+  ]
   for (const value of candidates) {
     const num = Number(value)
     if (Number.isFinite(num) && num > 0) return num
@@ -184,6 +219,12 @@ export function buildPlayerLink (token: string): string {
     logger.warn('[在线播放] 还没有配置公网地址，链接先退化成 ' + link
       + '（只在本机 / 内网可用）。公网部署请到「通用 → 在线播放器设置 → 播放器公网地址」填上，'
       + '例如 https://play.example.com')
+  }
+  // 端口在浏览器的黑名单里：服务端没事，但用户点开会直接 ERR_UNSAFE_PORT
+  if (isUnsafePlayerPort(port)) {
+    logger.warn('[在线播放] 播放器端口 ' + port + ' 是浏览器禁止访问的端口（ERR_UNSAFE_PORT），'
+      + '上面这条链接在浏览器里打不开；请到「在线播放器设置 → 播放器端口」换一个（例如 8888 / 8899），'
+      + '或者配上「播放器公网地址」走反向代理')
   }
   return link
 }
@@ -320,13 +361,39 @@ export function setupOnlinePlayer (ctx: any): () => void {
   const dir = path.join(dataRoot, PLUGIN_DIR_NAME, 'player')
   setupPlayerStore(dir)
   startPlayerSweeper()
-  const port = Number((runtime?.config as any)?.playerPort) > 0 ? Number((runtime?.config as any).playerPort) : 0
+  const configuredPort = Number((runtime?.config as any)?.playerPort) > 0 ? Number((runtime?.config as any).playerPort) : 0
+  const hasPublicBase = !!String((runtime?.config as any)?.playerBaseUrl ?? '').trim()
+  /**
+   * 配置的端口在浏览器黑名单里、而且**没配公网地址**（链接会直接指向这个端口）→ 退回 Koishi 端口。
+   *
+   * 服务端本身没问题，但用户点开链接浏览器会直接 `ERR_UNSAFE_PORT`（看起来就是「网页坏了」）。
+   * 配了公网地址的（反向代理场景）照旧用配置的端口，不动它。
+   */
+  const unsafeWithoutBase = configuredPort > 0 && isUnsafePlayerPort(configuredPort) && !hasPublicBase
+  const port = unsafeWithoutBase ? 0 : configuredPort
+  if (unsafeWithoutBase) {
+    // 这里不打具体端口号：apply 阶段 ctx.server.port 还没赋值，写出来的数字会是假的，
+    // 链接里用的是真实端口（buildPlayerLink 生成时会连链接一起打日志）
+    logger.warn('[在线播放] 播放器端口 ' + configuredPort + ' 是浏览器禁止访问的端口（ERR_UNSAFE_PORT），'
+      + '而且没有配置「播放器公网地址」—— 这次先退回 Koishi 自己的端口（链接里写的是真实端口），'
+      + '链接照常能用；想继续用 ' + configuredPort
+      + ' 请配好公网地址走反向代理，或者干脆换一个端口（推荐 8888 这类）')
+  }
   const disposeRoutes = registerPlayerRoutes({ ctx, port })
   logger.info('[在线播放] 在线播放器已开启：' + playerExpireMinutes() + ' 分钟有效期，文件目录 ' + dir
     + (port ? '（独立端口 ' + port + '）' : '（复用 Koishi 端口）'))
   if (!String((runtime?.config as any)?.playerBaseUrl ?? '').trim()) {
     logger.warn('[在线播放] 未配置「播放器公网地址」：链接会退化成 http://<本机 IP>:' + (port || koishiPort())
       + ' 的形式（本机 / 内网可用）。公网部署请在「通用 → 在线播放器设置」里填上，例如 https://play.example.com')
+  }
+  /**
+   * 端口落在浏览器的黑名单里（例如 6666 属于 IRC 段 6665-6669）时**一定要提醒**：
+   * 服务端一切正常，但用户点开链接浏览器会直接 `ERR_UNSAFE_PORT`，看起来就像「网页坏了」。
+   * 反向代理场景（配了 playerBaseUrl、浏览器访问的是域名）可以忽略这条。
+   */
+  if (isUnsafePlayerPort(port)) {
+    logger.warn('[在线播放] 播放器端口 ' + port + ' 是**浏览器禁止访问**的端口（Chrome/Edge 会报 ERR_UNSAFE_PORT），'
+      + '除非你配了「播放器公网地址」走反向代理，否则请换一个端口（推荐 8888 / 8899 这类）')
   }
   return () => {
     disposeRoutes()

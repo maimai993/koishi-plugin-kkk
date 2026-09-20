@@ -432,6 +432,31 @@ setTimeout(async () => {
       burnButtons(burnPanel).every((button) => /--dm=1/.test(button.data)),
       burnButtons(playerPanel)[0] && burnButtons(playerPanel)[0].data)
 
+    console.log('\n[9b] 播放器端口：浏览器禁止访问的要能识别出来')
+    // 用户实测：端口配成 6666 之后，链接在浏览器里直接 ERR_UNSAFE_PORT（服务端其实是好的）
+    check('6666 / 6665-6669 这批 IRC 段端口判为不安全',
+      store.isUnsafePlayerPort(6666) === true && store.isUnsafePlayerPort(6665) === true &&
+      store.isUnsafePlayerPort(6669) === true && store.isUnsafePlayerPort(8888) === false,
+      '6666=' + store.isUnsafePlayerPort(6666) + ' 8888=' + store.isUnsafePlayerPort(8888))
+    check('常规端口（5140 / 8080 / 15200 / 65535）都判为安全',
+      [5140, 8080, 15200, 65535].every((port) => store.isUnsafePlayerPort(port) === false))
+    check('不安全端口列表用的是浏览器那份黑名单（含 1 / 22 / 5060 / 10080）',
+      [1, 22, 5060, 10080].every((port) => store.isUnsafePlayerPort(port) === true))
+    // 退回 Koishi 端口时，端口号要取「真实监听的端口」（这台部署是 server 插件作用域里的 5200，
+    // 只读 ctx.config.port 会拿到默认值 5140，链接就指错了）
+    const savedServer = ctx.server
+    const savedPort = runtime.config.playerPort
+    const savedBase = runtime.config.playerBaseUrl
+    ctx.server = { port: 12345 }
+    runtime.config.playerPort = 0
+    runtime.config.playerBaseUrl = ''
+    const fallbackLink = store.buildPlayerLink('abcdefgh1234')
+    check('退回 Koishi 端口时用的是 ctx.server.port（真实监听端口）',
+      fallbackLink.includes(':12345/kkk/player/abcdefgh1234'), fallbackLink)
+    ctx.server = savedServer
+    runtime.config.playerPort = savedPort
+    runtime.config.playerBaseUrl = savedBase
+
     console.log('\n[10] 在线播放最大文件：留空跟随全局，超限就不走在线播放')
     const { QQ_FIELDS } = require(path.join(pluginRoot, 'lib/qqOptions.js'))
     const playerFields = QQ_FIELDS.filter((field) => field.key.startsWith('player'))

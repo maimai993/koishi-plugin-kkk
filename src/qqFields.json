@@ -139,7 +139,7 @@
     "min": 0,
     "max": 65535,
     "label": "播放器端口",
-    "description": "0 = 复用 Koishi 自己的端口（推荐，不用额外开端口）；填其它值会用 node:http 另起一个服务。端口被占用时只记一条日志并退回 Koishi 端口，不会影响解析。"
+    "description": "0 = 复用 Koishi 自己的端口（推荐，不用额外开端口）；填其它值会用 node:http 另起一个服务。端口被占用时只记一条日志并退回 Koishi 端口，不会影响解析。注意别填浏览器禁止访问的端口（例如 6665-6669 这些 IRC 段），否则用户点开链接会直接 ERR_UNSAFE_PORT，看起来就像网页坏了。"
   },
   {
     "key": "playerExpireMinutes",
