@@ -18,8 +18,8 @@
       "kuaishou": "",
       "xiaohongshu": ""
     },
-    "APIServer": true,
-    "APIServerMount": true,
+    "APIServer": false,
+    "APIServerMount": false,
     "APIServerPort": 4567
   },
   "app": {

@@ -6,7 +6,7 @@ import { EmojiReactionManager } from '@/module/utils/EmojiReaction'
 
 import { sliceImageToMarkdown } from '../ImageSlice'
 import { renderErrorImage } from './render'
-import { sendErrorToAdmins, sendErrorToAllMasters, sendErrorToMaster, sendErrorToTrigger } from './sender'
+import { sendErrorToAdmins, sendErrorToAllMasters, sendErrorToConfiguredIds, sendErrorToMaster, sendErrorToTrigger } from './sender'
 import { getStrategies } from './strategy'
 import type { ErrorContext, ErrorHandlerOptions } from './types'
 import { injectBotToEventForPushTask, isPushTask, parseLogsToStructured } from './utils'
@@ -56,6 +56,7 @@ export const handleBusinessError = async (
     await sendErrorToAllMasters(ctx, img)
     // 「管理员」= 权限等级 > 4（Koishi 的主人档）
     await sendErrorToAdmins(ctx, img).catch((err) => logger.warn('[ErrorHandler] 发送给管理员失败: ' + String(err)))
+    await sendErrorToConfiguredIds(ctx, img).catch((err) => logger.warn('[ErrorHandler] 发送给指定账号失败: ' + String(err)))
 
     if (options.customErrorHandler) {
       try {

@@ -225,8 +225,23 @@ function koishiAuthority (session: any): number {
   return 0
 }
 
-function checkPermission (session: any, perm?: string): boolean {
-  if (!perm || perm === 'all') return true
+const PERM_KEYWORDS = ['all', 'admin', 'master', 'group.owner', 'group.admin']
+
+/**
+ * 权限判断。
+ *
+ * 除了 `all` / `admin` / `master` 这些关键字，还允许：
+ *   - `*`：等同 all（谁都可以）
+ *   - 直接写账号：`123456` 或 `123456, 234567`（多个用逗号 / 空格分隔）
+ *     —— 配置里写具体 QQ 号时，只有这些账号能用该功能。
+ */
+function checkPermission (session: any, perm?: string | string[]): boolean {
+  if (!perm) return true
+  const tokens = (Array.isArray(perm) ? perm : String(perm).split(/[,，\s]+/))
+    .map((item: any) => String(item).trim())
+    .filter(Boolean)
+  if (tokens.length === 0) return true
+  if (tokens.includes('*') || tokens.includes('all')) return true
 
   // 两边的名单都认：插件自己的 masters + Koishi 宿主配置的 masters
   const masters: string[] = [
@@ -238,16 +253,28 @@ function checkPermission (session: any, perm?: string): boolean {
   const isMaster = masters.includes(String(session.userId))
     || user.admin === true
     || authority >= 4            // Koishi 的权限等级里 4 = 主人
-  if (perm === 'master') return isMaster
 
-  if (perm === 'admin') {
+  // 直接写账号：命中就用
+  const ids = tokens.filter((token: string) => !PERM_KEYWORDS.includes(token))
+  if (ids.includes(String(session.userId))) return true
+  if (ids.length > 0 && !tokens.some((token: string) => PERM_KEYWORDS.includes(token))) return false
+
+  if (tokens.includes('master')) return isMaster
+
+  if (tokens.includes('admin')) {
     if (isMaster) return true
     if (authority >= 3) return true   // 3 = 管理员
     const roles: string[] = session.author?.roles ?? []
-    return roles.includes('owner') || roles.includes('admin') || roles.includes('administrator')
+    if (roles.includes('owner') || roles.includes('admin') || roles.includes('administrator')) return true
+    return false
   }
 
-  return true
+  // group.owner / group.admin 走角色判断
+  const roles: string[] = session.author?.roles ?? []
+  if (tokens.includes('group.owner') && roles.includes('owner')) return true
+  if (tokens.includes('group.admin') && (roles.includes('admin') || roles.includes('administrator'))) return true
+
+  return false
 }
 
 /* ------------------------------------------------------------------ *

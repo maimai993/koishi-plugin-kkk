@@ -190,3 +190,32 @@ const buildErrorPrefix = async (ctx: ErrorContext, isPush: boolean, botId: strin
 
   return `群：${groupName}(${groupId})\n${options.businessName} 任务执行出错\n请尽快解决以消除警告`
 }
+/**
+ * 发送错误图片给配置里直接写的 QQ 号。
+ *
+ * `errorLogSendTo` 现在除了 `master` / `allMasters` / `admin` / `trigger` 这些关键字，
+ * 也允许直接写账号（多个用逗号分隔），这里负责把这些账号单独发一遍。
+ */
+export const sendErrorToConfiguredIds = async (
+  ctx: ErrorContext,
+  img: Awaited<ReturnType<typeof renderErrorImage>>,
+  customPrefix?: string
+) => {
+  const { options, event } = ctx
+  const ids = (Config.app.errorLogSendTo ?? []).filter((item: string) => /^\d{4,}$/.test(String(item)))
+  if (ids.length === 0) return
+
+  const isPush = isPushTask(event, options.businessName)
+  const botId = event?.bot?.account.selfId ?? event?.selfId ?? config.master().find((item) => item !== 'console')
+  if (!botId) return
+
+  const prefix = customPrefix || (await buildErrorPrefix(ctx, isPush, botId))
+  for (const id of new Set(ids)) {
+    try {
+      await karin.sendMaster(botId, String(id), [segment.text(prefix), ...img])
+      logger.debug(`[ErrorHandler] 已发送错误消息给 ${id}`)
+    } catch (err) {
+      logger.error(`[ErrorHandler] 发送错误消息给 ${id} 失败: ${err}`)
+    }
+  }
+}

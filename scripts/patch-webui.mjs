@@ -155,6 +155,45 @@ function patchPushDialog (text, name) {
   return out
 }
 
+/* ---------------- 权限 / 错误日志：下拉、多选改成手填 ---------------- */
+
+/**
+ * 原版这两项是「下拉框」和「互斥勾选组」，用起来很别扭：
+ *   - 谁可以触发扫码登录：只能从 5 个关键字里选一个；
+ *   - 错误日志接收人：「第一个主人 / 所有主人」互斥，还不能填具体账号。
+ * 现在都换成文本框：可以填 * （谁都可以）、关键字，也可以直接写 QQ 号，多个用逗号分隔。
+ * 服务端保存时会把「错误日志」这一项的字符串拆成数组。
+ */
+const PERM_DESC = '填 * 表示谁都可以；也可以直接写账号（多个用逗号分隔）。可选关键字：all / admin / master / group.owner / group.admin。'
+const LOG_DESC = '谁来接收错误日志。可填 master（第一个主人）、allMasters（所有主人）、admin（管理员）、trigger（触发者的群聊），也可以直接写账号；多个用逗号分隔。'
+
+const TEXT_SWAPS = [
+  [
+    'o([`bilibili`,`loginPerm`],`谁可以触发扫码登录`,`修改后需重启。`,IL)',
+    'l([`bilibili`,`loginPerm`],`谁可以触发扫码登录`,' + '{DESC1}' + ')',
+  ],
+  [
+    'o([`douyin`,`loginPerm`],`谁可以触发扫码登录`,`修改后需重启。`,IL)',
+    'l([`douyin`,`loginPerm`],`谁可以触发扫码登录`,' + '{DESC1}' + ')',
+  ],
+  [
+    'n([`app`,`errorLogSendTo`],`错误日志`,`遇到错误时谁会收到错误日志。注：推送任务只可发送给主人。「第一个主人」与「所有主人」互斥。`,[{label:`第一个主人`,value:`master`},{label:`所有主人`,value:`allMasters`},{label:`触发者的群聊`,value:`trigger`}],!1,[[`master`,`allMasters`]])',
+    'c([`app`,`errorLogSendTo`],`错误日志`,' + '{DESC2}' + ')',
+  ],
+]
+
+function patchTextFields (text, name) {
+  let out = text
+  for (const [from, to] of TEXT_SWAPS) {
+    const target = to.split('{DESC1}').join('`' + PERM_DESC + '`').split('{DESC2}').join('`' + LOG_DESC + '`')
+    if (out.includes(from)) {
+      out = out.split(from).join(target)
+      console.log('[kkk] 改成手填: ' + name + ' :: ' + from.slice(0, 34) + '…')
+    }
+  }
+  return out
+}
+
 /* ---------------- 全局文案替换 ---------------- */
 
 const TEXT_REPLACERS = [
@@ -214,6 +253,7 @@ for (const file of files) {
     if (stripped !== text) { console.log('[kkk] 已删除用户信息块: ' + name); text = stripped }
   }
   text = patchPushDialog(text, name)
+  text = patchTextFields(text, name)
   text = applyTextReplacements(text, name)
 
   fs.writeFileSync(file, text)

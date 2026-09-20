@@ -190,6 +190,20 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
    * 早期版本这些开关直接写在顶层，摊平时 `qq` 优先，清掉顶层那份免得两边数值打架
    * （用户会看到表单和实际生效值不一致）。
    */
+  /** 面板把「错误日志接收人」这类多值字段做成了文本框，保存时把字符串拆成数组 */
+  const LIST_UPSTREAM_PATHS: Array<[string, string]> = [['app', 'errorLogSendTo']]
+
+  const normalizeLists = (upstream: any) => {
+    if (!upstream || typeof upstream !== 'object') return upstream
+    for (const [group, key] of LIST_UPSTREAM_PATHS) {
+      const value = upstream?.[group]?.[key]
+      if (typeof value === 'string') {
+        upstream[group][key] = value.split(/[,，\s]+/).map((item: string) => item.trim()).filter(Boolean)
+      }
+    }
+    return upstream
+  }
+
   const normalize = (source: any) => {
     const next: any = { ...source }
     const group = { ...readQqOptions(source), ...(next.qq ?? {}) }
@@ -342,7 +356,7 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
       //   - `qq`（面板里的「QQ 适配器」分类）→ 写回插件自己的配置（koishi.yml）
       //   - 其余整份 → upstream（Karin 版的 config.json 形状）
       // 保存都走 scope.update → 落盘 koishi.yml → 热重载 → 启动时同步回 config.json
-      const { qq, ...upstream } = body
+      const { qq, ...upstream } = normalizeLists(body)
       await (ctx as any).scope.update(normalize({
         ...(rawConfig ?? config),
         ...(qq && typeof qq === 'object' ? { qq: { ...readQqOptions(config), ...qq } } : {}),
