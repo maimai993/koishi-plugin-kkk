@@ -236,13 +236,17 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
 
   try {
     const consoleService: any = (ctx as any).console
-    consoleService?.addListener?.('kkk/panel-token', function (this: any) {
-      // this 是发起调用的控制台客户端，auth 由 auth 插件写入
-      if (!this?.auth) throw new Error('请先登录 Koishi 控制台')
-      return issuePanelToken()
-    }, { authority: 4 })
+    if (typeof consoleService?.addListener !== 'function') {
+      logger.warn('[kkk] 控制台没有 addListener，面板 token RPC 未注册（面板将无法从控制台获取登录态）')
+    } else {
+      consoleService.addListener('kkk/panel-token', function (this: any) {
+        // this 是发起调用的控制台客户端，auth 由 auth 插件写入
+        if (!this?.auth) throw new Error('请先登录 Koishi 控制台')
+        return issuePanelToken()
+      }, { authority: 4 })
+    }
   } catch (error: any) {
-    logger.debug('[kkk] 注册面板 token RPC 失败: ' + String(error?.message ?? error))
+    logger.warn('[kkk] 注册面板 token RPC 失败: ' + String(error?.message ?? error))
   }
 
   const tokens = new Map<string, number>()
@@ -423,8 +427,30 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
     return true
   }
 
+  /**
+   * 控制台下发的插件前端包（`/@plugin-<id>/index.js`）默认没有缓存头，
+   * 浏览器会拿旧的 bundle 一直用（改了客户端逻辑却看不到效果）。
+   * 这里给本插件自己的入口加 no-store —— qq-chat 也是这么处理的。
+   */
+  const isOwnEntry = (requestPath: string): boolean => {
+    if (!requestPath.includes('/@plugin-')) return false
+    const entries: any = (ctx as any).console?.entries ?? {}
+    for (const key of Object.keys(entries)) {
+      if (!requestPath.startsWith('/@plugin-' + key)) continue
+      const files: any = entries[key]?.files
+      const list = Array.isArray(files) ? files : [files?.dev, files?.prod]
+      if (list.some((file: any) => typeof file === 'string' && file.includes('koishi-plugin-kkk'))) return true
+    }
+    return false
+  }
+
   server.use(async (response: any, next: any) => {
     const requestPath = String(response.path || '')
+    if (isOwnEntry(requestPath)) {
+      await next()
+      response.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+      return
+    }
     if (!requestPath.startsWith('/kkk/assets/')) return next()
     if (await pageDenied(response)) return
     const relative = decodeURIComponent(requestPath.slice('/kkk/assets/'.length))
