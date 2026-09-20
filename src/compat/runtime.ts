@@ -37,6 +37,8 @@ export interface KkkRuntimeConfig {
   playerPort?: number
   /** 播放链接 / 视频文件的有效期（分钟，1~1440） */
   playerExpireMinutes?: number
+  /** 在线播放的体积上限（MB）：超过就不走在线播放；0 / 空 = 跟随全局的「文件大小限制」 */
+  playerMaxFileMB?: number
 }
 
 export interface KkkRuntime {

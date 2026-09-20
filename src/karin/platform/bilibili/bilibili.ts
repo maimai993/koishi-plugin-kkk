@@ -3,7 +3,7 @@ import { buildMarkdownImageMessage } from '@/module/utils/QqPanel'
 // 弹幕策略（通用里的「强制不烧录弹幕」优先；「在线播放器」开着时是在线播放，不烧录）
 import { shouldBurnDanmaku, shouldFetchDanmaku } from '@/module/utils/DanmakuPolicy'
 // 在线播放：下载完之后登记播放会话并把链接回给用户（路径不能写 @/，那指向 karin/）
-import { isOnlinePlayerRequest, publishOnlinePlayer } from '../../../player'
+import { effectivePlayerSizeLimitMB, isOnlinePlayerRequest, publishOnlinePlayer } from '../../../player'
 import { ParseSteps } from '@/module/utils/ParseSteps'
 import { sendSlicedImage } from '@/module/utils/ImageSlice'
 
@@ -299,11 +299,19 @@ export class Bilibili extends Base {
          * 下好的文件先存着，等卡片和评论区都发完再上传（见下面的「发送视频」）。
          */
         /**
-         * 在线播放模式**不做体积检查**：视频不会下发到 QQ，而是留在服务器上让播放页拉流，
-         * QQ 的 200MB 限制与它无关（大文件照样能在线看）。关掉播放器时才按老规矩判定。
+         * 体积检查。
+         *
+         * 在线播放模式下视频不下发到 QQ，判定换成**播放器自己的上限**
+         * （「在线播放最大文件」，留空跟随全局的「文件大小限制」）—— 免得一个几十 GB 的
+         * 视频被搬进播放器目录把磁盘塞满。关掉播放器时还是老规矩（全局上限 + 不压缩）。
          */
-        const videoOversize = !isOnlinePlayerRequest() &&
-          Config.app.usefilelimit && Number(videoSize) > Number(Config.app.filelimit) && !Config.app.compress
+        const onlinePlayerNow = isOnlinePlayerRequest()
+        const playerLimitMB = onlinePlayerNow
+          ? effectivePlayerSizeLimitMB(Config.app.usefilelimit ? Number(Config.app.filelimit) : 0)
+          : 0
+        const videoOversize = onlinePlayerNow
+          ? (playerLimitMB > 0 && Number(videoSize) > playerLimitMB)
+          : (Config.app.usefilelimit && Number(videoSize) > Number(Config.app.filelimit) && !Config.app.compress)
         const willSendVideo = Config.bilibili.sendContent.some((content) => content === 'video')
         /** 本次要烧录的弹幕（烧录在下载那一步里完成，所以这里先拿到） */
         let danmakuList: BiliDanmakuElem[] = []
@@ -425,8 +433,12 @@ export class Bilibili extends Base {
 
         if (willSendVideo) {
           if (videoOversize) {
+            // 在线播放模式下限制来自播放器自己，文案别再说「最大上传大小」（那个视频根本不上传）
+            const limitText = onlinePlayerNow
+              ? `在线播放的体积上限为 ${playerLimitMB}MB`
+              : `设定的最大上传大小为 ${Config.app.filelimit}MB`
             this.e.reply(
-              `设定的最大上传大小为 ${Config.app.filelimit}MB\n当前解析到的视频大小为 ${Number(videoSize)}MB\n` +
+              `${limitText}\n当前解析到的视频大小为 ${Number(videoSize)}MB\n` +
                 '视频太大了，还是去B站看吧~',
               { reply: true }
             )

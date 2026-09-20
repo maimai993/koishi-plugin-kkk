@@ -341,6 +341,45 @@ setTimeout(async () => {
       burnButtons(burnPanel).every((button) => /--dm=1/.test(button.data)),
       burnButtons(playerPanel)[0] && burnButtons(playerPanel)[0].data)
 
+    console.log('\n[10] 在线播放最大文件：留空跟随全局，超限就不走在线播放')
+    const { QQ_FIELDS } = require(path.join(pluginRoot, 'lib/qqOptions.js'))
+    const playerFields = QQ_FIELDS.filter((field) => field.key.startsWith('player'))
+    check('播放器那组字段都要求先开启弹幕功能才能编辑（editableWhen=danmaku）',
+      playerFields.length === 5 && playerFields.every((field) => field.editableWhen === 'danmaku'),
+      playerFields.map((field) => field.key + ':' + field.editableWhen).join(' | '))
+    check('「在线播放最大文件」默认 0 = 跟随全局', QQ_DEFAULTS.playerMaxFileMB === 0,
+      'default=' + QQ_DEFAULTS.playerMaxFileMB)
+
+    const savedMax = runtime.config.playerMaxFileMB
+    runtime.config.playerMaxFileMB = 0
+    check('留空时跟随全局（全局没开限制就是不限制）',
+      store.effectivePlayerSizeLimitMB(200) === 200 && store.effectivePlayerSizeLimitMB(0) === 0,
+      'effective(200)=' + store.effectivePlayerSizeLimitMB(200) + ' effective(0)=' + store.effectivePlayerSizeLimitMB(0))
+    runtime.config.playerMaxFileMB = 50
+    check('填了就用自己填的值（优先于全局）', store.effectivePlayerSizeLimitMB(200) === 50,
+      'effective(200)=' + store.effectivePlayerSizeLimitMB(200))
+    runtime.config.playerMaxFileMB = 0
+    const globalLimit = await store.globalFileLimitMB()
+    check('能读到全局的「文件大小限制」', Number.isFinite(globalLimit) && globalLimit >= 0,
+      '全局 ' + globalLimit + 'MB，在线播放实际生效 ' + (await store.resolvePlayerSizeLimitMB()) + 'MB')
+
+    // 把上限压到 1KB（视频是 4096 字节）→ 必须拒绝在线播放并把文件留在原地
+    runtime.config.playerMaxFileMB = 0.001
+    const overSent = []
+    const overVideo = makeVideo('tmp_player_over.mp4')
+    const overOk = await store.publishOnlinePlayer(collector(overSent), {
+      videoPath: overVideo,
+      title: '超限验证',
+      platform: 'bilibili',
+      danmaku: []
+    })
+    check('超过上限时不登记会话，并回一句说明', overOk === false && overSent.length === 1 &&
+      /超过在线播放的体积上限/.test(overSent[0]), overSent[0] || '（没有回复）')
+    check('超限时视频文件原地不动（调用方退回原来的发送流程）',
+      fs.existsSync(overVideo) && store.listPlayerSessions().length === 0,
+      'sessions=' + store.listPlayerSessions().length)
+    runtime.config.playerMaxFileMB = savedMax
+
     const failed = results.filter((item) => !item.ok)
     console.log('\n=== ' + (results.length - failed.length) + '/' + results.length + ' 通过 ===')
     process.exitCode = failed.length ? 1 : 0

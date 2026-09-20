@@ -23,6 +23,11 @@ export interface QqField {
   secret?: boolean
   /** 只对 WebUI 有意义：renderIn 为 app 的字段，界面上归到这个小标题下 */
   section?: string
+  /**
+   * 只对 WebUI 有意义：这个字段在什么条件下才可以编辑。
+   * `danmaku` = 只有把「强制不烧录弹幕」关掉（也就是打开弹幕功能）之后才能改。
+   */
+  editableWhen?: string
 }
 
 export const QQ_FIELDS = fields as QqField[]

@@ -43,22 +43,40 @@ const QQ_FIELDS_ONLY = fields.filter((field) => field.renderIn !== 'app')
  * 带 section 的字段（在线播放器那几项）额外包一层小标题，
  * 不带 section 的直接跟在「交互设置」里 —— 和原来一样。
  */
+/**
+ * 「弹幕功能开着吗」的表达式。
+ *
+ * 通用里的「强制不烧录弹幕」关掉 = 弹幕烧录打开；带 `editableWhen: 'danmaku'` 的字段
+ * （在线播放器那一组）只有在这时才能编辑（面板里灰掉，不给改）。
+ */
+const DANMAKU_OPEN = 'Q(e,' + arr(['qq', 'forceNoDanmaku']) + ',!0)===!1'
+
+/** 字段被锁住时在标题上补一句说明，免得用户以为是界面坏了 */
+const SECTION_LOCK_HINT = '（需先关闭「强制不烧录弹幕」）'
+
 const appFieldCall = (field) => {
   const path = '[' + [q('qq'), q(field.key)].join(',') + ']'
-  if (field.type === 'boolean') return 's(' + path + ',' + q(field.label) + ',' + q(field.description) + ')'
+  const disabled = field.editableWhen === 'danmaku' ? DANMAKU_OPEN : ''
+  // renderSwitch 的第 4 个参数、renderTextField 的 options.disabled 都是「不可编辑」
+  if (field.type === 'boolean') {
+    return 's(' + path + ',' + q(field.label) + ',' + q(field.description) + (disabled ? ',' + disabled : '') + ')'
+  }
   const opts = ["type:" + q(field.type === 'number' ? 'number' : 'text')]
   if (field.type === 'number') {
     opts.push('fallback:' + Number(field.default))
     if (field.min !== undefined) opts.push('min:' + field.min)
     if (field.max !== undefined) opts.push('max:' + field.max)
   }
+  if (disabled) opts.push('disabled:' + disabled)
   return 'c(' + path + ',' + q(field.label) + ',' + q(field.description) + ',{' + opts.join(',') + '})'
 }
+const sectionFields = (section) => APP_FIELDS.filter((field) => field.section === section)
 const APP_FIELDS_CODE = [
   ...APP_FIELDS.filter((field) => !field.section).map(appFieldCall),
   ...[...new Set(APP_FIELDS.filter((field) => field.section).map((field) => field.section))].map((section) =>
-    'o(' + q(section) + ',(0,U.jsx)(U.Fragment,{children:['
-    + APP_FIELDS.filter((field) => field.section === section).map(appFieldCall).join(',')
+    'o(' + q(section + (sectionFields(section).some((field) => field.editableWhen === 'danmaku') ? SECTION_LOCK_HINT : ''))
+    + ',(0,U.jsx)(U.Fragment,{children:['
+    + sectionFields(section).map(appFieldCall).join(',')
     + ']}))'),
 ].join(',')
 

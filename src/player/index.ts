@@ -12,6 +12,7 @@
  *
  * 本文件是播放器对外的总入口：配置读取、链接拼接、弹幕格式归一、会话发布、路由挂载。
  */
+import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -60,6 +61,45 @@ export function isOnlinePlayerRequest (): boolean {
 /** 链接 / 文件有效期（分钟），配置里写歪了会被夹到 1~1440 */
 export function playerExpireMinutes (): number {
   return normalizeExpireMinutes((tryGetRuntime()?.config as any)?.playerExpireMinutes)
+}
+
+/**
+ * 有效体积上限（MB）：0 表示不限制。
+ *
+ * 「在线播放最大文件」（playerMaxFileMB）留空 / 填 0 时就**跟随全局** ——
+ * 用上游「文件大小限制」那一项（usefilelimit / filelimit）的值，由调用方读出来传进来。
+ * @param globalLimitMB 全局限制（MB），0 = 全局没开限制
+ */
+export function effectivePlayerSizeLimitMB (globalLimitMB = 0): number {
+  const configured = Number((tryGetRuntime()?.config as any)?.playerMaxFileMB)
+  if (Number.isFinite(configured) && configured > 0) return configured
+  const global = Number(globalLimitMB)
+  return Number.isFinite(global) && global > 0 ? global : 0
+}
+
+/**
+ * 读全局的「文件大小限制」。
+ *
+ * Config 是 karin 那套配置代理，import 时会去读兼容层运行时状态，
+ * 所以这里用动态 import（本模块在插件入口 require 阶段就会被加载，顶层引入会炸）。
+ * @returns 全局限制（MB）；没开限制就是 0
+ */
+export async function globalFileLimitMB (): Promise<number> {
+  try {
+    const { Config } = await import('../karin/module/utils/Config')
+    const app: any = (Config as any)?.app ?? {}
+    if (app.usefilelimit === false) return 0
+    const limit = Number(app.filelimit)
+    return Number.isFinite(limit) && limit > 0 ? limit : 0
+  } catch (error: any) {
+    logger.debug('[在线播放] 读取全局文件大小限制失败（按不限制处理）: ' + String(error?.message ?? error))
+    return 0
+  }
+}
+
+/** 在线播放实际生效的体积上限（MB）；0 = 不限制 */
+export async function resolvePlayerSizeLimitMB (): Promise<number> {
+  return effectivePlayerSizeLimitMB(await globalFileLimitMB())
 }
 
 /** 取一个本机可访问的 IPv4（playerBaseUrl 留空时的兜底） */
@@ -149,6 +189,15 @@ export function normalizePlayerDanmaku (list: any): PlayerDanmakuItem[] {
   return items
 }
 
+/** 体积显示：小于 1MB 的右上限（测试/极端配置）也要看得出区别，别都显示成 0.0MB */
+function formatMB (value: number): string {
+  const num = Number(value)
+  if (!Number.isFinite(num)) return '0MB'
+  if (num >= 10) return num.toFixed(0) + 'MB'
+  if (num >= 1) return num.toFixed(1) + 'MB'
+  return String(Number(num.toFixed(3))) + 'MB'
+}
+
 /** 与用户之间的两句话（播放器模式下的文案，别再说「添加弹幕」了） */
 const TIP_PREPARING = '下载完成，正在准备在线播放…'
 
@@ -178,6 +227,17 @@ export async function publishOnlinePlayer (e: any, input: {
   try {
     const minutes = playerExpireMinutes()
     const danmaku = normalizePlayerDanmaku(input.danmaku)
+    /**
+     * 体积上限：超过就不做在线播放，回一句说明并返回 false ——
+     * 调用方拿到 false 会退回「直接发送视频文件」，用户不会什么都没有。
+     */
+    const sizeMB = Number(fs.statSync(input.videoPath).size) / 1024 / 1024
+    const limitMB = await resolvePlayerSizeLimitMB()
+    if (limitMB > 0 && sizeMB > limitMB) {
+      logger.info('[在线播放] 视频 ' + sizeMB.toFixed(1) + 'MB 超过在线播放上限 ' + limitMB + 'MB，改回原来的发送流程')
+      await reply('视频 ' + formatMB(sizeMB) + '，超过在线播放的体积上限 ' + formatMB(limitMB) + '，这里按原来的方式发送')
+      return false
+    }
     await reply(TIP_PREPARING)
     const session = registerPlayerSession({
       videoPath: input.videoPath,

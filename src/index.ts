@@ -206,7 +206,8 @@ export const usage = `
 
 ## 在线播放器（弹幕在线看）
 
-通用 → **在线播放器设置** 里的四项：
+通用 → **在线播放器设置** 里的五项（这一组设置**要先打开弹幕功能才能改**：把上面的
+「强制不烧录弹幕」关掉，否则它们在面板里是灰的）：
 
 - **在线播放器**（默认开）：总开关。开着时，解析面板里那一列按钮就写「**弹幕**」
   （不再是「烧录弹幕」），点它是**在线播放**：机器人把视频下下来放进播放器目录，
@@ -217,6 +218,8 @@ export const usage = `
 - **播放器端口**：0（默认）= 复用 Koishi 自己的端口；填别的值会用 node:http 另起一个服务，
   端口被占用时只记一条日志并退回 Koishi 端口，不影响解析。
 - **链接有效期（分钟）**：默认 60（1~1440）。到点自动删掉视频和弹幕，链接打开是「链接已过期」。
+- **在线播放最大文件（MB）**：超过这个体积的视频不走在线播放，改回原来的发送流程
+  （免得把机器磁盘塞满）。留空 / 填 0 = 跟随全局，用上游的「文件大小限制」（usefilelimit / filelimit）。
 
 播放页是自带的单文件页面（深色界面、手机也能看），有**弹幕开关 / 字号 / 透明度**三个控件，
 弹幕用 canvas 自己画，拖动进度条靠服务端的 HTTP Range 支持，页面不依赖任何外网 CDN。
@@ -818,6 +821,13 @@ export async function apply (ctx: Context, rawConfig: Config) {
         const num = Number(raw)
         if (!Number.isFinite(num)) return 60
         return Math.min(1440, Math.max(1, Math.floor(num)))
+      })(),
+      playerMaxFileMB: (() => {
+        // 空值 = 跟随全局（「文件大小限制」那一项），统一记成 0
+        const raw = (config as any).playerMaxFileMB
+        if (raw === undefined || raw === null || raw === '') return 0
+        const num = Number(raw)
+        return Number.isFinite(num) && num > 0 ? num : 0
       })(),
       qqGroupFileLimitMB: (() => {
         const raw = (config as any).qqGroupFileLimitMB
