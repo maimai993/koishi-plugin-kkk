@@ -25,10 +25,19 @@ export interface ParseOverride {
   /**
    * 本次走「在线播放」：不烧录弹幕，改成把视频登记成播放会话再把链接回给用户。
    *
-   * 由 apps/tools.ts 在「用户要弹幕 + 播放器总开关打开」时置为 true，
+   * 由 apps/tools.ts 在「用户要弹幕 / 点了「在线看」+ 播放器总开关打开」时置为 true，
    * 平台 handler 与弹幕策略都读它（见 src/player/index.ts）。
    */
   onlinePlayer?: boolean
+  /**
+   * 本次解析是面板上的「**在线看**」按钮点出来的（`--play=1`）。
+   *
+   * 和 {@link burnDanmaku} 的区别是**语义**：那个是「要弹幕」（播放器关着时还得真烧录），
+   * 这个是「视频别发到群里，直接给我一个带弹幕的播放页」—— 所以：
+   *   - 即使面板没显示弹幕列、或者配置里弹幕功能关着，在线看也**一定带弹幕**；
+   *   - 视频不发到 QQ，QQ 的「文件大小限制」不该再拦它（只受「在线播放最大文件」约束）。
+   */
+  onlineWatch?: boolean
   /**
    * 本次解析是**从 QQ 面板按钮点进来的**。
    *
@@ -82,6 +91,7 @@ export interface ParseFlags {
  *   - \`--qn=80\`    B站画质
  *   - \`--q=1080p\`  抖音/小红书画质
  *   - \`--dm=1\`     烧录弹幕
+ *   - \`--play=1\`   在线看（直接在线播放，视频不发到群里，一定带弹幕）
  *   - \`--panel=1\`  只重发面板（1 = 带弹幕，0 = 纯视频）
  *   - \`--p=abc123\` 面板按钮的短令牌（真实链接存在插件内存里，见 QqPanel）
  * @param msg 消息文本
@@ -114,6 +124,12 @@ export function parseParseFlags (msg: string): ParseFlags {
     })
     .replace(/\s*--dm=1/gi, () => {
       override.burnDanmaku = true
+      hasAny = true
+      return ''
+    })
+    // 「在线看」是独立的标志（不能用 --dm=1 冒充）：它要的是播放页，不是烧录
+    .replace(/\s*--play=1/gi, () => {
+      override.onlineWatch = true
       hasAny = true
       return ''
     })

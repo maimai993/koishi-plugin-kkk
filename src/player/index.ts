@@ -43,6 +43,30 @@ export * from './server'
  * **默认开启**（和「面板带打开原站链接」一样）：运行时配置里没写这个键时按开启处理，
  * 只有管理员显式关掉（false）才回到原来的 ffmpeg 烧录流程。
  */
+/**
+ * 「在线看」按钮的开关（通用 → 在线播放器设置 → 面板显示「在线看」按钮，默认开）。
+ *
+ * 它管的是**独立于弹幕重定向**的那条路：即使把「弹幕重定向在线播放器」关掉（弹幕回到 ffmpeg 烧录），
+ * 用户仍然可以从面板上直接挑「在线看」——所以它同时也是「播放器要不要启动」的第二个入口。
+ */
+export function isPlayerWatchEnabled (): boolean {
+  try {
+    return (tryGetRuntime()?.config as any)?.playerWatchButton !== false
+  } catch {
+    return true
+  }
+}
+
+/**
+ * 播放器是否可用：**两个开关任一开着即可**。
+ *   - 「弹幕重定向在线播放器」开着 → 弹幕走在线播放（面板上「弹幕 / 在线看」合并成一个按钮）；
+ *   - 「面板显示「在线看」按钮」开着 → 面板上单独给一个「在线看」按钮。
+ * 两个都关掉才是真正的「不使用在线播放器」。
+ */
+export function isPlayerAvailable (): boolean {
+  return isOnlinePlayerEnabled() || isPlayerWatchEnabled()
+}
+
 export function isOnlinePlayerEnabled (): boolean {
   try {
     return (tryGetRuntime()?.config as any)?.playerEnabled !== false
@@ -381,7 +405,8 @@ export async function publishOnlinePlayer (e: any, input: {
   /** 已经下到本地的封面文件（优先用它，其次才去下 work.coverUrl） */
   coverPath?: string
 }): Promise<boolean> {
-  if (!isOnlinePlayerEnabled()) return false
+  // 允许「只开在线看按钮」的部署：那种配置下弹幕不走播放器，但「在线看」这条要能落库
+  if (!isPlayerAvailable()) return false
   /**
    * 在线播放模式下的「处理阶段」：下载已经完成，接下来是登记播放会话 + 回链接。
    * 用户这时候点「下载进度」应该看到「正在准备在线播放」，而不是「当前没有正在进行的下载」。
@@ -459,8 +484,8 @@ export async function publishOnlinePlayer (e: any, input: {
  */
 export function setupOnlinePlayer (ctx: any): () => void {
   const runtime = tryGetRuntime()
-  if (!isOnlinePlayerEnabled()) {
-    logger.debug('[在线播放] 未开启在线播放器（通用 → 在线播放器设置 → 在线播放器）')
+  if (!isPlayerAvailable()) {
+    logger.debug('[在线播放] 未开启在线播放器（「弹幕重定向在线播放器」与「面板显示「在线看」按钮」都关着）')
     return () => {}
   }
   const dataRoot = runtime?.dataRoot ?? process.cwd()

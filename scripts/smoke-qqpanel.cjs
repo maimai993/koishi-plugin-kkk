@@ -151,6 +151,12 @@ setTimeout(async () => {
      * 播放器模式本身（默认开启、列头写「弹幕」）由 scripts/smoke-player.cjs 覆盖。
      */
     getRuntime().config.playerEnabled = false
+    /**
+     * 「在线看」按钮那个开关（playerWatchButton，默认开）也要关掉：
+     * 它开着时面板会多一列「在线看」（即使上面的弹幕重定向关着），本文件断言的是最朴素的
+     * 「清晰度 | 大小 / 烧录弹幕」布局。在线看列本身由 scripts/smoke-player.cjs 覆盖。
+     */
+    getRuntime().config.playerWatchButton = false
 
     console.log('\n[1] QQ 平台发 B站链接 → 只回面板（不解析、不下载）')
     const sent = await runCommand('B站', target)
@@ -179,6 +185,14 @@ setTimeout(async () => {
     const distinct = [...new Set(qualityButtons.map((b) => b.label))]
     check('最多保留 1 档画质（两行各一个按钮）', distinct.length <= 1, distinct.join(' / ') || '（无）')
     check('markdown 给出「发送可能失败」的提示', /可能失败/.test(tiny.markdown), tiny.markdown.match(/⚠️.*/)?.[0] ?? '（无提示）')
+    /**
+     * 播放器关掉时**保持老行为**：超限档位仍然不显示（点了也发不出去），也没有「在线看」列。
+     * 「在线播放模式下所有档位都要出现 + 在线看按钮」由 scripts/smoke-player.cjs 第 [9d] 节覆盖。
+     */
+    check('播放器关掉时没有「在线看」列 / 按钮（这一列只跟播放器走）',
+      !tiny.buttons.some((b) => String(b.data).includes('--play=1')) &&
+      !/在线看/.test(tiny.markdown),
+      (tiny.markdown.split('\n').find((l) => l.startsWith('| 清晰度')) || '（没有表格）'))
 
     console.log('\n[3] 烧录弹幕列：由配置面板决定（默认不显示），通用里的强制开关优先级最高')
     const { isBurnDanmakuSupported, isBurnDanmakuForbidden } = require(path.join(pluginRoot, 'lib/karin/module/utils/DanmakuPolicy.js'))
@@ -367,6 +381,32 @@ setTimeout(async () => {
     const handlerSource = fs.readFileSync(path.join(pluginRoot, 'lib/karin/module/utils/ErrorHandler/handler.js'), 'utf-8')
     check('ErrorHandler 里仍有「切片失败按原图发送」的兜底',
       handlerSource.includes('错误卡片切片失败，按原图发送') && /try\s*\{[\s\S]*sliceImageToMarkdown[\s\S]*?catch/.test(handlerSource))
+
+    console.log('\n[10] 「弹幕」与「在线看」按钮的合并规则（用户要求）')
+    {
+      const cfg = getRuntime().config
+      // 场景 1：只开「在线看」按钮（弹幕重定向关着）→ 面板上单独一列「在线看」
+      cfg.playerWatchButton = true
+      const wp = readPanel(await runCommand('B站', target))
+      const wpHead = wp.markdown.split('\n').find((l) => l.startsWith('| 清晰度')) || ''
+      check('只开「在线看」按钮时出现「在线看」列', /\| 在线看 \|/.test(wpHead), wpHead)
+      check('这一列有可点的「在线看」按钮', wp.buttons.some((b) => b.label === '在线看'),
+        wp.buttons.map((b) => b.label).join(' / '))
+      // 场景 2：打开「弹幕重定向在线播放器」→ 两个动作等价，合并成一个按钮
+      cfg.playerEnabled = true
+      const mp = readPanel(await runCommand('B站', target))
+      const mpHead = mp.markdown.split('\n').find((l) => l.startsWith('| 清晰度')) || ''
+      check('播放器打开后合并成一列「弹幕」', /\| 弹幕 \|/.test(mpHead) && !/在线看/.test(mpHead), mpHead)
+      check('合并后不再有单独的「在线看」按钮', !mp.buttons.some((b) => b.label === '在线看'),
+        mp.buttons.map((b) => b.label).join(' / '))
+      // 表格与后面的说明之间必须空一行，否则 markdown 会把提示吞进表格里（用户实测）
+      const allLines = mp.markdown.split('\n')
+      const hintAt = allLines.findIndex((l) => /超上限/.test(l) && !l.startsWith('|'))
+      check('表格后面的提示与表格之间有空行', hintAt === -1 || allLines[hintAt - 1].trim() === '',
+        hintAt === -1 ? '（本次没有提示行）' : '提示行的上一行=' + JSON.stringify(allLines[hintAt - 1]))
+      cfg.playerEnabled = false
+      cfg.playerWatchButton = false
+    }
 
     const failed = results.filter((item) => !item.ok)
     console.log('\n=== ' + (results.length - failed.length) + '/' + results.length + ' 通过 ===')

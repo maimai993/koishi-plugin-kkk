@@ -4,6 +4,7 @@
  * ## 界面
  * 照着 **B站播放页**（夜间模式）做的：深灰底 + 白字、标题大字最多两行、下面一行小图标统计数据
  * （播放量 / 弹幕数 / 发布时间 / UP 主）、视频下方一条**弹幕控制条**（弹幕开关 + 「弹幕设置」按钮），
+ * 播放器下面还有一个**下载按钮**（`/kkk/player/<token>/video?download=1`，服务端带 Content-Disposition），
  * 展开的面板里放字号 / 透明度 / 显示区域，再下面是B站那种操作按钮排（点赞 / 投币 / 收藏 / 评论 / 分享）。
  * 参照截图：_sandbox-test/bili-ref-desktop.png（1440x900）与 bili-ref-mobile.png（390x844）。
  *
@@ -102,7 +103,8 @@ const ICON = {
   pause: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M9.4 5.4v13.2M14.6 5.4v13.2"/></svg>',
   volume: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4.6 9.6h3L12 6v12l-4.4-3.6h-3z"/><path d="M15.4 9.6a3.4 3.4 0 0 1 0 4.8"/><path d="M18 7.2a7 7 0 0 1 0 9.6"/></svg>',
   muted: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4.6 9.6h3L12 6v12l-4.4-3.6h-3z"/><path d="m15.8 10 4.4 4.4M20.2 10l-4.4 4.4"/></svg>',
-  close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6.6 6.6l10.8 10.8M17.4 6.6L6.6 17.4"/></svg>'
+  close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6.6 6.6l10.8 10.8M17.4 6.6L6.6 17.4"/></svg>',
+  download: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.8v10.6"/><path d="m7.7 10.2 4.3 4.3 4.3-4.3"/><path d="M4.8 19.6h14.4"/></svg>'
 }
 
 /** 公共样式：B站夜间模式那套配色（#18191c 底 + 白字） */
@@ -230,6 +232,14 @@ const PLAYER_STYLE = [
   '.actions{display:flex;align-items:center;gap:44px;margin:18px 2px 6px;flex-wrap:wrap;}',
   '.act{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-size:14px;cursor:default;}',
   '.act svg{font-size:21px;color:#c9ccd3}',
+  /* 下载按钮：B站那排操作按钮里「下载」的位置，做成实心主色按钮，一眼能看见 */
+  '.downbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:14px 2px 2px;}',
+  '.dlbtn{display:inline-flex;align-items:center;gap:8px;height:38px;padding:0 18px;border-radius:8px;',
+  'background:var(--pink);color:#fff;font-size:14px;font-weight:600;cursor:pointer;}',
+  '.dlbtn svg{font-size:20px}',
+  '.dlbtn:hover{background:#ff8aac}',
+  '.dlbtn:focus-visible{outline:2px solid #fff;outline-offset:2px}',
+  '.dlhint{color:var(--muted);font-size:12px;}',
   /* 没配公网地址时的提示条：用户打不开得知道是「没配域名」，不是「插件坏了」 */
   '.warnlocal{margin-top:14px;padding:10px 13px;border:1px solid #5d3a22;background:#2a1d14;color:#ffcfa8;',
   'border-radius:10px;font-size:13px;line-height:1.75;}',
@@ -251,6 +261,8 @@ const PLAYER_STYLE = [
   '.dmpanel .dmlabel{flex:0 0 50px}',
   '.dmpanel-head{gap:6px}',
   '.actions{gap:0;justify-content:space-between}',
+  '.downbar{margin-top:12px}',
+  '.dlbtn{height:36px;padding:0 14px;font-size:13px}',
   '.act{font-size:12px;gap:4px}',
   '.act svg{font-size:19px}',
   '.segbtn{padding:8px 12px;min-width:46px}',
@@ -369,10 +381,20 @@ export function renderPlayerPage (info: PlayerPageInfo): string {
     + '      </div>\n'
     + '    </div>\n'
     + '  </div>\n'
+    /**
+     * 下载按钮（用户要求「网页界面可以下载」）：
+     * 走 `/video?download=1`，服务端会带上 `Content-Disposition: attachment` 与处理过的文件名。
+     * 放在播放器下面单独一条 —— 作品信息可能缺（那时不会渲染操作按钮排），下载入口不能跟着一起消失。
+     */
+    + '  <div class="downbar">'
+    + '<a class="dlbtn" id="downloadBtn" href="/kkk/player/' + token + '/video?download=1" download>'
+    + ICON.download + '<span>下载视频</span></a>'
+    + '<span class="dlhint">保存到本机（原画质，不重新编码）</span></div>\n'
     + (actions ? '  <div class="actions">' + actions + '</div>\n' : '')
     + (info.localOnly
-      ? '  <div class="warnlocal">这条链接<b>只有本机 / 内网能打开</b>：管理员还没有配置「播放器公网地址」。'
-        + '公网访问请在「通用 → 在线播放器设置 → 播放器公网地址」里填上自己的域名（例如播放页的 https 地址）。</div>\n'
+      ? '  <div class="warnlocal"><b>未配置公网地址，仅本机可访问</b>：这条链接用的是管理员机器的本机地址，'
+        + '只有本机 / 内网能打开。公网访问请让管理员在「通用 → 在线播放器设置 → 播放器公网地址」里填上自己的域名'
+        + '（就是用户能访问到的那个域名），再用 Nginx / Caddy 之类把域名代理到播放器端口。</div>\n'
       : '')
     + '  <div class="foot">'
     + (expire ? '链接有效期至 ' + expire + '<span class="dot">|</span>' : '')

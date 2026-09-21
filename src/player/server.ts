@@ -3,7 +3,8 @@
  *
  * 三条路由（都挂在自己拼的 `/kkk/player` 前缀下，和配置面板的 /kkk 互不干扰）：
  *   GET /kkk/player/:token           播放页（HTML）
- *   GET /kkk/player/:token/video     视频本体，支持 Range（拖进度条靠它）
+ *   GET /kkk/player/:token/video     视频本体，支持 Range（拖进度条靠它）；`?download=1` = 下载
+ *   GET /kkk/player/:token/download  同上，等价于 `/video?download=1`（带 Content-Disposition）
  *   GET /kkk/player/:token/danmaku   弹幕 JSON
  *
  * 两种落地方式：
@@ -35,6 +36,8 @@ export interface PlayerHttpRequest {
   path: string
   /** Range 头原文 */
   range?: string
+  /** 查询串（可带前导 '?'）：目前只认 download=1（下载而不是在页面里播放） */
+  query?: string
 }
 
 /** 一次响应：body 或 file 二选一 */
@@ -89,8 +92,48 @@ function parseRange (range: string | undefined, size: number): { start: number, 
   return { start, end: Math.min(end, size - 1) }
 }
 
-/** 视频响应：支持 Range，未过期时是 video/mp4 */
-function videoResponse (token: string, range?: string, head = false): PlayerHttpResponse {
+/**
+ * 下载文件名（不含路径）：把视频标题清洗成一个能安全落盘的名字。
+ *
+ * 标题是用户内容，直接拿来当文件名有两个坑：
+ *   1. 里面可能有 `/` `\\` `..` 与控制字符 —— 客户端落盘时就是路径穿越 / 写坏文件名；
+ *   2. HTTP 头只能装 Latin-1 字节，中文直接写进 `filename=` 会让 Node 抛 ERR_INVALID_CHAR。
+ * 所以这里清洗 + 截断（80 字符），空的就退回 video。
+ */
+export function sanitizeDownloadName (title: unknown): string {
+  const name = String(title ?? '')
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .replace(/[\\/:*?"<>|]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^[.\s]+/, '')
+    .slice(0, 80)
+    .replace(/[.\s]+$/, '')
+    .trim()
+  return name || 'video'
+}
+
+/**
+ * `Content-Disposition` 的值：`attachment` + 安全文件名。
+ *
+ * 两个文件名都给：`filename=` 用 ASCII 兜底名（老客户端 / 头编码限制），
+ * `filename*=` 用 RFC 5987 的 UTF-8 形式放原名（现代浏览器优先用它，中文名不会变成下划线）。
+ */
+export function downloadDisposition (title: unknown): string {
+  const full = sanitizeDownloadName(title) + '.mp4'
+  // 纯中文标题会变成一排下划线（对老客户端毫无意义），这种情况直接给个通用名
+  const asciiRaw = full.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_')
+  // 只在**扩展名之前**数有效字符：纯中文标题会变成「_____.mp4」，那 3 个字母来自 .mp4 不能算数
+  const asciiBase = asciiRaw.replace(/\.(mp4|mkv|webm|mov)$/i, '')
+  const ascii = /[A-Za-z0-9]/.test(asciiBase) ? asciiRaw : 'video.mp4'
+  const encoded = encodeURIComponent(full).replace(/['()*]/g, (char) => '%' + char.charCodeAt(0).toString(16).toUpperCase())
+  return 'attachment; filename="' + ascii + '"; filename*=UTF-8\'\'' + encoded
+}
+
+/**
+ * 视频响应：支持 Range，未过期时是 video/mp4。
+ * @param download 为 true 时带上 `Content-Disposition: attachment`（浏览器直接下载），Range 照旧支持
+ */
+function videoResponse (token: string, range?: string, head = false, download = false): PlayerHttpResponse {
   const video = resolvePlayerVideo(token)
   if (!video) return notFound(false)
   const base: Record<string, string> = {
@@ -98,6 +141,8 @@ function videoResponse (token: string, range?: string, head = false): PlayerHttp
     'Accept-Ranges': 'bytes',
     'Cache-Control': 'no-store'
   }
+  // 下载：文件名取会话标题（清洗过），Range 行为不变（浏览器正常下载时也不会带 Range）
+  if (download) base['Content-Disposition'] = downloadDisposition(getPlayerSession(token)?.title)
   const parsed = parseRange(range, video.size)
   if (parsed === 'invalid') {
     return {
@@ -157,6 +202,9 @@ function danmakuResponse (token: string): PlayerHttpResponse {
 export async function handlePlayerRequest (request: PlayerHttpRequest): Promise<PlayerHttpResponse> {
   const method = String(request.method ?? 'GET').toUpperCase()
   const path = String(request.path ?? '')
+  /** 查询参数：目前只认 download（`?download=1` = 下载而不是在页面里播放） */
+  const query = new URLSearchParams(String(request.query ?? '').replace(/^\?/, ''))
+  const wantDownload = query.has('download') && query.get('download') !== '0'
   // 播放器不开时路由整块不存在（调用方根本不会注册，这里再兜一层）
   if (!path.startsWith(PLAYER_ROUTE_PREFIX)) return notFound(false)
   if (method !== 'GET' && method !== 'HEAD') {
@@ -179,7 +227,9 @@ export async function handlePlayerRequest (request: PlayerHttpRequest): Promise<
       body: Buffer.from(renderPlayerPage(session))
     }
   }
-  if (action === 'video') return videoResponse(token, request.range, method === 'HEAD')
+  if (action === 'video') return videoResponse(token, request.range, method === 'HEAD', wantDownload)
+  // 独立路由：`/kkk/player/<token>/download` 与 `/video?download=1` 完全等价
+  if (action === 'download') return videoResponse(token, request.range, method === 'HEAD', true)
   if (action === 'danmaku') return danmakuResponse(token)
   if (action === 'cover') return coverResponse(token)
   return notFound(false)
@@ -228,7 +278,12 @@ export function registerPlayerRoutes ({ ctx, port }: { ctx: any, port: number })
         const raw = String(req.url ?? '/')
         const queryAt = raw.indexOf('?')
         const path = decodeURIComponent(queryAt >= 0 ? raw.slice(0, queryAt) : raw)
-        const response = await handlePlayerRequest({ method, path, range: String(req.headers.range ?? '') })
+        const response = await handlePlayerRequest({
+          method,
+          path,
+          range: String(req.headers.range ?? ''),
+          query: queryAt >= 0 ? raw.slice(queryAt) : ''
+        })
         await writeNode(res, response, method === 'HEAD')
       }
       handle().catch((error: any) => {
@@ -272,12 +327,15 @@ function registerOnKoishi (ctx: any, disposers: Array<() => void>): void {
     const response = await handlePlayerRequest({
       method: String(koa.method ?? 'GET'),
       path: PLAYER_ROUTE_PREFIX + token + (action ? '/' + action : ''),
-      range: String(koa.headers?.range ?? '')
+      range: String(koa.headers?.range ?? ''),
+      // koa.search 形如 '?download=1'；旧的 querystring 不带问号也没关系（handlePlayerRequest 会去掉）
+      query: String(koa.search ?? koa.querystring ?? '')
     })
     await writeKoa(koa, response)
   }
   server.get('/kkk/player/:token', (koa: any) => route(koa, String(koa.params?.token ?? ''), ''))
   server.get('/kkk/player/:token/video', (koa: any) => route(koa, String(koa.params?.token ?? ''), 'video'))
+  server.get('/kkk/player/:token/download', (koa: any) => route(koa, String(koa.params?.token ?? ''), 'download'))
   server.get('/kkk/player/:token/danmaku', (koa: any) => route(koa, String(koa.params?.token ?? ''), 'danmaku'))
   logger.info('[在线播放] 播放路由已挂到 Koishi 端口：/kkk/player/:token')
 }

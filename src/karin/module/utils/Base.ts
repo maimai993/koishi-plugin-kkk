@@ -13,8 +13,14 @@ import { AmagiBase } from './amagiClient'
 // 群文件阈值来自 Koishi 侧配置：Config 是上游 config.json 的 Proxy，
 // 取不到 qqGroupFileLimitMB 时会返回 {}，Number({}) 就是 NaN —— 阈值失效的元凶
 import { tryGetRuntime } from '../../../compat/runtime'
-// 超限转在线播放：视频超过全局体积上限时，不拒绝而是挂到播放页（见 src/player）
-import { effectivePlayerSizeLimitMB, markOnlinePlayerOverride, shouldRedirectOversizeToPlayer, withinPlayerSizeLimit } from '../../../player'
+// 超限转在线播放 / 在线播放不受 QQ 体积上限约束（见 src/player）
+import {
+  effectivePlayerSizeLimitMB,
+  isOnlinePlayerRequest,
+  markOnlinePlayerOverride,
+  shouldRedirectOversizeToPlayer,
+  withinPlayerSizeLimit
+} from '../../../player'
 // 解析阶段（「下载进度」指令读的就是这里登记的状态）
 import { DOWNLOAD_STAGES, clearParseStage, updateDownloadStage } from './Network/Downloader'
 
@@ -405,30 +411,22 @@ export const downloadVideoFile = async (event: Message, downloadOpt: downloadFil
   const fileSize = parseInt(parseFloat(fileSizeInMB).toFixed(2))
   if (fileSizeContent > 0 && Config.app.usefilelimit && fileSize > Config.app.filelimit) {
     /**
-     * 「超限转在线播放」也不能突破「在线播放最大文件」这条上限（用户实测要求）：
-     * 转播的意义是「让看不了的视频还能看」，不是「把几十 GB 搬进播放器目录把磁盘塞满」。
-     * 上限口径：playerMaxFileMB 显式填了就用它，留空 / 0 = 跟随全局（就是上面这个 filelimit）。
+     * 上限口径（两条）：
+     *   1. 「在线播放最大文件」（playerMaxFileMB）显式填了就用它；留空 / 0 = 跟随全局
+     *      （就是上面这个 filelimit）；全局没开限制就是不限制；
+     *   2. **在线播放不要 QQ 那套限制**：面板上的「在线看」/「弹幕」都不把视频发到 QQ，
+     *      用户是在播放页里看的，所以「QQ 单个视频 200MB」在这里没有意义 ——
+     *      批量超限的画质档因此也能点（只受第 1 条那个上限约束，判定依旧早于搬文件）。
      */
     const playerLimitMB = effectivePlayerSizeLimitMB(Number(Config.app.filelimit))
     const playerAccepts = withinPlayerSizeLimit(parseFloat(fileSizeInMB), Number(Config.app.filelimit))
     const redirectOn = shouldRedirectOversizeToPlayer()
-    if (redirectOn && playerAccepts) {
-      /**
-       * 「超限转在线播放」：视频还是**照常下载**（只是改由播放页提供，不再发到群里）。
-       *
-       * 这里只负责把本次解析标记成在线播放 —— 平台 handler 后面读 isOnlinePlayerRequest()
-       * 就知道该登记播放会话、回链接，而不是调 uploadFile。
-       */
-      markOnlinePlayerOverride()
-      logger.mark(`[在线播放] 视频 ${fileSizeInMB}MB 超过全局上限 ${Config.app.filelimit}MB，按「超限转在线播放」继续下载`)
-    } else {
-      // 转播开着但这一档连在线播放上限都超了：明确说一句「按原来的方式处理」，别让人以为是坏了
-      const oversizeNote = redirectOn && !playerAccepts
-        ? `（超过在线播放的体积上限 ${Math.round(playerLimitMB)}MB，按原来的方式处理）`
-        : ''
-      if (redirectOn && !playerAccepts) {
-        logger.info(`[在线播放] 视频 ${fileSizeInMB}MB 超过在线播放上限 ${Math.round(playerLimitMB)}MB，不转播，按原来的方式处理`)
-      }
+    const onlinePlayerNow = isOnlinePlayerRequest()
+    const oversizeNote = (onlinePlayerNow || redirectOn) && !playerAccepts
+      ? `（超过在线播放的体积上限 ${Math.round(playerLimitMB)}MB，按原来的方式处理）`
+      : ''
+    /** 超限时的统一动作：回一句说明并放弃这次下载（调用方按「没下到视频」继续） */
+    const rejectOversize = async (): Promise<null> => {
       const message = segment.text(
         `视频：「${
           downloadOpt.title.originTitle ?? 'Error: 文件名获取失败'
@@ -439,6 +437,29 @@ export const downloadVideoFile = async (event: Message, downloadOpt: downloadFil
 
       await karin.sendMsg(selfId, contact, message)
       return null
+    }
+    if (onlinePlayerNow) {
+      // 在线播放：QQ 的上限不拦它，但如果连在线播放自己的上限也超了，就一点都不下（免得塞满磁盘）
+      if (!playerAccepts) {
+        logger.info(`[在线播放] 视频 ${fileSizeInMB}MB 超过在线播放上限 ${Math.round(playerLimitMB)}MB，不转到播放器，按原来的方式处理`)
+        return await rejectOversize()
+      }
+      logger.mark(`[在线播放] 视频 ${fileSizeInMB}MB 超过 QQ 上限 ${Config.app.filelimit}MB，但这次走在线播放（不发到 QQ），继续下载`)
+    } else if (redirectOn && playerAccepts) {
+      /**
+       * 「超限转在线播放」：视频还是**照常下载**（只是改由播放页提供，不再发到群里）。
+       *
+       * 这里只负责把本次解析标记成在线播放 —— 平台 handler 后面读 isOnlinePlayerRequest()
+       * 就知道该登记播放会话、回链接，而不是调 uploadFile。
+       */
+      markOnlinePlayerOverride()
+      logger.mark(`[在线播放] 视频 ${fileSizeInMB}MB 超过全局上限 ${Config.app.filelimit}MB，按「超限转在线播放」继续下载`)
+    } else {
+      // 转播开着但这一档连在线播放上限都超了：明确说一句「按原来的方式处理」，别让人以为是坏了
+      if (redirectOn && !playerAccepts) {
+        logger.info(`[在线播放] 视频 ${fileSizeInMB}MB 超过在线播放上限 ${Math.round(playerLimitMB)}MB，不转播，按原来的方式处理`)
+      }
+      return await rejectOversize()
     }
   }
 

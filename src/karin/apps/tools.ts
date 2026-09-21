@@ -146,14 +146,21 @@ const handleDouyin = wrapWithErrorHandler(
     }
 
     /**
-     * 是否为弹幕解析：指令 `弹幕解析 <链接>` 触发，或者解析面板里点了带弹幕的那一档（命令里带 --dm=1）。
-     *
-     * 两种落地方式：
-     *   - 通用里「在线播放器」开着 → **在线播放**（不烧录，登记播放会话后回一条链接）；
-     *   - 关着 → 老流程，交给 resolveBurnDanmaku 判定能不能真烧（没 ffmpeg 就提示一句并降级成纯视频）。
+     * 本次要不要「带弹幕」以及在哪落地，一共有三个入口：
+     *   - **面板上的「在线看」（命令里带 `--play=1`）**：要的是播放页，视频压根不发到群里，
+     *     所以它**不看弹幕总开关**（面板弹幕列关着、强制不烧录开着都照样带弹幕），
+     *     只看播放器总开关 —— 见下面的 onlineWatch；
+     *   - 指令 `弹幕解析 <链接>`，或者解析面板里点了带弹幕的那一档（命令里带 `--dm=1`）：
+     *     通用里「在线播放器」开着 → **在线播放**（不烧录，登记播放会话后回一条链接）；
+     *     关着 → 老流程，交给 resolveBurnDanmaku 判定能不能真烧（没 ffmpeg 就提示一句并降级成纯视频）。
      */
     const requestBurnDanmaku = flags.override.burnDanmaku === true || /^#?弹幕解析/.test(e.msg)
-    const onlinePlayer = requestBurnDanmaku && isOnlinePlayerEnabled()
+    /**
+     * 面板上的「在线看」（`--play=1`）：语义是「视频别发到群里，直接给我一个带弹幕的播放页」，
+     * 因此**不经过弹幕总开关**（配置里弹幕功能关着也一定带弹幕），只要播放器总开关开着就成立。
+     */
+    const onlineWatch = flags.override.onlineWatch === true && isOnlinePlayerEnabled()
+    const onlinePlayer = onlineWatch || (requestBurnDanmaku && isOnlinePlayerEnabled())
 
     const urlMatch = e.msg.match(/(https?:\/\/[^\s]*\.(douyin|iesdouyin)\.com[^\s]*)/gi)
     if (!urlMatch) {
@@ -223,14 +230,21 @@ const handleBilibili = wrapWithErrorHandler(
     e.msg = e.msg.replace(/\\/g, '') // 移除消息中的反斜杠
 
     /**
-     * 是否为弹幕解析：指令 `弹幕解析 <链接>` 触发，或者解析面板里点了带弹幕的那一档（命令里带 --dm=1）。
-     *
-     * 两种落地方式：
-     *   - 通用里「在线播放器」开着 → **在线播放**（不烧录，登记播放会话后回一条链接）；
-     *   - 关着 → 老流程，交给 resolveBurnDanmaku 判定能不能真烧（没 ffmpeg 就提示一句并降级成纯视频）。
+     * 本次要不要「带弹幕」以及在哪落地，一共有三个入口：
+     *   - **面板上的「在线看」（命令里带 `--play=1`）**：要的是播放页，视频压根不发到群里，
+     *     所以它**不看弹幕总开关**（面板弹幕列关着、强制不烧录开着都照样带弹幕），
+     *     只看播放器总开关 —— 见下面的 onlineWatch；
+     *   - 指令 `弹幕解析 <链接>`，或者解析面板里点了带弹幕的那一档（命令里带 `--dm=1`）：
+     *     通用里「在线播放器」开着 → **在线播放**（不烧录，登记播放会话后回一条链接）；
+     *     关着 → 老流程，交给 resolveBurnDanmaku 判定能不能真烧（没 ffmpeg 就提示一句并降级成纯视频）。
      */
     const requestBurnDanmaku = flags.override.burnDanmaku === true || /^#?弹幕解析/.test(e.msg)
-    const onlinePlayer = requestBurnDanmaku && isOnlinePlayerEnabled()
+    /**
+     * 面板上的「在线看」（`--play=1`）：语义是「视频别发到群里，直接给我一个带弹幕的播放页」，
+     * 因此**不经过弹幕总开关**（配置里弹幕功能关着也一定带弹幕），只要播放器总开关开着就成立。
+     */
+    const onlineWatch = flags.override.onlineWatch === true && isOnlinePlayerEnabled()
+    const onlinePlayer = onlineWatch || (requestBurnDanmaku && isOnlinePlayerEnabled())
 
     const urlRegex = /(https?:\/\/(?:(?:www\.|m\.|t\.)?bilibili\.com|b23\.tv|bili2233\.cn)\/[a-zA-Z0-9_\-.~:/?#[\]@!$&'()*+,;=]+)/
     const bvRegex = /^BV[1-9a-zA-Z]{10}$/

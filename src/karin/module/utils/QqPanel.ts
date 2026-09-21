@@ -739,7 +739,23 @@ export async function sendQqParsePanel (e: Message, request: PanelRequest): Prom
   if (!info || !info.options.length) return false
 
   const limit = Number(runtime.config.qqFileLimitMB ?? 200) || 200
-  const visible = info.options.filter((option) => option.sizeMB <= limit)
+  /**
+   * 在线播放模式（通用 → 在线播放器设置 →「弹幕重定向在线播放器」，缺省即开启）。
+   *
+   * 它决定三件事：中间那一列写「弹幕」还是「烧录弹幕」、要不要多一列「在线看」、
+   * 以及**画质档位不再按 QQ 的体积上限过滤**（见下面的 visible）。
+   */
+  const onlinePlayer = runtime.config.playerEnabled !== false
+  /**
+   * 面板里展示哪几档画质。
+   *
+   *   - **在线播放模式：全部**。视频不发到 QQ（交给播放页），所以「QQ 单个视频 200MB」
+   *     这条硬限制在这里没有意义，再拿它藏档位就会变成「用户永远看不到 200MB 以上的
+   *     4K / 8K 档」（用户实测反馈：「还是没有出现画质超过 200mb 的按钮」）；
+   *     超限的档位只是把「清晰度」（= 发到 QQ）那一格标成「超上限」，右边的「在线看」照常可用。
+   *   - 烧录模式（播放器关掉）：还是老规矩，超限档位直接不显示（点了也发不出去）。
+   */
+  const visible = onlinePlayer ? info.options : info.options.filter((option) => option.sizeMB <= limit)
   // 一档都不满足就别把面板做空：保留最小的一档并明确提示，否则用户连解析都点不了
   const overflow = visible.length === 0
   const shown = overflow ? [info.options[info.options.length - 1]] : visible
@@ -775,22 +791,30 @@ export async function sendQqParsePanel (e: Message, request: PanelRequest): Prom
   const qualityFlag = request.platform === 'bilibili' ? '--qn=' : '--q='
   /**
    * 一个按钮：点下去**直接按这一档画质解析**。
-   * @param burn 为 true 时命令里多带一个 `--dm=1` —— 这一档画质按「带弹幕」解析
-   *   （通用里「弹幕重定向在线播放器」开着时是在线播放，关着时是真烧录，由 tools.ts 判定）
+   * @param flag 'dm' = 这次带弹幕（命令里多一个 `--dm=1`，播放器开着时是在线播放、关着时是真烧录）；
+   *   'play' = 直接在线看（命令里多一个 `--play=1`，见 ParseOverride 的 onlineWatch）
    */
-  const cell = (command: string, id: string | number, label: string, burn = false) =>
-    cmdInput(command + ' ' + (urlPart || short) + ' ' + short + ' ' + qualityFlag + id + (burn ? ' --dm=1' : ''), label)
+  const cell = (command: string, id: string | number, label: string, flag?: 'dm' | 'play') =>
+    cmdInput(command + ' ' + (urlPart || short) + ' ' + short + ' ' + qualityFlag + id
+      + (flag === 'dm' ? ' --dm=1' : flag === 'play' ? ' --play=1' : ''), label)
+
+  /** 超上限的那一格用什么文字：markdown 里的按钮没有 disabled 状态，不给按钮才是真的点不了 */
+  const OVER_LIMIT = '超上限'
 
   /**
-   * 表格排版。
-   *   - 默认（不带弹幕）：清晰度 / 大小 两列，「清晰度」本身就是按钮
-   *   - 带弹幕：清晰度 / 弹幕 / 大小 三列 —— 中间那列是按这一档画质
-   *     **带弹幕**解析的按钮（命令里带 `--dm=1`），原「清晰度」按钮仍是纯视频
-   * 两种模式共用这一列，文案和落地方式不同：
-   *   - 通用里「弹幕重定向在线播放器」开着 → 列头/按钮写「弹幕」，点它是**在线播放**（不需要 ffmpeg）；
-   *   - 关着 → 老流程，写「烧录弹幕」，需要机器上有 ffmpeg + 关掉「强制不烧录弹幕」。
+   * 表格排版（有哪几列由配置决定）。
    *
-   * 这一列出不出现的规则（用户实测反馈过：开了在线播放器却没有按钮）：
+   *   - 在线播放模式：「清晰度 | 弹幕 | 在线看 | 大小」，「在线看」那一列还要再看
+   *     「面板显示「在线看」按钮」（playerWatchButton，默认开）；
+   *   - 烧录模式（播放器关掉）：「清晰度 | 烧录弹幕 | 大小」，或者关掉面板弹幕列时的「清晰度 | 大小」。
+   *
+   * 三列按钮的语义（命令参数各不相同，别混用）：
+   *   - **清晰度**：纯视频，**发到 QQ**（超过 qqFileLimitMB 的档发不出去，那一格标「超上限」）；
+   *   - **弹幕**：这次要弹幕（`--dm=1`）。播放器开着时它落的也是在线播放（不烧录），关着时才是真烧录；
+   *   - **在线看**：直接在线播放（`--play=1`），**一定带弹幕** —— 面板弹幕列关着、
+   *     通用里弹幕功能关着都不影响它，视频不发到群里（用户要求：在线看不管有没有选弹幕默认都有弹幕）。
+   *
+   * 弹幕那一列出不出现的规则（用户实测反馈过：开了在线播放器却没有按钮）：
    *   - **在线播放模式：跟着「弹幕重定向在线播放器」走，开着就显示**
    *     —— 用户打开这个开关的意思就是「弹幕走在线播放」，面板上当然得有入口，
    *     再要求他去 QQ 适配器里另开一个「面板显示烧录弹幕列」是没道理的；
@@ -798,47 +822,97 @@ export async function sendQqParsePanel (e: Message, request: PanelRequest): Prom
    *     「面板显示「烧录弹幕」列」（默认关）+ 能不能真烧（ffmpeg + 强制不烧录弹幕关掉）共同决定。
    */
   // 缺省即开启（和「打开原站」开关一个口径）：老配置里没有这个键时，列头也是「弹幕」
-  const onlinePlayer = runtime.config.playerEnabled !== false
   const danmakuLabel = onlinePlayer ? '弹幕' : '烧录弹幕'
   const danmakuEnabled = onlinePlayer || (runtime.config.qqPanelDanmaku === true && isBurnDanmakuSupported())
   /**
+   * 「弹幕」和「在线看」合并成一列的情形（用户要求）。
+   *
+   * 「弹幕重定向在线播放器」开着时，点「弹幕」落的**就是**在线播放（带弹幕、视频不发群），
+   * 跟「在线看」完全同一个动作 —— 再并排放两个按钮，用户只会疑惑「这俩有什么区别」。
+   * 所以这种模式下只留一列（按钮文案仍是用户熟悉的「弹幕」）。
+   * 关掉播放器（回到烧录模式）时两者语义不同（真烧录 vs 在线播放），才分开两列。
+   */
+  const mergedWatch = onlinePlayer
+  /**
+   * 「在线看」那一列：
+   *   - 合并模式下不单独出现（见 mergedWatch）；
+   *   - 否则要满足通用里的「面板显示「在线看」按钮」（playerWatchButton，默认开，用户要的就是这个按钮）。
+   */
+  const watchEnabled = !mergedWatch && runtime.config.playerWatchButton !== false
+  /**
    * 在线播放的体积上限（「在线播放最大文件」显式填了就用它，留空跟随全局；0 = 不限制）。
    *
-   * 超过这一档的预估体积就不该给「弹幕」按钮：点了也只会退回原来的发送流程，
+   * 超过这一档的预估体积就不该给「弹幕 / 在线看」按钮：点了也只会退回原来的发送流程，
    * 用户白点一次还以为坏了（用户实测反馈）。这里直接把那一格换成「超上限」文字 ——
    * markdown 里的按钮没有 disabled 状态，不给按钮才是真的点不了。
    */
   const playerLimitMB = onlinePlayer ? await resolvePlayerSizeLimitMB() : 0
   const overPlayerLimit = (sizeMB: number): boolean =>
     onlinePlayer && playerLimitMB > 0 && Number(sizeMB) > playerLimitMB
+  /**
+   * 超过 QQ 档位上限（`qqFileLimitMB`，默认 200MB）的档位。
+   *
+   * 在线播放模式下这些档**照样列在面板里**（视频不发到 QQ），只是「清晰度」那一格不给按钮 ——
+   * 那一格的含义就是「发到 QQ」，超了确实发不出去；想在线看就点同行右边的「在线看」。
+   */
+  const overQqLimit = (sizeMB: number): boolean => onlinePlayer && Number(sizeMB) > limit
   let playerLimitHit = false
-  if (danmakuEnabled) {
-    lines.push('| 清晰度 | ' + danmakuLabel + ' | 大小 |')
-    lines.push('| :--- | :---: | ---: |')
-    for (const option of shown) {
-      const size = Math.round(option.sizeMB) + 'M'
-      let danmakuCell = cell(parseCommand, option.id, danmakuLabel, true)
+  let qqLimitHit = false
+  const columns = ['清晰度'].concat(danmakuEnabled ? [danmakuLabel] : [], watchEnabled ? ['在线看'] : [], ['大小'])
+  const aligns = [' :--- '].concat(danmakuEnabled ? [' :---: '] : [], watchEnabled ? [' :---: '] : [], [' ---: '])
+  // 表头前也空一行：上一行是卡片图（![#Wpx #Hpx](…)），紧贴着会被当成表格的一部分
+  lines.push('')
+  lines.push('| ' + columns.join(' | ') + ' |')
+  lines.push('|' + aligns.join('|') + '|')
+  for (const option of shown) {
+    const size = Math.round(option.sizeMB) + 'M'
+    const cells: string[] = []
+    // 清晰度：这一格是「发到 QQ」。超了 QQ 的档位上限就不给按钮（在线播放模式下那一档仍然列出来）
+    if (overQqLimit(option.sizeMB)) {
+      // 仍然写清是哪一档（只是没有按钮）：markdown 里的「按钮」没法禁用，去掉按钮、保留档位名
+      cells.push(option.label + ' ' + OVER_LIMIT)
+      qqLimitHit = true
+    } else {
+      cells.push(cell(parseCommand, option.id, option.label))
+    }
+    if (danmakuEnabled) {
+      let danmakuCell = cell(parseCommand, option.id, danmakuLabel, 'dm')
       if (overPlayerLimit(option.sizeMB)) {
         // 在线播放模式下这一档超过上限：不给按钮，标清楚「超上限」
-        danmakuCell = onlinePlayer ? '超上限' : danmakuCell
+        danmakuCell = onlinePlayer ? OVER_LIMIT : danmakuCell
         if (onlinePlayer) playerLimitHit = true
       }
-      lines.push('| ' + cell(parseCommand, option.id, option.label) + ' | ' + danmakuCell + ' | ' + size + ' |')
+      cells.push(danmakuCell)
     }
-    if (playerLimitHit) {
-      lines.push('标「超上限」的画质超过在线播放的体积上限（' + Math.round(playerLimitMB) + 'MB），'
-        + '想在线播放请选更小的画质；那些档位点「清晰度」仍可按原来的方式发送。')
+    if (watchEnabled) {
+      if (overPlayerLimit(option.sizeMB)) {
+        cells.push(OVER_LIMIT)
+        playerLimitHit = true
+      } else {
+        cells.push(cell(parseCommand, option.id, '在线看', 'play'))
+      }
     }
-  } else {
-    // 没开弹幕时，画质名直接当按钮，省掉中间那一步
-    lines.push('| 清晰度 | 大小 |')
-    lines.push('| :--- | ---: |')
-    for (const option of shown) {
-      const size = Math.round(option.sizeMB) + 'M'
-      lines.push('| ' + cell(parseCommand, option.id, option.label) + ' | ' + size + ' |')
-    }
+    cells.push(size)
+    lines.push('| ' + cells.join(' | ') + ' |')
   }
-  // 一档都不满足体积上限：仍给出最小的一档（否则用户连解析都点不了），但要说清楚风险
+  /**
+   * 表格与后面的说明之间**必须空一行**：markdown 的表格会把它紧跟着的下一行也当成表格行渲染，
+   * 之前「标「超上限」的画质…」这句就被吞进表格里了（用户实测反馈）。
+   */
+  const hasTextAfterTable = qqLimitHit || playerLimitHit || overflow ||
+    (runtime.config.qqPanelSourceLink !== false && !!request.url)
+  if (hasTextAfterTable) lines.push('')
+  if (qqLimitHit) {
+    lines.push('标「超上限」的画质超过 QQ 的档位上限（' + limit + 'MB），发不到 QQ；想在线看请点同行右边的「在线看」。')
+  }
+  if (playerLimitHit) {
+    lines.push('标「超上限」的画质超过在线播放的体积上限（' + Math.round(playerLimitMB) + 'MB），'
+      + '想在线播放请选更小的画质；还能发到 QQ 的档位点「清晰度」仍按原来的方式发送。')
+  }
+  /**
+   * 一档都不满足体积上限：仍给出最小的一档（否则用户连解析都点不了），但要说清楚风险。
+   * 在线播放模式下不会走到这里 —— 那种模式下列表不过滤，所有档位都列出来了。
+   */
   if (overflow) lines.push('所有画质都超过体积上限（' + limit + 'MB），这里只保留最小的一档，发送可能失败。')
   /**
    * 「打开原站」：放在表格下方（用户要求的位置）——用户看完卡片和画质后，

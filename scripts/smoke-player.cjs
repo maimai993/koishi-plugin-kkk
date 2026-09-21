@@ -16,6 +16,10 @@
  *  11. 端到端：视频超过全局上限 + 开着转播开关 → 真的被转到在线播放（B站链路，视频源是本机小服务）；
  *  12. 弹幕设置：任意百分比（字号 / 透明度）、颜色解析与「彩色弹幕」开关、三类弹幕开关与位置
  *      （顶部贴顶 / 底部贴底 / 滚动自上而下）、默认值（显示区域 1/4 · 透明度 50 · 字号小）与全屏拦截。
+ *  13. 面板「在线看」：列与按钮（`--play=1`）、超过 QQ 档位上限（200MB）的画质档照样出现、
+ *      「在线播放最大文件」上限对它的约束、以及「面板显示「在线看」按钮」开关；
+ *  14. 端到端「在线看」：视频不发到 QQ、弹幕功能关着也带弹幕；
+ *  15. 播放页下载按钮 + `?download=1` / `/download` 的 Content-Disposition 与文件名清洗。
  *
  * 用独立端口 15200（不占 Koishi 的 5200），所以「播放器端口」这条链路也一并验证了。
  *
@@ -146,6 +150,11 @@ const makeBitRate = (definition, sizeMB) => ({
   video_extra: JSON.stringify({ definition }),
   play_addr: { uri: 'v', url_list: ['https://www.w3schools.com/html/mov_bbb.mp4'], data_size: Math.round(sizeMB * 1024 * 1024) }
 })
+/**
+ * 抖音的档位列表**可替换**：默认两档（都在 QQ 的 200MB 上限之内），
+ * 第 [9d] 节会临时插一个 300MB 的 4K 档，验证「超过 200MB 的档位在线播放模式下也要出现」。
+ */
+let douyinBitRates = [makeBitRate('1080p', 80), makeBitRate('720p', 20)]
 amagi.default = function (options) {
   const client = realFactory(options)
   client.douyin.fetcher.parseWork = async () => ({
@@ -170,7 +179,7 @@ amagi.default = function (options) {
           cover: { url_list: ['https://www.w3schools.com/html/pic_trulli.jpg'] },
           origin_cover: { url_list: ['https://www.w3schools.com/html/pic_trulli.jpg'] },
           duration: 15000,
-          bit_rate: [makeBitRate('1080p', 80), makeBitRate('720p', 20)]
+          bit_rate: douyinBitRates
         }
       }
     }
@@ -254,6 +263,8 @@ setTimeout(async () => {
     check('不传 playerEnabled 时运行时也是开启', store.isOnlinePlayerEnabled() === true,
       'runtime.config.playerEnabled=' + runtime.config.playerEnabled)
     check('链接有效期默认 60 分钟', store.playerExpireMinutes() === 60, 'expire=' + store.playerExpireMinutes())
+    // 用户要求：新增「面板显示「在线看」按钮」，**默认开启**（他要的就是这个按钮）
+    check('「面板显示「在线看」按钮」默认开启', QQ_DEFAULTS.playerWatchButton === true, 'default=' + QQ_DEFAULTS.playerWatchButton)
     check('播放器端口按配置生效（独立端口 15200）', Number(runtime.config.playerPort) === PORT, 'port=' + runtime.config.playerPort)
 
     console.log('\n[2] 发布播放会话：文案 + 链接 + 视频落地')
@@ -282,6 +293,9 @@ setTimeout(async () => {
     check('没配公网地址也能用：链接退化成 本机地址:端口', /^http:\/\/[\w.\-]+:15200\/kkk\/player\/[0-9a-z]+$/.test(link), link)
     const token = link.split('/').pop()
     check('令牌是随机串（8~64 位小写字母数字）', /^[0-9a-z]{8,64}$/.test(token), token)
+    // 用户要求：留空时回复里要说清楚「未配置公网地址，仅本机可访问」
+    check('没配公网地址时回复里带一句「未配置公网地址，仅本机可访问」',
+      /未配置公网地址，仅本机可访问/.test(linkLine), linkLine.split('\n').slice(-1)[0])
     check('视频文件被搬进播放器目录', !fs.existsSync(videoPath) && fs.existsSync(path.join(PLAYER_DIR, token, 'video.mp4')),
       path.join('player', token, 'video.mp4'))
     check('会话已登记', store.listPlayerSessions().length === 1 && store.getPlayerSession(token) !== undefined)
@@ -372,6 +386,8 @@ setTimeout(async () => {
       check('内联脚本语法正确（node --check）', syntaxOk, matched ? matched[1].length + ' 字符' : '（没找到内联脚本）')
     }
     check('视频地址按令牌拼成绝对路径', html.includes('/kkk/player/' + token + '/video'))
+    check('播放页上也带「未配置公网地址，仅本机可访问」', html.includes('未配置公网地址，仅本机可访问'),
+      (html.match(/<div class="warnlocal">[\s\S]{0,70}/) || ['（没有提示条）'])[0])
 
     console.log('\n[4c] 弹幕设置：任意百分比 / 颜色 / 位置 / 全屏')
     {
@@ -582,10 +598,15 @@ setTimeout(async () => {
     const { sendQqParsePanel } = require(path.join(pluginRoot, 'lib/karin/module/utils/QqPanel.js'))
     const { Message } = require(path.join(pluginRoot, 'lib/compat/node-karin.js'))
     /** 面板会先发「加载中…」再原地替换，所以这里收到的可能是多条（和 smoke-qqpanel 一样的写法） */
-    const collect = async () => {
+    /**
+     * 造一次面板。
+     * @param id 作品 id：面板信息有 5 分钟缓存（同一 id 复用），换了 id 才会重新取接口 ——
+     *   第 [9d] 节要临时换档位，必须用新 id 才能看到新数据
+     */
+    const collect = async (id = '7123456789012345678') => {
       const sentList = []
       const message = Message.fromSession({
-        content: 'https://www.douyin.com/video/7123456789012345678',
+        content: 'https://www.douyin.com/video/' + id,
         selfId: '10000', userId: '1', guildId: '456', channelId: '456', messageId: 'm',
         bot: { selfId: '10000', platform: 'qqguild', status: 1, ctx, sendMessage: async (channel, payload) => { sentList.push(payload); return ['m-1'] } },
         author: { nick: 's' }, username: 's', event: {},
@@ -593,8 +614,8 @@ setTimeout(async () => {
       })
       await sendQqParsePanel(message, {
         platform: 'douyin',
-        url: 'https://www.douyin.com/video/7123456789012345678',
-        id: '7123456789012345678'
+        url: 'https://www.douyin.com/video/' + id,
+        id
       })
       const flat = []
       for (const item of sentList) for (const el of (Array.isArray(item) ? item : [item])) flat.push(el)
@@ -630,9 +651,18 @@ setTimeout(async () => {
     runtime.config.playerEnabled = false
     runtime.config.forceNoDanmaku = false
     runtime.config.qqPanelDanmaku = true
+    // 「在线看」按钮开关也要关掉：它开着时烧录模式会多一列「在线看」（下一节单独验证那一列）
+    runtime.config.playerWatchButton = false
     const burnPanel = await collect()
-    // 关掉播放器、也不开「面板显示烧录弹幕列」→ 回到两列（老行为）
+    /**
+     * 只开「在线看」按钮（弹幕重定向关着、烧录列也关着）→ 面板上单独一列「在线看」。
+     * 这是「播放器设置里的总开关只有打开才显示在线看按钮」那条需求的落点。
+     */
     runtime.config.qqPanelDanmaku = false
+    runtime.config.playerWatchButton = true
+    const watchPanel = await collect()
+    // 关掉播放器、关掉在线看按钮、也不开「面板显示烧录弹幕列」→ 回到两列（老行为）
+    runtime.config.playerWatchButton = false
     const burnPanelOff = await collect()
 
     // 顺带验证：总开关关掉时「什么都不做」（不注册、不回复、也不动视频文件）
@@ -653,9 +683,19 @@ setTimeout(async () => {
 
     const headerOf = (panel) => panel.markdown.split('\n').find((line) => line.startsWith('| 清晰度')) || '（没有表格）'
     const burnButtons = (panel) => panel.buttons.filter((button) => String(button.data).includes('--dm=1'))
-    check('播放器开着就有「弹幕」列（不需要再开 QQ 适配器里的烧录列开关）',
+    /** 「在线看」按钮：命令里带 --play=1（独立标志，不拿 --dm=1 冒充） */
+    const watchButtons = (panel) => panel.buttons.filter((button) => String(button.data).includes('--play=1'))
+    // 用户要求：播放器开着时「弹幕」和「在线看」是同一个动作 → 合并成一个按钮，不再并排两个
+    check('播放器开着：合并成一列「弹幕」',
       headerOf(playerPanel) === '| 清晰度 | 弹幕 | 大小 |', headerOf(playerPanel))
-    check('关掉播放器 + 不开烧录列开关 → 回到两列',
+    check('合并后没有单独的「在线看」按钮', watchButtons(playerPanel).length === 0,
+      watchButtons(playerPanel).map((button) => button.data).join(' | ') || '（没有）')
+    check('只开「在线看」按钮时单独一列「在线看」，参数是 --play=1（没拿 --dm=1 冒充）',
+      headerOf(watchPanel) === '| 清晰度 | 在线看 | 大小 |' && watchButtons(watchPanel).length > 0 &&
+      watchButtons(watchPanel).every((button) =>
+        button.label === '在线看' && /--play=1/.test(button.data) && !/--dm=1/.test(button.data)),
+      headerOf(watchPanel) + ' ｜ ' + watchButtons(watchPanel).map((button) => button.data).join(' | '))
+    check('关掉播放器 + 关掉在线看按钮 + 不开烧录列开关 → 回到两列',
       headerOf(burnPanelOff) === '| 清晰度 | 大小 |', headerOf(burnPanelOff))
     check('默认（播放器开启）按钮文字是「弹幕」', burnButtons(playerPanel).length > 0 &&
       burnButtons(playerPanel).every((button) => button.label === '弹幕'),
@@ -688,6 +728,62 @@ setTimeout(async () => {
       (limitedPanel.markdown.match(/标「超上限」[^\n]*/) || ['（没有说明）'])[0].slice(0, 110))
     check('放开上限后「弹幕」按钮回来了', burnButtons(playerPanel).length > 0,
       burnButtons(playerPanel).length + ' 个')
+
+    console.log('\n[9d] 超过 QQ 档位上限（200MB）的画质档：在线播放模式下必须出现，并且能「在线看」')
+    /**
+     * 用户实测反馈：「还是没有出现画质超过 200mb 的按钮」。
+     * 在线播放的视频**根本不发到 QQ**，所以 qqFileLimitMB（= QQ 能发多大）不该再把档位藏掉：
+     * 超限的档位照样列出来，只是「清晰度」（发到 QQ）那一格标「超上限」，右边的「在线看」可用。
+     */
+    const savedRates = douyinBitRates
+    const savedQqLimit = runtime.config.qqFileLimitMB
+    const savedMaxFile = runtime.config.playerMaxFileMB
+    const savedWatch = runtime.config.playerWatchButton
+    douyinBitRates = [makeBitRate('4k', 300), makeBitRate('1080p', 80), makeBitRate('720p', 20)]
+    runtime.config.playerEnabled = true
+    runtime.config.playerWatchButton = true
+    runtime.config.qqFileLimitMB = 200
+    runtime.config.playerMaxFileMB = 2048
+    // 换一个 id：面板信息是按 id 缓存的，用同一个 id 会拿到上面那次的旧档位
+    const bigPanel = await collect('7123456789012345901')
+    const row4k = bigPanel.markdown.split('\n').find((line) => line.includes('4K')) || ''
+    check('面板里出现了 300MB 的 4K 档（不再被 QQ 的 200MB 上限藏掉）', /4K/.test(row4k) && /300M/.test(row4k), row4k || '（没有这一行）')
+    check('4K 那一行的「清晰度」（= 发到 QQ）标成「超上限」、不给按钮',
+      /超上限/.test(row4k) && !bigPanel.buttons.some((button) => String(button.label).indexOf('4K') === 0),
+      bigPanel.buttons.map((button) => button.label).join(' / ') || '（没有按钮）')
+    check('4K 那一行仍然有可用的合并按钮（--dm=1 + --q=4k；播放器模式下它就是在线播放）',
+      bigPanel.buttons.some((button) => button.label === '弹幕' && /--dm=1/.test(button.data) && /--q=4k/.test(button.data)),
+      bigPanel.buttons.map((button) => button.data).join(' | ') || '（没有按钮）')
+    check('上限之内的档位照常能发到 QQ（1080P / 720P 还是按钮）',
+      bigPanel.buttons.some((button) => button.label.indexOf('1080P') === 0) &&
+      bigPanel.buttons.some((button) => button.label.indexOf('720P') === 0))
+    check('面板上说清楚「超上限的画质发不到 QQ」', /QQ 的档位上限/.test(bigPanel.markdown),
+      (bigPanel.markdown.match(/标「超上限」[^\n]*/) || ['（没有说明）'])[0].slice(0, 120))
+    // 播放器上限压到 100MB：4K 那一档连「在线看」也不给（它受「在线播放最大文件」约束）
+    runtime.config.playerMaxFileMB = 100
+    const smallWatchPanel = await collect('7123456789012345902')
+    check('「在线播放最大文件」约束：4K 档连「弹幕」（= 在线播放）也不给按钮',
+      !smallWatchPanel.buttons.some((button) => /--q=4k/.test(button.data)) &&
+      /在线播放的体积上限/.test(smallWatchPanel.markdown),
+      (smallWatchPanel.markdown.split('\n').find((line) => line.includes('4K')) || '').slice(0, 100))
+    check('上限之内的 720P 档依然能在线播放（合并按钮还在）',
+      smallWatchPanel.buttons.some((button) => button.label === '弹幕' && /--q=720p/.test(button.data)),
+      smallWatchPanel.buttons.map((button) => button.data).join(' | '))
+    runtime.config.qqFileLimitMB = savedQqLimit
+    runtime.config.playerMaxFileMB = savedMaxFile
+    runtime.config.playerWatchButton = savedWatch
+    douyinBitRates = savedRates
+
+    console.log('\n[9e] 新开关「面板显示「在线看」按钮」：关掉就不出现那一列')
+    runtime.config.playerEnabled = true
+    runtime.config.playerMaxFileMB = 2048
+    runtime.config.playerWatchButton = false
+    const watchOffPanel = await collect()
+    runtime.config.playerWatchButton = true
+    runtime.config.playerMaxFileMB = savedMaxForPanel
+    check('关掉后回到「清晰度 | 弹幕 | 大小」三列', headerOf(watchOffPanel) === '| 清晰度 | 弹幕 | 大小 |', headerOf(watchOffPanel))
+    check('关掉后没有任何 --play=1 按钮（也没有「在线看」字样）',
+      watchButtons(watchOffPanel).length === 0 && !/在线看/.test(watchOffPanel.markdown))
 
     console.log('\n[9b] 播放器端口：浏览器禁止访问的要能识别出来')
     // 用户实测：端口配成 6666 之后，链接在浏览器里直接 ERR_UNSAFE_PORT（服务端其实是好的）
@@ -723,11 +819,19 @@ setTimeout(async () => {
      */
     const gated = playerFields.filter((field) => field.editableWhen === 'danmaku')
     check('只有「弹幕重定向在线播放器」这一个开关和「强制不烧录弹幕」联动',
-      playerFields.length === 6 && gated.length === 1 && gated[0].key === 'playerEnabled',
+      playerFields.length === 7 && gated.length === 1 && gated[0].key === 'playerEnabled',
       playerFields.map((field) => field.key + ':' + (field.editableWhen || '-')).join(' | '))
     check('总开关名字改成了「弹幕重定向在线播放器」',
       playerFields.find((field) => field.key === 'playerEnabled')?.label === '弹幕重定向在线播放器',
       playerFields.find((field) => field.key === 'playerEnabled')?.label)
+    check('新增「面板显示「在线看」按钮」（默认开、不参与联动、说明写清了两个开关的关系）',
+      (() => {
+        const field = playerFields.find((item) => item.key === 'playerWatchButton')
+        return !!field && field.default === true && field.type === 'boolean' &&
+          field.section === '在线播放器设置' && field.editableWhen === undefined &&
+          /在线看/.test(field.description) && /弹幕重定向在线播放器/.test(field.description)
+      })(),
+      JSON.stringify(playerFields.find((item) => item.key === 'playerWatchButton') || {}).slice(0, 160))
     // WebUI 面板里的门控是 patch-webui 生成到前端包里的，这里直接检查产物：
     // 方向必须是「开着强制不烧录弹幕时锁住」（===!0），写反了就会复现用户报的那个 bug
     const webAssetsDir = path.join(pluginRoot, 'assets', 'web', 'assets')
@@ -743,6 +847,8 @@ setTimeout(async () => {
       '（文本框/数字框都不带 disabled）')
     check('「在线播放最大文件」默认 0 = 跟随全局', QQ_DEFAULTS.playerMaxFileMB === 0,
       'default=' + QQ_DEFAULTS.playerMaxFileMB)
+    check('「面板显示「在线看」按钮」默认 true（用户要的就是这个按钮）', QQ_DEFAULTS.playerWatchButton === true,
+      'default=' + QQ_DEFAULTS.playerWatchButton)
     check('「超限转在线播放」默认关', QQ_DEFAULTS.playerOnOversize === false,
       'default=' + QQ_DEFAULTS.playerOnOversize)
 
@@ -859,8 +965,11 @@ setTimeout(async () => {
     const biliReg = commandQueue.find((item) => String(item.options?.name ?? '').includes('B站'))
     check('B站解析命令已注册', !!biliReg, biliReg ? String(biliReg.options?.name) : '（没找到）')
 
-    /** 跑一次完整的B站解析，把用户实际收到的内容拼成一段文本（bvid 换一个，避免被去重） */
-    const runBiliParse = async (bvid = BILI_BVID) => {
+    /**
+     * 跑一次完整的B站解析，把用户实际收到的内容拼成一段文本（bvid 换一个，避免被去重）。
+     * @param extra 追加到消息后面的参数（例如「 --play=1」= 面板上的「在线看」）
+     */
+    const runBiliParse = async (bvid = BILI_BVID, extra = '') => {
       biliInfoFixture.bvid = bvid
       const sent = []
       const bot = {
@@ -869,7 +978,7 @@ setTimeout(async () => {
         getGuild: async () => ({ name: 'smoke-guild' })
       }
       const session = {
-        content: 'https://www.bilibili.com/video/' + bvid,
+        content: 'https://www.bilibili.com/video/' + bvid + extra,
         selfId: '10000', userId: '12345', guildId: '456', channelId: '456', messageId: 'm1',
         bot, author: { nick: 'smoke' }, username: 'smoke', event: {},
         send: async (payload) => { sent.push(payload); return ['msg-2'] }
@@ -949,6 +1058,36 @@ setTimeout(async () => {
     check('超限的这次没有登记任何播放会话', store.listPlayerSessions().length === 0,
       'sessions=' + store.listPlayerSessions().length)
 
+    console.log('\n[11c] 端到端：面板「在线看」（--play=1）不发视频、弹幕关着也照样带弹幕')
+    /**
+     * 用户要求：「在线看」= 直接在线播放（带弹幕、视频不发群），而且**不管有没有选择弹幕都默认有弹幕**。
+     * 这里故意把「强制不烧录弹幕」打开、面板弹幕列关掉 —— 在线看仍然要带弹幕。
+     */
+    const savedRoleFlag = runtime.config.playerEnabled
+    const savedDanmakuFlag = runtime.config.qqPanelDanmaku
+    const savedForceFlag = runtime.config.forceNoDanmaku
+    runtime.config.playerEnabled = true
+    runtime.config.playerOnOversize = false
+    runtime.config.playerMaxFileMB = 10
+    runtime.config.forceNoDanmaku = true
+    runtime.config.qqPanelDanmaku = false
+    const watched = await runBiliParse('BV1zz411c7mF', ' --play=1')
+    const watchSession = watched.token ? store.getPlayerSession(watched.token) : undefined
+    check('在线看：用户拿到播放链接，视频没有被拒绝（也没有「太大了」）',
+      !!watched.link && !/太大了|已取消上传/.test(watched.text), watched.link || '（没有链接）')
+    check('在线看：视频进了播放器目录（不发到 QQ）', !!watchSession && fs.existsSync(watchSession.filePath),
+      watchSession ? watchSession.filePath : '（没有会话）')
+    check('在线看：即使「强制不烧录弹幕」开着（弹幕功能关着）也照样带弹幕',
+      !!watchSession && watchSession.danmakuCount > 0, watchSession ? watchSession.danmakuCount + ' 条' : '（没有会话）')
+    check('在线看：不弹「本部署已关闭弹幕烧录 / 未接入 ffmpeg」的降级提示',
+      !/已关闭弹幕烧录|未接入 ffmpeg/.test(watched.text))
+    check('在线看：播放页能直接打开（200）',
+      watched.token ? (await request('/kkk/player/' + watched.token)).status === 200 : false)
+    if (watched.token) await store.deletePlayerSession(watched.token)
+    runtime.config.playerEnabled = savedRoleFlag
+    runtime.config.qqPanelDanmaku = savedDanmakuFlag
+    runtime.config.forceNoDanmaku = savedForceFlag
+
     runtime.config.qqPanel = savedQqPanelFlag
     runtime.config.playerOnOversize = savedOnOversize
     runtime.config.playerMaxFileMB = savedMax
@@ -980,6 +1119,87 @@ setTimeout(async () => {
       'total=' + store.readPlayerDanmaku(bomToken)?.total)
     check('恢复出来的会话能打开播放页', (await request('/kkk/player/' + bomToken)).status === 200)
     await store.deletePlayerSession(bomToken)
+
+    console.log('\n[13] 下载：播放页按钮 + ?download=1 / /download + Content-Disposition')
+    /**
+     * 用户要求：「网页界面要求可以下载」—— 页面上要有一个明显的下载按钮，
+     * 服务端的下载响应要带 `Content-Disposition: attachment` 且文件名做过安全处理。
+     */
+    const savedDlEnabled = runtime.config.playerEnabled
+    const savedDlMax = runtime.config.playerMaxFileMB
+    runtime.config.playerEnabled = true
+    runtime.config.playerMaxFileMB = 10
+    // 标题故意带路径分隔符 / 反斜杠 / 控制字符：文件名必须被清洗，头里也必须只有 Latin-1
+    const dlTitle = '【下载验证】B站视频/第 1 集 \\ 测试\u0007标题'
+    const dlSent = []
+    const dlOk = await store.publishOnlinePlayer(collector(dlSent), {
+      videoPath: makeVideo('tmp_player_download.mp4'),
+      title: dlTitle,
+      platform: 'bilibili',
+      danmaku: [{ progress: 1000, mode: 1, fontsize: 25, color: 16777215, content: '下载验证弹幕' }]
+    })
+    const dlLink = /(https?:\/\/[^\s]+\/kkk\/player\/[0-9a-z]+)/.exec(dlSent[1] || '')
+    const dlToken = dlLink ? dlLink[1].split('/').pop() : ''
+    check('准备好了一条待下载的会话', dlOk === true && !!dlToken, dlToken || '（没有令牌）')
+    const dlPage = await request('/kkk/player/' + dlToken)
+    const dlHtml = dlPage.body.toString('utf-8')
+    check('播放页上有明显的「下载」按钮（指向 /video?download=1，图标是内联 SVG）',
+      /id="downloadBtn"/.test(dlHtml) && dlHtml.includes('下载视频') &&
+      dlHtml.includes('href="/kkk/player/' + dlToken + '/video?download=1"') &&
+      /class="dlbtn"[^>]*>\s*<svg viewBox="0 0 24 24"/.test(dlHtml),
+      (dlHtml.match(/<a class="dlbtn"[^>]*>/) || ['（没有下载按钮）'])[0])
+    check('下载按钮不引外链（页面依旧零外网依赖）',
+      !/https?:\/\//.test((dlHtml.match(/<a class="dlbtn"[^>]*>/) || [''])[0]))
+    const dl = await request('/kkk/player/' + dlToken + '/video?download=1')
+    const disposition = String(dl.headers['content-disposition'] ?? '')
+    check('?download=1 返回 200 + Content-Disposition: attachment',
+      dl.status === 200 && /^attachment;/.test(disposition), 'status=' + dl.status + ' / ' + disposition)
+    check('响应头是 Latin-1 安全的（中文不会让 Node 抛 ERR_INVALID_CHAR）',
+      /^[\x20-\x7e]*$/.test(disposition), JSON.stringify(disposition))
+    const starName = (() => {
+      const hit = /filename\*=UTF-8''([^;]+)/.exec(disposition)
+      try { return hit ? decodeURIComponent(hit[1]) : '' } catch { return '' }
+    })()
+    check('filename* 解出来就是「清洗过的标题.mp4」',
+      starName === '【下载验证】B站视频 第 1 集 测试标题.mp4', starName || '（没有 filename*）')
+    const asciiName = (/filename="([^"]*)"/.exec(disposition) || ['', ''])[1]
+    check('ASCII 兜底文件名：没有路径分隔符 / 控制字符，且以 .mp4 结尾',
+      !!asciiName && !/[\\/]/.test(asciiName) && !/[\u0000-\u001f]/.test(asciiName) && /\.mp4$/.test(asciiName),
+      asciiName)
+    const dlAlt = await request('/kkk/player/' + dlToken + '/download')
+    check('/download 独立路由与 ?download=1 等价',
+      dlAlt.status === 200 && /^attachment;/.test(String(dlAlt.headers['content-disposition'] ?? '')) &&
+      dlAlt.body.length === 4096, 'status=' + dlAlt.status)
+    const dlPlain = await request('/kkk/player/' + dlToken + '/video')
+    check('普通 /video 不带 Content-Disposition（页面里照常播放）',
+      dlPlain.status === 200 && !dlPlain.headers['content-disposition'] && dlPlain.body.length === 4096,
+      'status=' + dlPlain.status)
+    const dlRange = await request('/kkk/player/' + dlToken + '/video', { Range: 'bytes=0-1023' })
+    check('/video 的 Range 行为不受影响（206 + Content-Range + 1024 字节）',
+      dlRange.status === 206 && String(dlRange.headers['content-range']) === 'bytes 0-1023/4096' &&
+      dlRange.body.length === 1024)
+    const dlRangeDownload = await request('/kkk/player/' + dlToken + '/video?download=1', { Range: 'bytes=4000-' })
+    check('带 download 时也保留 Range（下载工具续传用得上）',
+      dlRangeDownload.status === 206 && String(dlRangeDownload.headers['content-range']) === 'bytes 4000-4095/4096' &&
+      /^attachment;/.test(String(dlRangeDownload.headers['content-disposition'] ?? '')))
+    check('下载路由同样认过期令牌（先删会话再取 → 404）',
+      (await store.deletePlayerSession(dlToken)) === true &&
+      (await request('/kkk/player/' + dlToken + '/download')).status === 404)
+    // 文件名清洗 / 头拼装这两件事单独验一遍（不依赖某个具体会话）
+    const nasty = store.sanitizeDownloadName('../../etc/passwd\u0000\u0007')
+    check('文件名清洗：去掉路径分隔符 / 控制字符 / 开头的点',
+      !/[\\/]/.test(nasty) && !nasty.startsWith('.') && nasty.includes('passwd'), JSON.stringify(nasty))
+    check('文件名清洗：空标题兜底 + 超长截断到 80 字符',
+      store.sanitizeDownloadName('') === 'video' && store.sanitizeDownloadName('x'.repeat(200)).length === 80,
+      store.sanitizeDownloadName('x'.repeat(200)).length + ' 字符')
+    check('纯中文标题的 ASCII 兜底名不会变成一排下划线',
+      /filename="[a-z0-9-]+\.mp4"/.test(store.downloadDisposition('纯中文标题')),
+      store.downloadDisposition('纯中文标题'))
+    check('downloadDisposition：附件 + 两个文件名齐全',
+      /^attachment; filename="[^"]*\.mp4"; filename\*=UTF-8''/.test(store.downloadDisposition('中文标题')),
+      store.downloadDisposition('中文标题'))
+    runtime.config.playerEnabled = savedDlEnabled
+    runtime.config.playerMaxFileMB = savedDlMax
 
     videoSourceServer.close()
 
