@@ -383,15 +383,81 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
 
   /* ---------------- 数据接口 ---------------- */
 
+  /**
+   * 面板能选的机器人账号。
+   *
+   * 同一个账号可能同时挂了多个适配器（这台部署就是 `qq` + `qqguild`，selfId 一样），
+   * 而推送目标里存的 `botId` 就是 selfId —— 重复的条目只会让下拉里出现两个一模一样的选项，
+   * 所以按 selfId 去重（保留第一个）。
+   */
   const botList = () => {
     const bots: any[] = (ctx as any).bots ?? []
-    return bots.map((bot: any) => ({
-      id: String(bot.selfId ?? bot.user?.id ?? ''),
-      name: String(bot.user?.name ?? bot.selfId ?? ''),
-      avatar: String(bot.user?.avatar ?? ''),
-      platform: String(bot.platform ?? ''),
-      status: 1
-    }))
+    const seen = new Set<string>()
+    const list: any[] = []
+    for (const bot of bots) {
+      const id = String(bot?.selfId ?? bot?.user?.id ?? '')
+      if (!id || seen.has(id)) continue
+      seen.add(id)
+      list.push({
+        id,
+        name: String(bot?.user?.name ?? bot?.selfId ?? ''),
+        avatar: String(bot?.user?.avatar ?? ''),
+        platform: String(bot?.platform ?? ''),
+        status: 1
+      })
+    }
+    return list
+  }
+
+  /** 按 selfId 找适配器实例（找不到返回 undefined） */
+  const findBot = (botId: string): any =>
+    ((ctx as any).bots ?? []).find((bot: any) => String(bot?.selfId ?? bot?.user?.id ?? '') === String(botId))
+
+  /** 从各种适配器/数据库形态里把「群 / 频道」列表掰成 { id, name, avatar }（拿不到就空数组） */
+  const normalizeChannelList = (raw: any): Array<{ id: string, name: string, avatar: string }> => {
+    const rows = Array.isArray(raw) ? raw : Array.isArray(raw?.data) ? raw.data : []
+    const list: Array<{ id: string, name: string, avatar: string }> = []
+    for (const row of rows) {
+      const id = String(row?.id ?? row?.channelId ?? row?.guildId ?? row?.groupId ?? '')
+      if (!id) continue
+      list.push({
+        id,
+        name: String(row?.name ?? row?.nick ?? row?.guildName ?? id),
+        avatar: String(row?.avatar ?? '')
+      })
+    }
+    return list
+  }
+
+  /**
+   * 某个机器人账号能看到的群 / 频道（拿不到就是空数组）。
+   *
+   * 面板里的群号是**手填**的，这个列表只用来：① 给手填的值配一个名字 / 头像；② 别让手填的值被前端清掉。
+   * 三条路依次试：适配器自己的列表接口 → 数据库里的 channel 表 → 放弃。全都要兜住，
+   * 任何一个抛错都不能影响面板（这个接口以前直接返回 `[]`，用户填完群号会被前端当成「无效」清空）。
+   */
+  const botChannels = async (botId: string): Promise<Array<{ id: string, name: string, avatar: string }>> => {
+    const bot: any = findBot(botId)
+    for (const method of ['getGuildList', 'getGroupList', 'getChannelList']) {
+      if (!bot || typeof bot[method] !== 'function') continue
+      try {
+        const list = normalizeChannelList(await bot[method]())
+        if (list.length) return list
+      } catch (error: any) {
+        logger.debug('[kkk] 拉取机器人列表失败（' + method + '）: ' + String(error?.message ?? error))
+      }
+    }
+    try {
+      const db: any = (ctx as any).database
+      if (db && typeof db.get === 'function' && bot?.platform) {
+        const rows = await db.get('channel', { platform: String(bot.platform) }, ['id', 'name'])
+        const list = normalizeChannelList(rows)
+        if (list.length) return list
+      }
+    } catch (error: any) {
+      logger.debug('[kkk] 从数据库读频道列表失败: ' + String(error?.message ?? error))
+    }
+    return []
   }
 
   server.get('/kkk/v1/bots', (response: any) => {
@@ -399,14 +465,60 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
     ok(response, botList(), '')
   })
 
-  server.get('/kkk/v1/bots/:id/groups', (response: any) => {
+  server.get('/kkk/v1/bots/:id/groups', async (response: any) => {
     if (!authed(response)) return fail(response, 401, '鉴权失败: 缺少authorization')
-    ok(response, [], '')
+    ok(response, await botChannels(String(response.params?.id ?? '')), '')
   })
 
-  server.post('/kkk/v1/groups/batch', (response: any) => {
+  /**
+   * 推送目标的展示信息（面板在「推送目标」弹窗里批量拉一次）。
+   *
+   * ## 契约（**必须返回数组，绝不能 null**）
+   * 前端拿到的是 `oR(...)` 的 `data`，随后直接 `data.find(...)`：
+   * 这个接口原来返回 `data: null`，于是用户「填完群号点完成」时渲染期抛
+   * `TypeError: Cannot read properties of null (reading 'find')` —— React 会卸载整棵树，面板直接黑屏（线上事故）。
+   * 所以这里：
+   *   - 永远返回数组（解析不出来就给空数组）；
+   *   - 每一项带上 groupName / botName / isOnline，拿不到就只给 id，前端会退回显示 id。
+   */
+  server.post('/kkk/v1/groups/batch', async (response: any) => {
     if (!authed(response)) return fail(response, 401, '鉴权失败: 缺少authorization')
-    ok(response, null, '')
+    try {
+      const body: any = response.request?.body ?? {}
+      const raw = Array.isArray(body?.groups) ? body.groups : []
+      /** 请求里的每一项可能是 { groupId, botId }，也可能直接是 'groupId:botId' 字符串 */
+      const wanted = raw.map((item: any) => {
+        if (typeof item === 'string') {
+          const [groupId, botId] = item.split(':')
+          return { groupId: String(groupId ?? ''), botId: String(botId ?? '') }
+        }
+        return { groupId: String(item?.groupId ?? ''), botId: String(item?.botId ?? '') }
+      }).filter((item) => item.groupId && item.botId)
+
+      const cache = new Map<string, Array<{ id: string, name: string, avatar: string }>>()
+      const list: any[] = []
+      for (const item of wanted) {
+        if (!cache.has(item.botId)) cache.set(item.botId, await botChannels(item.botId))
+        const bot: any = findBot(item.botId)
+        const channel = cache.get(item.botId)?.find((row) => row.id === item.groupId)
+        const target: any = { groupId: item.groupId, botId: item.botId }
+        if (channel) {
+          if (channel.name) target.groupName = channel.name
+          if (channel.avatar) target.groupAvatar = channel.avatar
+        }
+        if (bot) {
+          target.botName = String(bot.user?.name ?? bot.selfId ?? '')
+          target.botAvatar = String(bot.user?.avatar ?? '')
+          target.isOnline = Number(bot.status ?? 0) === 1
+        }
+        list.push(target)
+      }
+      ok(response, list, '')
+    } catch (error: any) {
+      // 兜底也要给数组：这里返回 null 会让面板在渲染期崩掉
+      logger.warn('[kkk] 解析推送目标失败（返回空列表，避免面板黑屏）: ' + String(error?.message ?? error))
+      ok(response, [], '')
+    }
   })
 
   /* ---------------- 静态资源 + SPA 路由 ---------------- */

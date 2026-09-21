@@ -406,6 +406,117 @@ function patchPermFields (text, name) {
   return out
 }
 
+/* ---------------- 面板 API 返回值兜底（防黑屏） ---------------- */
+
+/**
+ * 「推送列表 / 推送目标」那几个接口的返回值兜底。
+ *
+ * 线上事故：服务端 `/kkk/v1/groups/batch` 原来返回 `data: null`，而前端拿到后直接 `data.find(...)`
+ * （bundle 里的 `bR` 组件）—— 用户「填完频道 id 点完成」之后渲染期抛
+ * `TypeError: Cannot read properties of null (reading 'find')`，React 卸载整棵树 → **整个面板黑屏**。
+ *
+ * 后端已经改成永远返回数组（见 src/webui.ts），这里再加一层前端兜底：
+ * 无论后端返回什么，这三个函数都只给出数组，绝不把 null 交给渲染逻辑。
+ *
+ * 替换是**整段函数替换**（不是外面再包一层），替换后的文本里不再包含原文，
+ * 所以脚本可以反复执行，不会越套越多。
+ */
+const API_GUARDS = [
+  // 机器人列表
+  [
+    'sR=async()=>oR((await eI.get(' + BT + '/kkk/v1/bots' + BT + ')).data,' + BT + '获取 Bot 列表失败' + BT + ')',
+    'sR=async()=>{let r=(await eI.get(' + BT + '/kkk/v1/bots' + BT + ')).data?.data;return Array.isArray(r)?r:[]}'
+  ],
+  // 某个机器人能看到的群列表
+  [
+    'cR=async e=>oR((await eI.get(' + BT + '/kkk/v1/bots/${encodeURIComponent(e)}/groups' + BT + ')).data,' + BT + '获取群列表失败' + BT + ')',
+    'cR=async e=>{let r=(await eI.get(' + BT + '/kkk/v1/bots/${encodeURIComponent(e)}/groups' + BT + ')).data?.data;return Array.isArray(r)?r:[]}'
+  ],
+  // 推送目标的展示信息（黑屏就发生在这里：返回值被拿去做 .find）
+  [
+    'lR=async e=>e.length===0?[]:oR((await eI.post(' + BT + '/kkk/v1/groups/batch' + BT + ',{groups:e})).data,' + BT + '获取推送目标信息失败' + BT + ')',
+    'lR=async e=>{if(!e.length)return [];let r=(await eI.post(' + BT + '/kkk/v1/groups/batch' + BT + ',{groups:e})).data?.data;return Array.isArray(r)?r:[]}'
+  ],
+]
+
+function patchApiGuards (text, name) {
+  let out = text
+  let patched = 0
+  for (const [from, to] of API_GUARDS) {
+    if (out.includes(from)) { out = out.split(from).join(to); patched++ }
+  }
+  if (patched) console.log('[kkk] 接口返回值兜底: ' + name + '（' + patched + ' 处）')
+  return out
+}
+
+/* ---------------- 面板错误边界（别整页黑屏） ---------------- */
+
+/**
+ * 往 index.html 里塞一小段脚本：面板里**没被接住**的异常（渲染期 TypeError、未处理的 Promise 拒绝）
+ * 会在页面上顶出一块可读的中文报错卡片，而不是让用户对着黑屏发呆。
+ *
+ * 为什么放在页面级而不是 React 错误边界：面板是上游打包好的压缩 SPA，
+ * 往里注入 React class 组件的风险太大；React 崩溃时会把错误重新抛到 window，
+ * 这里接住就够了 —— 完整错误也照旧写进浏览器控制台，方便继续排查。
+ */
+const ERRB_START = '<!--KKK-ERRBOUNDARY-START-->'
+const ERRB_END = '<!--KKK-ERRBOUNDARY-END-->'
+const ERRB_SCRIPT = [
+  ERRB_START,
+  '<script>',
+  '(function () {',
+  "  if (window.__KKK_ERR_BOUNDARY__) return",
+  "  window.__KKK_ERR_BOUNDARY__ = true",
+  "  var shown = false",
+  "  function draw (title, detail) {",
+  "    if (shown) return",
+  "    shown = true",
+  "    try {",
+  "      var box = document.createElement('div')",
+  "      box.id = 'kkk-error-boundary'",
+  "      box.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:2147483647;padding:14px 18px;'"
+    + " + 'background:#3a1d1d;color:#ffd7d7;font:13px/1.7 system-ui,-apple-system,sans-serif;'"
+    + " + 'border-bottom:1px solid #7a3a3a;white-space:pre-wrap;word-break:break-word'",
+  "      var head = document.createElement('div')",
+  "      head.style.cssText = 'font-weight:600;margin-bottom:4px'",
+  "      head.textContent = title",
+  "      var body = document.createElement('div')",
+  "      body.style.cssText = 'opacity:.9'",
+  "      body.textContent = detail",
+  "      var tip = document.createElement('div')",
+  "      tip.style.cssText = 'margin-top:6px;opacity:.75'",
+  "      tip.textContent = '面板还能继续用，刷新一下即可恢复。如果反复出现，把上面这行错误发给插件作者。'",
+  "      var again = document.createElement('button')",
+  "      again.textContent = '重新加载面板'",
+  "      again.style.cssText = 'margin-top:10px;padding:6px 14px;border:0;border-radius:6px;"
+    + "background:#c05555;color:#fff;cursor:pointer'",
+  "      again.onclick = function () { location.reload() }",
+  "      box.appendChild(head); box.appendChild(body); box.appendChild(tip); box.appendChild(again)",
+  "      document.body.appendChild(box)",
+  "    } catch (error) { /* 连兜底都失败就算了 */ }",
+  "  }",
+  "  window.addEventListener('error', function (event) {",
+  "    var msg = (event && (event.message || (event.error && event.error.message))) || '未知错误'",
+  "    draw('面板出错了（已捕获，不会黑屏）', String(msg))",
+  "  })",
+  "  window.addEventListener('unhandledrejection', function (event) {",
+  "    var reason = event && event.reason",
+  "    draw('面板出错了（已捕获，不会黑屏）', String((reason && reason.message) || reason || '未知错误'))",
+  "  })",
+  "})()",
+  '</script>',
+  ERRB_END
+].join('\n')
+
+/** index.html 里插入 / 更新错误边界：先按标记删掉旧的再插一次（幂等） */
+function patchErrorBoundary (text, name) {
+  if (!/^index\.html$/.test(name)) return text
+  // 删掉上一次注入的块，顺手把留下的空行也收掉 —— 不然每跑一次就多 3 个字节（不是幂等）
+  const out = stripMarked(text, ERRB_START, ERRB_END).replace(/\n[ \t]*\n([ \t]*<\/body>)/, '\n$1')
+  if (!out.includes('</body>')) return out
+  return out.replace('</body>', ERRB_SCRIPT + '\n  </body>')
+}
+
 /* ---------------- 全局文案替换 ---------------- */
 
 const TEXT_REPLACERS = [
@@ -467,6 +578,8 @@ for (const file of files) {
     if (stripped !== text) { console.log('[kkk] 已删除用户信息块: ' + name); text = stripped }
   }
   text = patchPushDialog(text, name)
+  text = patchApiGuards(text, name)
+  text = patchErrorBoundary(text, name)
   text = patchTextFields(text, name)
   text = patchPermFields(text, name)
   text = patchDescriptions(text, name)

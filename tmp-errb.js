@@ -1,23 +1,4 @@
-<!doctype html>
-<html lang="zh-CN">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/kkk/assets/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="KKK Config - koishi-plugin-kkk 配置面板" />
-    <title>KKK Config</title>
-    <script type="module" crossorigin src="/kkk/assets/assets/index-BRROK0vh.js"></script>
-    <link rel="stylesheet" crossorigin href="/kkk/assets/assets/index-Dj-StEiS.css">
-  </head>
-  <body>
-    <div id="root"></div>
-  
-  
-  
-  
-  
-  <!--KKK-ERRBOUNDARY-START-->
-<script>
+
 (function () {
   if (window.__KKK_ERR_BOUNDARY__) return
   window.__KKK_ERR_BOUNDARY__ = true
@@ -55,7 +36,3 @@
     draw('面板出错了（已捕获，不会黑屏）', String((reason && reason.message) || reason || '未知错误'))
   })
 })()
-</script>
-<!--KKK-ERRBOUNDARY-END-->
-  </body>
-</html>

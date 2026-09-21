@@ -98,10 +98,34 @@ export const getBilibiliID = async (url: string) => {
 
       if (bvid && bvid.toLowerCase().startsWith('av')) {
         const avid = parseInt(bvid.replace(/^av/i, ''))
-        // v7 的 avToBv 是纯本地计算端点，data 直接就是 `{ bvid }` ——
-        // 不再是 v6 那层 `{ code, data: { bvid }, message }` 的 API 信封
-        const convertResult = await bilibiliFetcher.convertAvToBv({ avid })
-        bvid = convertResult.data.bvid
+        /**
+         * av 号 → BV 号。
+         *
+         * **返回结构要逐层兜**：不同版本的 amagi 包了好几层，实测当前版本是
+         * `{ success, data: { code, message, data: { bvid } }, message, code }` ——
+         * 只取 `data.bvid` 会拿到 undefined，于是 `av` 链接被当成「没有 bvid 的视频」直接解析失败
+         * （用户反馈：`/video/av117223783925866` 无法解析，而视频本身是好的）。
+         * 取不到再退回官方接口 `/x/web-interface/view?aid=` 问一次，最后仍失败就明确报错，
+         * 不要静默地带着 undefined 往下走。
+         */
+        const raw: any = await bilibiliFetcher.convertAvToBv({ avid })
+        bvid = raw?.data?.bvid ?? raw?.data?.data?.bvid ?? raw?.bvid ?? raw?.data?.result?.bvid
+        if (!bvid) {
+          try {
+            const { default: axios } = await import('axios')
+            const res = await axios.get('https://api.bilibili.com/x/web-interface/view', {
+              params: { aid: avid },
+              timeout: 15000,
+              headers: { 'User-Agent': 'Mozilla/5.0', Referer: 'https://www.bilibili.com/' }
+            })
+            bvid = res.data?.data?.bvid
+          } catch (error: any) {
+            logger.warn('[B站] av 号转 BV 号失败（接口兜底也没成功）: av' + avid + ' ' + String(error?.message ?? error))
+          }
+        }
+        if (!bvid) {
+          throw new Error('这个 av 号没能转换成 BV 号（av' + avid + '），确认一下链接是否完整')
+        }
       }
 
       result = {
