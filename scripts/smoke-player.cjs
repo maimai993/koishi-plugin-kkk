@@ -759,6 +759,13 @@ setTimeout(async () => {
       bigPanel.buttons.some((button) => button.label.indexOf('720P') === 0))
     check('面板上说清楚「超上限的画质发不到 QQ」', /QQ 的档位上限/.test(bigPanel.markdown),
       (bigPanel.markdown.match(/标「超上限」[^\n]*/) || ['（没有说明）'])[0].slice(0, 120))
+    /**
+     * 文案里的按钮名必须跟着**实际列名**：合并模式下没有「在线看」列，
+     * 再写「点右边的「在线看」」用户在面板上根本找不到那个按钮（用户实测指出）。
+     */
+    check('合并模式下提示指向「弹幕」而不是不存在的「在线看」',
+      /同一行的「弹幕」/.test(bigPanel.markdown) && !/「在线看」/.test(bigPanel.markdown),
+      (bigPanel.markdown.match(/标「超上限」[^\n]*/) || ['（没有说明）'])[0].slice(0, 140))
     // 播放器上限压到 100MB：4K 那一档连「在线看」也不给（它受「在线播放最大文件」约束）
     runtime.config.playerMaxFileMB = 100
     const smallWatchPanel = await collect('7123456789012345902')

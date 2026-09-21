@@ -853,7 +853,8 @@ export async function sendQqParsePanel (e: Message, request: PanelRequest): Prom
    * 超过 QQ 档位上限（`qqFileLimitMB`，默认 200MB）的档位。
    *
    * 在线播放模式下这些档**照样列在面板里**（视频不发到 QQ），只是「清晰度」那一格不给按钮 ——
-   * 那一格的含义就是「发到 QQ」，超了确实发不出去；想在线看就点同行右边的「在线看」。
+   * 那一格的含义就是「发到 QQ」，超了确实发不出去；想在线播放就点同一行的弹幕按钮
+   * （在线播放模式下列已合并，按钮文案见 danmakuLabel；烧录模式下才是单独一列「在线看」）。
    */
   const overQqLimit = (sizeMB: number): boolean => onlinePlayer && Number(sizeMB) > limit
   let playerLimitHit = false
@@ -903,7 +904,15 @@ export async function sendQqParsePanel (e: Message, request: PanelRequest): Prom
     (runtime.config.qqPanelSourceLink !== false && !!request.url)
   if (hasTextAfterTable) lines.push('')
   if (qqLimitHit) {
-    lines.push('标「超上限」的画质超过 QQ 的档位上限（' + limit + 'MB），发不到 QQ；想在线看请点同行右边的「在线看」。')
+    /**
+     * 文案里的按钮名要跟着**实际列名**走：
+     * 在线播放模式下列已经和「弹幕」合并了（同一点击就是在线播放），再写「点右边的「在线看」」
+     * 用户在面板上根本找不到那个按钮（用户实测反馈）。
+     */
+    lines.push('标「超上限」的画质超过 QQ 的档位上限（' + limit + 'MB），发不到 QQ；'
+      + (mergedWatch
+        ? '想在线播放请点同一行的「' + danmakuLabel + '」。'
+        : '想在线看请点同行右边的「在线看」。'))
   }
   if (playerLimitHit) {
     lines.push('标「超上限」的画质超过在线播放的体积上限（' + Math.round(playerLimitMB) + 'MB），'
