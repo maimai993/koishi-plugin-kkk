@@ -24,6 +24,7 @@ import path from 'node:path'
 
 import type { Context } from 'koishi'
 
+import { applyUpstreamOverrides } from './configBridge'
 import { QQ_KEYS, readQqOptions } from './qqOptions'
 
 const COOKIE_NAME = 'kkk_config_token'
@@ -362,6 +363,20 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
         ...(qq && typeof qq === 'object' ? { qq: { ...readQqOptions(config), ...qq } } : {}),
         upstream
       }))
+      /**
+       * 面板是**权威**的：表单里那份配置就是用户想要的，所以这里再用 authoritative 模式
+       * 直接同步一次 config.json —— 值等于上游默认值也要真的落盘。
+       *
+       * 否则会踩「打开了没用」：合并转发开关 `app.fakeForward` 的默认值就是 true，
+       * 用户在面板里把它打开、保存，走 apply 阶段那条保守规则时会被当成「没动过」跳过，
+       * config.json 里还是 false（用户实测反馈的就是这个）。
+       */
+      try {
+        const merged = applyUpstreamOverrides(upstream, { authoritative: true })
+        if (merged.changed.length) logger.info('[kkk] 面板设置已写入 config.json: ' + merged.changed.join(', '))
+      } catch (error: any) {
+        logger.warn('[kkk] 面板设置写入 config.json 失败（改动会在下次启动时按保守规则同步）: ' + String(error?.message ?? error))
+      }
       logger.info('[kkk] 配置面板已保存（QQ 适配器 → 插件配置，其余 → upstream，写回 koishi.yml）')
       ok(response, null, '已保存')
     } catch (error: any) {

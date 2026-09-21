@@ -10,8 +10,13 @@
  *     会在下次启动时被表单里的默认值覆盖；
  *   - 数组整体覆盖（pushlist 这类结构化数据按整块替换更可预期）。
  *
- * 代价：在控制台里把某项**改回默认值**不会写回 config.json（与默认值相同 = 视为没动过）。
- * 真要强制改回去，用插件自带面板 /kkk 或直接编辑那个文件。
+ * ## 两种模式（`authoritative`）
+ * 上面那套保守规则有个代价：**把某项改回默认值不会写回 config.json**（与默认值相同 = 视为没动过）。
+ * 线上就踩过 —— 合并转发开关 `app.fakeForward` 的默认值就是 true，用户在**面板**里打开它并保存，
+ * 这一项被跳过，config.json 里还是 false，表现就是「打开了没用」。
+ * 所以插件自带面板的保存（`/kkk/v1/config`）走 **authoritative** 模式：
+ * 表单里那份配置就是用户想要的，值等于默认值也照写；
+ * 控制台那条路（apply 阶段同步 koishi.yml 里的 `upstream`）仍用保守规则，避免表单默认值盖掉手改的文件。
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -25,6 +30,18 @@ export interface MergeResult {
   file: string
 }
 
+/** 合并选项 */
+export interface OverrideOptions {
+  /**
+   * 是否为「权威」写入（**插件自带面板的保存**走这条）。
+   *
+   * 权威模式下不再把「与上游默认值相同」当成「没填」：用户在表单里把某项改回默认值也要真的写回。
+   * 否则像合并转发开关（`app.fakeForward` 默认就是 true）这种项永远打不开 —— 行为上就是「打开了没用」。
+   * 两种模式都会跳过「值和文件里一样」的项。
+   */
+  authoritative?: boolean
+}
+
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === 'object' && !Array.isArray(value)
 
@@ -32,7 +49,7 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> =>
  * 把控制台里的上游配置合并进 config.json。
  * @param overrides 控制台里 \`upstream\` 字段的内容
  */
-export function applyUpstreamOverrides (overrides: unknown): MergeResult {
+export function applyUpstreamOverrides (overrides: unknown, options: OverrideOptions = {}): MergeResult {
   const runtime = getRuntime()
   const file = path.resolve(runtime.dataRoot, PLUGIN_DIR_NAME, 'config', 'config.json')
   const defaultFile = path.resolve(runtime.pluginRoot, 'config', 'default_config', 'config.json')
@@ -75,14 +92,20 @@ export function applyUpstreamOverrides (overrides: unknown): MergeResult {
         merge(target[key], value, isPlainObject(base) ? base : {}, prefix + key + '.')
         continue
       }
-      // 与上游默认值相同 → 控制台里没动过这一项，不写回（否则会盖掉用户手改的文件）
-      if (base !== undefined && JSON.stringify(base) === JSON.stringify(value)) continue
+      /** 文件里已经是这个值 → 这一项没动过 */
       if (JSON.stringify(target[key]) === JSON.stringify(value)) continue
+      /**
+       * 与上游默认值相同 → 视为「表单补的默认值」，不写回（否则会盖掉用户手改的文件）。
+       *
+       * 权威模式（面板保存）下**不**走这一条：面板是用户明确的意图，
+       * 值等于默认值也要写回（否则「把某项改回默认值」永远不生效）。
+       */
+      if (!options.authoritative && base !== undefined && JSON.stringify(base) === JSON.stringify(value)) continue
       target[key] = value
       changed.push(prefix + key)
     }
   }
-  merge(current, overrides, defaults, '')
+  merge(current, overrides, options.authoritative ? current : defaults, '')
 
   if (changed.length) {
     fs.mkdirSync(path.dirname(file), { recursive: true })

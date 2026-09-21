@@ -141,6 +141,38 @@ setTimeout(async () => {
     check('config.json 里是新值', afterChanged.douyin.videoQuality === '720p' && afterChanged.app.renderScale === 120, afterChanged.douyin.videoQuality + ' / ' + afterChanged.app.renderScale)
     check('空数组不写回（不算改动）', !changedResult.changed.some((item) => item.startsWith('pushlist')), changedResult.changed.join(', '))
 
+    /**
+     * 用户实测反馈：「合并转发打开没用了」。
+     * 根因：老规则是「与上游默认值相同 → 视为没动过，不写回」，而 `app.fakeForward` 默认就是 true，
+     * 用户在面板里打开它并保存时值正好等于默认值，于是被跳过 —— config.json 里还是 false。
+     * 修法：**面板保存**（/kkk/v1/config）走 authoritative 模式 —— 表单里那份配置就是用户想要的，
+     * 值等于默认值也照写；控制台同步（apply 阶段）仍保守，免得表单默认值盖掉手改的文件（见 [4]）。
+     */
+    console.log('\n[6] 面板保存（authoritative）：改回默认值也要能写进 config.json')
+    const defaultFake = defaults.app.fakeForward
+    check('前提：app.fakeForward 的默认值就是 true（打开它 = 改回默认值）', defaultFake === true, String(defaultFake))
+    // 1) 先关掉（和默认值不同，两条路都能写回）
+    applyUpstreamOverrides({ app: { fakeForward: false } })
+    const offValue = JSON.parse(fs.readFileSync(cfgFile, 'utf8')).app.fakeForward
+    check('关掉能写回', offValue === false, String(offValue))
+    // 2) 保守模式下发「默认值」会被当成没动过（老行为，保护手改的文件）
+    const conservative = applyUpstreamOverrides({ app: { fakeForward: true } })
+    const afterConservative = JSON.parse(fs.readFileSync(cfgFile, 'utf8')).app.fakeForward
+    check('保守模式：正好等于默认值时不写回（保护手改文件的老规则还在）',
+      !conservative.changed.includes('app.fakeForward') && afterConservative === false,
+      'changed=' + conservative.changed.join(', ') + ' / 文件里=' + String(afterConservative))
+    // 3) 面板保存（authoritative）必须写回 —— 这就是用户那条「打开了没用」
+    const panel = applyUpstreamOverrides({ app: { fakeForward: true } }, { authoritative: true })
+    const afterPanel = JSON.parse(fs.readFileSync(cfgFile, 'utf8')).app.fakeForward
+    check('面板保存：值等于默认值也能写回（打开开关立刻生效）',
+      panel.changed.includes('app.fakeForward') && afterPanel === true,
+      'changed=' + panel.changed.join(', ') + ' / 文件里=' + String(afterPanel))
+    // 4) 面板保存也不会顺手把「没变」的项写坏
+    const panelNoop = applyUpstreamOverrides({ app: { fakeForward: true, renderScale: 120 } }, { authoritative: true })
+    check('面板保存：值和文件里一样的项不重复写', panelNoop.changed.length === 0, panelNoop.changed.join(', '))
+    check('手改过的其它项没被顺手改掉', JSON.parse(fs.readFileSync(cfgFile, 'utf8')).app.renderScale === 120)
+    applyUpstreamOverrides({ app: { fakeForward: defaultFake } }, { authoritative: true })
+
     const failed = results.filter((item) => !item.ok)
     console.log('\n=== ' + (results.length - failed.length) + '/' + results.length + ' 通过 ===')
     process.exitCode = failed.length ? 1 : 0
