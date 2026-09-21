@@ -107,10 +107,12 @@ export class Kuaishou extends Base {
       return { name, url: `https:${path}` }
     })
     /**
-     * **先把视频下下来，再渲染卡片**（用户要求，和抖音/B站/小红书同一套顺序）。
-     * 下载最慢也最不能失败，放前面；卡片渲染失败不影响视频，最后统一报错。
+     * 后台下载：**不再阻塞卡片**（用户要求：一边下载一边渲染，卡片先出来）。
+     *
+     * 以前这里是 `await`，评论区卡片得等视频下完才开始渲染；现在只登记任务，
+     * 卡片照常渲、渲完就发，下载结果在发送之前才取（见下面的 await downloadTask）。
      */
-    const downloadedVideo = (await steps.run('下载视频', () =>
+    const downloadTask = steps.run('下载视频', () =>
       downloadVideoFile(this.e, {
         video_url,
         title: {
@@ -118,7 +120,7 @@ export class Kuaishou extends Base {
           originTitle: `${work.photo.caption}.mp4`
         }
       })
-    )) ?? null
+    )
 
     await steps.run('渲染评论区', async () => {
     const CommentsData = await kuaishouComments(payload.CommentsData, transformedData)
@@ -138,6 +140,8 @@ export class Kuaishou extends Base {
     await this.e.reply(img)
     })
 
+    // 到这里才等下载收尾：卡片早就发出去了
+    const downloadedVideo = (await downloadTask) ?? null
     if (downloadedVideo) {
       await steps.run('发送视频', () => uploadFile(this.e, downloadedVideo, video_url, { message_id: this.e.messageId }))
     } else {

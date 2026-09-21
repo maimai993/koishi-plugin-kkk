@@ -347,10 +347,11 @@ export class Bilibili extends Base {
         }
 
         /**
-         * 视频这一步：体积检查 → 拿弹幕 → **先把视频下下来**（合成 / 烧录也在这里做完）。
+         * 视频这一步：体积检查 → 拿弹幕 → **启动下载**（合成 / 烧录也在这条链里做完）。
          *
-         * 顺序是用户要求的：下载最快不起来、又最不能失败，所以提到渲染卡片之前；
-         * 下好的文件先存着，等卡片和评论区都发完再上传（见下面的「发送视频」）。
+         * 下载**不再阻塞卡片**：这里只登记任务，渲染作品信息卡 / 评论区照常往下跑，
+         * 卡片渲完立刻发（用户要求：一边下载一边渲染，别等视频下完才一起发）；
+         * 真正的等待挪到「发送视频」之前（见下面的 await downloadTask）。
          */
         /**
          * 体积检查。三种情形：
@@ -387,6 +388,14 @@ export class Bilibili extends Base {
         const willSendVideo = Config.bilibili.sendContent.some((content) => content === 'video')
         /** 本次要烧录的弹幕（烧录在下载那一步里完成，所以这里先拿到） */
         let danmakuList: BiliDanmakuElem[] = []
+        /**
+         * 后台下载任务。
+         *
+         * 以前这里是 `await steps.run('下载视频', …)`，卡片必须等视频下完（含合成、烧录）
+         * 才开始渲染 —— 大文件动辄几十秒，用户盯着空白等。现在只登记任务就往下走：
+         * 卡片渲完立刻发，真正的等待挪到「发送视频」之前。
+         */
+        let downloadTask: Promise<unknown> = Promise.resolve()
         if (willSendVideo && !videoOversize) {
           if (useAnonymousQuality) {
             this.islogin = false
@@ -399,7 +408,7 @@ export class Bilibili extends Base {
               : infoData.data.data.duration
             danmakuList = (await steps.run('获取弹幕', () => this.fetchVideoDanmakuList(cid, duration))) ?? []
           }
-          await steps.run('下载视频', () =>
+          downloadTask = steps.run('下载视频', () =>
             this.prepareVideo(
               // Koishi 移植修正：原实现这里传的是 `nockData.data`，但下载读的是
               // `playUrlData.data.durl`（与上面的 `nockData.data.durl` 同一层），传内层会取不到 durl。
@@ -515,7 +524,8 @@ export class Bilibili extends Base {
               { reply: true }
             )
           } else {
-            // 视频在前面那一步就已经下好（需要的话也合成/烧录完了），这里只管上传
+            // 视频下载（含合成 / 烧录）一直在后台跑，到这里才等它 —— 卡片、评论区早就发出去了
+            await downloadTask
             await steps.run('发送视频', () => this.sendPreparedVideo())
           }
         }

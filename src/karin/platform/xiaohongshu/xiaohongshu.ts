@@ -147,10 +147,12 @@ export class Xiaohongshu extends Base {
      * 视频笔记：**先把视频选好、下下来，再去渲染卡片**（用户要求，和抖音/B站同一套顺序）。
      *
      * 选流逻辑原来在整个函数末尾（卡片、评论区、图文图片之后），现在整体搬到这里：
-     * 下载最慢也最不能失败，先做掉；下好的文件留给末尾发送，卡片渲染失败也不影响视频。
+     * 选流同步做完，**下载改成后台任务**（见下面的 downloadTask）——
+     * 卡片渲完就发，不用等视频下完（用户要求：一边下载一边渲染）。
      */
     const willSendVideo = Boolean(noteCard.video) && Config.xiaohongshu.sendContent.includes('video')
-    let downloadedVideo: fileInfo | null = null
+    /** 后台下载任务：结果在「发送视频」之前才取（见下面的 await downloadTask） */
+    let downloadTask: Promise<fileInfo | null | undefined> = Promise.resolve(null)
     /** 本次要发送的视频地址（选中的流；选不出来时用兜底字段） */
     let xhsVideoUrl = ''
     if (willSendVideo) {
@@ -187,7 +189,11 @@ export class Xiaohongshu extends Base {
         video.media?.video?.url ??
         ''
       if (xhsVideoUrl) {
-        downloadedVideo = (await steps.run('下载视频', () =>
+        /**
+         * 后台下载：**不再阻塞卡片**（用户要求：一边下载一边渲染，卡片先出来）。
+         * 结果在「发送视频」之前才取（见下面的 await downloadTask）。
+         */
+        downloadTask = steps.run('下载视频', () =>
           downloadVideoFile(this.e, {
             video_url: xhsVideoUrl,
             title: {
@@ -200,7 +206,7 @@ export class Xiaohongshu extends Base {
               Cookie: Config.amagi.cookies.xiaohongshu
             }
           })
-        )) ?? null
+        )
       } else {
         logger.warn('[小红书] 找不到任何可用的视频地址')
       }
@@ -526,12 +532,13 @@ export class Xiaohongshu extends Base {
     }
 
     /**
-     * 视频笔记：下载已经在前面（渲染卡片之前）做完了，这里只负责发送。
+     * 视频笔记：下载在前面就启动了（后台跑），这里才等它收尾然后发送。
      *
      * - 下载成功 → 上传本地文件；
      * - 下载失败/被跳过 → 退回直链发送（原来选流失败时的兜底行为），
      *   失败本身已经记在 steps 里，最后统一报错。
      */
+    const downloadedVideo = (await downloadTask) ?? null
     if (willSendVideo) {
       await steps.run('发送视频', async () => {
         if (downloadedVideo) {

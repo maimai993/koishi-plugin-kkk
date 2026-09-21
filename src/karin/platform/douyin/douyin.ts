@@ -674,14 +674,14 @@ export class DouYin extends Base {
         /**
          * 先把视频下下来，再去渲染卡片（用户要求的顺序）。
          *
-         * 下载是最慢、也最不能失败的一步：先做掉，后面渲染信息卡/评论区时用户不用干等；
-         * 反过来，卡片渲染失败也不会连累视频 —— 下载结果留着给下面的发送步骤用。
+         * 下载**不再阻塞卡片**：这里只登记任务，信息卡 / 评论区照常往下跑，卡片渲完立刻发
+         * （用户要求：一边下载一边渲染，别等视频下完才一起发）；真正的等待挪到「发送视频」之前。
          * 下载本身失败不抛出（steps 会记下来），最后统一报错。
          */
-        let downloadedVideo: fileInfo | null = null
         const willSendVideo = sendvideofile && isVideo && !isArticle && Config.douyin.sendContent.includes('video')
-        if (willSendVideo && g_video_url) {
-          downloadedVideo = (await steps.run('下载视频', () =>
+        /** 后台下载任务：结果在「发送视频」之前才取（见下面的 await downloadTask） */
+        const downloadTask: Promise<fileInfo | null | undefined> = (willSendVideo && g_video_url)
+          ? steps.run('下载视频', () =>
             downloadVideoFile(this.e, {
               video_url: g_video_url,
               title: {
@@ -690,8 +690,8 @@ export class DouYin extends Base {
               },
               headers: { ...baseHeaders, Referer: 'https://www.douyin.com' }
             })
-          )) ?? null
-        }
+          )
+          : Promise.resolve(null)
 
         /**
          * 从面板点进来的解析：卡片在面板里已经发过了，这里不再重复发一张。
@@ -866,8 +866,10 @@ export class DouYin extends Base {
           }
         }
 
-        /** 发送视频（视频已经在上面的「下载视频」步骤里下好了，这里只负责烧录/上传） */
+        /** 发送视频（视频在后台下载，这里才等它收尾，然后烧录/上传） */
         if (willSendVideo) {
+          // 等到这里才取下载结果：卡片、评论、BGM 都已经发出去了，用户不会盯着空白等
+          const downloadedVideo = (await downloadTask) ?? null
           await steps.run('发送视频', async () => {
           // 下载失败了就没有东西可发 —— 失败已经记在 steps 里，最后一起报
           if (!downloadedVideo) {
