@@ -47,8 +47,10 @@
     } catch (error) { /* 连兜底都失败就算了 */ }
   }
   window.addEventListener('error', function (event) {
-    var msg = (event && (event.message || (event.error && event.error.message))) || '未知错误'
-    draw('面板出错了（已捕获，不会黑屏）', String(msg))
+    var msg = (event && (event.message || (event.error && (event.error.message || event.error.stack)))) || '未知错误'
+    // 跨域脚本的 message 会被浏览器抹成 'Script error.'，这时位置信息就是唯一线索
+    var at = event && event.filename ? ' （' + event.filename + ':' + event.lineno + ':' + event.colno + '）' : ''
+    draw('面板出错了（已捕获，不会黑屏）', String(msg) + at)
   })
   window.addEventListener('unhandledrejection', function (event) {
     var reason = event && event.reason

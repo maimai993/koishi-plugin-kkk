@@ -1,1 +1,0 @@
-const fs=require('node:fs'),path=require('node:path');const dir=path.join(__dirname,'assets','web','assets');const f=fs.readdirSync(dir).filter(n=>/^index-.*\.js$/.test(n))[0];const t=fs.readFileSync(path.join(dir,f),'utf8');for(const k of ['sR=async()=>','cR=async e=>','lR=async e=>']){const at=t.indexOf(k);console.log('---');console.log(t.slice(at, at+230))}
