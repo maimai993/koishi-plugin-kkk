@@ -136,10 +136,23 @@ setTimeout(async () => {
       })
       check('结束时发了一条合并转发', !!forward, forward ? 'channel=' + forward.channel : '（没有）')
       const node = forward ? (Array.isArray(forward.payload) ? forward.payload : [forward.payload]).find((el) => el && el.type === 'message') : null
-      const children = node ? (node.children ?? []) : []
+      const allChildren = node ? (node.children ?? []) : []
+      const author = allChildren.find((el) => el && el.type === 'author')
+      const children = allChildren.filter((el) => el && el.type !== 'author')
       const text = JSON.stringify(children)
+      /**
+       * OneBot 适配器就是靠 **`forward` 属性**判断「这条要发合并转发」的
+       * （koishi-plugin-adapter-onebot lib/index.js:918-925 → :734-738 的
+       * sendGroupForwardMsg / sendPrivateForwardMsg）。少了它，节点会被当成普通消息内容，
+       * 表现就是「合并转发没生效」—— 这条断言专门守它。
+       */
+      check('转发元素带 forward 属性（OneBot 才会走 send_group_forward_msg）',
+        !!node && node.attrs?.forward === true, JSON.stringify(node?.attrs ?? {}))
       check('转发里有两条结果', children.length === 2, '节点内容 ' + children.length + ' 条')
       check('转发里没有过程提示', !!node && !/发送中/.test(text), text.slice(0, 140))
+      check('带 <author> 子元素（决定这条转发显示成谁发的）',
+        !!author && String(author.attrs?.id ?? '') === '12345' && author.attrs?.name === 'smoke',
+        JSON.stringify(author?.attrs ?? {}))
       check('发往别的频道的消息没有被吞进转发（去了 999999）',
         sent.some((item) => item.channel === '999999' && JSON.stringify(item.payload).includes('发给主人的日志')))
       // 身份跟着 fakeForward 走：默认配置里它是 true（触发者），这里按当前取值断言

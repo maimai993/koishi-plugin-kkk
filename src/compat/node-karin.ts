@@ -166,10 +166,20 @@ export class KkkBot {
   /**
    * 合并转发。
    *
-   * 上游是把内容装进「合并转发」发出去；但**部分适配器根本没有合并转发能力**
-   * （例如 QQ 官方适配器 koishi-plugin-adapter-qq-crack，platform=\`qqguild\`，
-   * 整个包里没有一处 forward），硬发 \`<message>\` 元素只会失败或变成一条空消息。
-   * 所以这里先问适配器支不支持，不支持就**退化成直接发送这些元素**（视觉上是普通消息）。
+   * ## 走的是适配器自己的「合并转发 API」
+   * OneBot（koishi-plugin-adapter-onebot）那条链路是这样的：
+   *   `h('message', { forward: true }, …)`
+   *     → 适配器解析到 **`forward` 属性**（lib/index.js:918-925）就进入 forward 状态，
+   *       把 children 收成**一个 node**；`<author>` 子元素（:903-904）决定这个 node 的
+   *       `uin` / `name`（:774-779）；
+   *     → 最后调用 `this.bot.internal.sendGroupForwardMsg(channelId, nodes)`
+   *       / `sendPrivateForwardMsg(userId, nodes)`（:734-738）—— 也就是 OneBot 的
+   *       `send_group_forward_msg` / `send_private_forward_msg`。
+   * **少了 `forward` 属性，OneBot 只会把这些元素当成普通消息内容**（静默变成一条怪消息），
+   * 这正是「合并转发没生效」的原因，所以这里必须带上它。
+   *
+   * 其它适配器：支持能力按平台判断；**完全不支持合并转发的**（例如 QQ 官方适配器
+   * koishi-plugin-adapter-qq-crack，包里没有任何 forward 相关代码）退化成直接发送这些元素。
    */
   async sendForwardMsg (contact: Contact | string, elements: any, _options?: any): Promise<{ messageId: string }> {
     const channelId = typeof contact === 'string' ? contact : contact.peer
@@ -180,7 +190,17 @@ export class KkkBot {
 
     if (supportsForward(this.bot)) {
       try {
-        const ids = await this.bot.sendMessage(channelId, [h('message', ...payload.elements)] as any)
+        /**
+         * `forward: true` 是 OneBot 适配器识别「这条要发合并转发」的开关（见上面的说明）。
+         * `<author>` 决定这条转发显示成谁发的：
+         *   - 通用里「伪造合并转发消息」开着 → 调用方传进来的是**触发者**的 id / 昵称；
+         *   - 关着 → 传的是机器人自己的 id / 昵称。
+         * 没给 id / 昵称就不带这个元素，适配器会回落到机器人身份。
+         */
+        const author = (payload.botId || payload.botName)
+          ? [h('author', { id: payload.botId, name: payload.botName })]
+          : []
+        const ids = await this.bot.sendMessage(channelId, [h('message', { forward: true }, ...author, ...payload.elements)] as any)
         return { messageId: ids[ids.length - 1] ?? '' }
       } catch (error) {
         logger.warn('合并转发发送失败，改为直接发送内容: ' + String((error as any)?.message ?? error))
@@ -493,6 +513,16 @@ export function isForwardSupported (bot: any): boolean {
 }
 
 function supportsForward (bot: any): boolean {
+  /**
+   * ① 适配器自己就带合并转发 API 的：直接认（OneBot 系的 internal.*ForwardMsg）。
+   *    这条优先，因为不依赖平台名怎么写。
+   */
+  const internal: any = bot?.internal
+  if (internal && (typeof internal.sendGroupForwardMsg === 'function' || typeof internal.sendPrivateForwardMsg === 'function')) return true
+  /**
+   * ② 其余按平台判断：OneBot / red / chronocat 这些 Satori 适配器认识 `h('message')`；
+   *    QQ 官方适配器（qqguild / qqbot / qq / official）没有任何 forward 能力，必须退化。
+   */
   const platform = String(bot?.platform ?? '')
   if (!platform) return false
   return !/qqguild|qqbot|^qq$|official/i.test(platform)
