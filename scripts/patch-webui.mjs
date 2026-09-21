@@ -281,11 +281,15 @@ function patchPushDialog (text, name) {
  * 原版这两项是「下拉框」和「互斥勾选组」，用起来很别扭：
  *   - 谁可以触发扫码登录：只能从 5 个关键字里选一个；
  *   - 错误日志接收人：「第一个主人 / 所有主人」互斥，还不能填具体账号。
- * 现在都换成文本框：可以填 * （谁都可以）、关键字，也可以直接写 QQ 号，多个用逗号分隔。
+ * 现在都换成文本框：可以填 * （谁都可以）、关键字，也可以直接写用户 ID，多个用逗号分隔。
  * 服务端保存时会把「错误日志」这一项的字符串拆成数组。
  */
-const PERM_DESC = '选「指定账号」后填 QQ 号，多个用逗号分隔。'
-const LOG_DESC = '谁来接收错误日志，选「指定账号」后填 QQ 号，多个用逗号分隔。'
+/**
+ * 注意：Koishi 这边的账号是**用户 ID**（session.userId / 控制台里的用户 id），不是 QQ 号 ——
+ * 群里那个 QQ 号和用户 ID 不一定相等，写 QQ 号会匹配不上（用户实测反馈过这个文案问题）。
+ */
+const PERM_DESC = '选「指定账号」后填用户 ID，多个用逗号分隔。'
+const LOG_DESC = '谁来接收错误日志，选「指定账号」后填用户 ID，多个用逗号分隔。'
 
 const TEXT_SWAPS = [
   [
@@ -348,7 +352,7 @@ function patchTextFields (text, name) {
 /**
  * 给渲染器工厂加一个 renderPermField：
  *   一个下拉（所有人 / 管理员（权限等级 4 及以上）/ 指定账号；错误日志那项是 触发者所在的群 / 管理员 / 指定账号），
- *   只有选中「指定账号」时才出现输入框，填 QQ 号、多个用逗号分隔。
+ *   只有选中「指定账号」时才出现输入框，填用户 ID、多个用逗号分隔。
  * 之所以要塞进工厂：只有工厂里拿得到 config（e）和写值函数（i）。
  */
 const RENDER_PERM_FIELD = [
@@ -369,7 +373,7 @@ const RENDER_PERM_FIELD = [
   '(0,U.jsx)(Ax.Popover,{children:(0,U.jsx)(wx,{children:modes.map(m=>(0,U.jsx)(wx.Item,{id:m.value,textValue:m.label,children:m.label},m.value))})})]}),',
   'inp=mode===`id`?(0,U.jsxs)(lx,{fullWidth:!0,name:p.join(`.`),value:numText,onChange:e=>setIds(e),children:[',
   '(0,U.jsx)(dx,{className:`font-semibold`,children:list?`接收账号`:`允许的账号`}),',
-  '(0,U.jsx)(cx,{variant:`secondary`,placeholder:`填写 QQ 号，多个用逗号分隔`})]}):null,',
+  '(0,U.jsx)(cx,{variant:`secondary`,placeholder:`填写用户 ID，多个用逗号分隔`})]}):null,',
   'box=(0,U.jsxs)(`div`,{className:n.field,children:[sel,inp]});return o(box,t,!1)},',
 ].join('')
 

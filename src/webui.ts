@@ -365,8 +365,24 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
       logger.info('[kkk] 配置面板已保存（QQ 适配器 → 插件配置，其余 → upstream，写回 koishi.yml）')
       ok(response, null, '已保存')
     } catch (error: any) {
-      logger.warn('[kkk] 配置面板保存失败: ' + String(error?.message ?? error))
-      fail(response, 500, String(error?.message ?? error))
+      /**
+       * 保存失败要把**调用栈**也带上：只打 message（例如那句
+       * \`Cannot read properties of null (reading 'logger')\`）根本看不出是哪一层抛的，
+       * 实际排查时只能靠这几行。
+       */
+      const rawMessage = String(error?.message ?? error)
+      const stack = String(error?.stack ?? '').split('\n').slice(1, 16).map((line) => line.trim()).join(' | ')
+      logger.warn('[kkk] 配置面板保存失败: ' + rawMessage + (stack ? '（' + stack + '）' : ''))
+      /**
+       * 保存失败里最常见、也最看不懂的一种：值没通过 Schema 校验。
+       * 宿主（cordis）在 `resolveConfig` 抛错后会 emit 一个 `internal/error`，
+       * 而 `@cordisjs/logger` 的监听器会**再抛一个** `Cannot read properties of null (reading 'logger')`，
+       * 原始错误被它盖掉 —— 用户看到的就只有这一句。这里换成能照做的提示。
+       */
+      const message = /reading 'logger'/.test(rawMessage)
+        ? '配置没通过校验：某个字段填的值不在允许范围内（常见于把用户 ID 填进了只能选关键字的字段）。请检查刚改过的那一项，详细信息见 Koishi 日志。'
+        : rawMessage
+      fail(response, 500, message)
     }
   })
 

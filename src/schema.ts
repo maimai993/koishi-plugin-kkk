@@ -296,15 +296,35 @@ function coerceOptions (options: EnumOption[] | undefined, sample: unknown): Enu
   return result.length >= 2 ? result : undefined
 }
 
-/** 生成叶子字段（枚举 → 下拉；否则按类型给输入框），并带上默认值与说明 */
+/**
+ * 「允许手填账号」的字段名（loginPerm / permission / errorLogSendTo）。
+ *
+ * 这些字段既能写关键字（all / admin / master / group.owner / group.admin），
+ * 也能直接写**用户 ID**（`123456789`，多个用逗号分隔 / 数组）。
+ */
+const LOOSE_VALUE_FIELDS = new Set(['loginPerm', 'permission', 'errorLogSendTo'])
+
+/** 手填账号时补在说明后面的一句提示 */
+const LOOSE_HINT = '（也可以直接填用户 ID，不是 QQ 号；多个用逗号分隔）'
+
+/**
+ * 生成叶子字段（枚举 → 下拉；否则按类型给输入框），并带上默认值与说明。
+ *
+ * ⚠️ 可以手填账号的那几个字段**不能**做成「枚举下拉」：下拉会把值限死在几个 const 上，
+ * 用户手填的 ID 一保存就会被 Schema 校验拒掉 —— 而且报出来的还是被
+ * `@cordisjs/logger` 那句 `Cannot read properties of null (reading 'logger')` 盖掉的无头错误
+ * （用户实测：面板里选「指定账号」填了 ID，一保存就报这句）。
+ */
 function leafSchema (sample: unknown, fieldPath: string, meta: MetaMap, ensure: unknown[] = []): Schema {
+  const loose = LOOSE_VALUE_FIELDS.has(shortName(fieldPath))
   const withDesc = (schema: Schema): Schema => {
     const text = describe(meta, fieldPath)
-    return text ? schema.description(text) : schema
+    if (!text) return schema
+    return schema.description(loose ? text + LOOSE_HINT : text)
   }
 
-  // 手工枚举优先（选项文案更清楚），没有就用注释里解析出来的
-  const options = coerceOptions(SUPPLEMENT_ENUMS[fieldPath] ?? metaOf(meta, fieldPath)?.options, sample)
+  // 手工枚举优先（选项文案更清楚），没有就用注释里解析出来的；手填账号的字段直接用文本框
+  const options = loose ? undefined : coerceOptions(SUPPLEMENT_ENUMS[fieldPath] ?? metaOf(meta, fieldPath)?.options, sample)
   if (options) {
     const list = [...options]
     /**

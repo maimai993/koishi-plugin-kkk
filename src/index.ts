@@ -138,7 +138,7 @@ export const Config: Schema<Config> = Schema.intersect([
     // 全部隐藏：控制台表单里不显示，配置统一在控制台侧边栏的「kkk 配置」面板里改
     qq: buildQqSchema(Schema).hidden().description('QQ 适配器（只对 QQ 平台生效）'),
     advanced: Schema.object({
-    masters: Schema.array(Schema.string()).default([]).description('主人账号（QQ 号）：接收报错通知，以及执行只有主人能用的指令'),
+    masters: Schema.array(Schema.string()).default([]).description('主人账号（用户 ID，例如 123456789）：接收报错通知，以及执行只有主人能用的指令'),
     dataPath: Schema.string().default('data').description('数据目录：配置、数据库、临时文件都放在这里'),
     debug: Schema.boolean().default(false).description('在日志里输出调试信息，排查问题时才需要打开'),
     autoParse: Schema.boolean().default(true).description('群里有人发链接（或回复一条带链接的消息）就自动解析，不用打指令'),
@@ -284,7 +284,7 @@ const PERM_KEYWORDS = ['all', 'admin', 'master', 'group.owner', 'group.admin']
  * 除了 `all` / `admin` / `master` 这些关键字，还允许：
  *   - `*`：等同 all（谁都可以）
  *   - 直接写账号：`123456` 或 `123456, 234567`（多个用逗号 / 空格分隔）
- *     —— 配置里写具体 QQ 号时，只有这些账号能用该功能。
+ *     —— 配置里写具体**用户 ID**（Koishi 的 session.userId，不是 QQ 号）时，只有这些账号能用该功能。
  */
 function checkPermission (session: any, perm?: string | string[]): boolean {
   if (!perm) return true
