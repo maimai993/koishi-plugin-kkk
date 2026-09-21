@@ -342,9 +342,23 @@ export async function renderTemplateHtml (route: string, data: any, dark: boolea
  * 不设的话高分辨率卡片会被截成 1x，群里看着又小又糊；顺带把视口撑到整张卡片大小，
  * 否则比视口高的卡片会被裁掉一截（表现就是「截图只有一部分」）。
  */
+/** 用了 kkkshot 只提示一次（每张卡片都刷一行没意义） */
+let kkkshotLogged = false
+
 async function screenshot (htmlPath: string, selector: string, timeout: number, scale = 1, format: 'png' | 'jpeg' = 'jpeg'): Promise<string> {
-  const puppeteer: any = (getKoishiContext() as any)?.puppeteer
-  if (!puppeteer) throw new Error('未安装 koishi-plugin-puppeteer，无法渲染图片')
+  const koishiCtx: any = getKoishiContext()
+  /**
+   * **优先用 kkkshot**（装了 koishi-plugin-kkkshot 就有这个服务）。
+   *
+   * 它复用常驻浏览器与页面、导航只等 domcontentloaded + 字体/图片，不等网络空闲，
+   * 同一张卡片实测比「每次新开页面 + networkidle0」快 2 倍以上（用户反馈 pupp 渲染特别慢）。
+   * 没有这个服务（或它出错）就退回下面的 puppeteer 路径，行为与以前一致。
+   */
+  const kkkshot: any = koishiCtx?.kkkshot
+  const puppeteer: any = koishiCtx?.puppeteer
+  if (!kkkshot && !puppeteer) {
+    throw new Error('未安装 koishi-plugin-puppeteer（或 koishi-plugin-kkkshot），无法渲染图片')
+  }
 
   // 卡片是给手机看的：**低于 2x 会明显发虚**，所以下限锁 2（上限 3）。
   // 想更大更清晰就调 `app.renderScale`（100 → 2x，150 → 3x），配 100 时保持 2x 不出错。
@@ -354,6 +368,27 @@ async function screenshot (htmlPath: string, selector: string, timeout: number, 
   try {
     if (fs.statSync(htmlPath).size > 6 * 1024 * 1024) deviceScaleFactor = Math.max(1, deviceScaleFactor - 1)
   } catch { /* 忽略 */ }
+
+  /**
+   * kkkshot 快路径：接口与下面的 capture 一样（按元素盒子裁切、底色贴卡片），
+   * 但页面是复用的、也不等网络空闲。出错就继续往下走原来的路径。
+   */
+  if (kkkshot && typeof kkkshot.renderFile === 'function') {
+    try {
+      const started = Date.now()
+      const buffer = await kkkshot.renderFile(htmlPath, { selector, timeout, deviceScaleFactor, format, quality: 92 })
+      if (buffer && buffer.length) {
+        if (!kkkshotLogged) {
+          kkkshotLogged = true
+          logger.info('[Render] 使用 kkkshot 高速截图服务渲染卡片（复用常驻页面，不等网络空闲）')
+        }
+        logger.debug('[Render] kkkshot 渲染 ' + htmlPath.split(/[\\/]/).pop() + ' 用时 ' + (Date.now() - started) + 'ms')
+        return Buffer.from(buffer).toString('base64')
+      }
+    } catch (error: any) {
+      logger.warn('[Render] kkkshot 渲染失败，回退到 koishi-plugin-puppeteer：' + String(error?.message ?? error))
+    }
+  }
 
   /**
    * 视口用卡片的**设计宽度**（模板都按 1440 排版），高度按内容量一次。
