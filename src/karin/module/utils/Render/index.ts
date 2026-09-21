@@ -5,7 +5,7 @@
  * Koishi 侧不引入 ktr 的构建管线（需要 vite/tailwind 打包），改为：
  *   1. 直接用 **react-dom/server** 对上游模板组件做 SSR（模板只依赖 \`{ data, ctx }\` props）；
  *   2. 内联上游构建产物 \`resources/template/style.css\`（tailwind 编译结果，省掉 tailwind 构建）；
- *   3. 用 koishi-plugin-puppeteer 截图。
+ *   3. 优先用 koishi-plugin-puppeteer 截图（没有它才退回 koishi-plugin-shotkit 内核）。
  * 路由不在注册表里、或 SSR 失败时，回退到内置通用信息卡片，保证解析结果始终有图。
  */
 import fs from 'node:fs'
@@ -336,28 +336,24 @@ export async function renderTemplateHtml (route: string, data: any, dark: boolea
  * ------------------------------------------------------------------ */
 
 /**
- * 用 koishi-plugin-puppeteer 对一个 HTML 文件截图，返回 base64。
+ * 对一个 HTML 文件截图，返回 base64 和实际产出的 mime。
+ *
+ * 优先用 koishi-plugin-puppeteer 那条浏览器路径；没有浏览器服务时退回 shotkit 内核。
  *
  * `scale` 会作为 deviceScaleFactor（配置项 `app.renderScale`，100 = 1x，200 = 2x）：
- * 不设的话高分辨率卡片会被截成 1x，群里看着又小又糊；顺带把视口撑到整张卡片大小，
- * 否则比视口高的卡片会被裁掉一截（表现就是「截图只有一部分」）。
+ * 不设的话高分辨率卡片会被截成 1x，群里看着又小又糊。
  */
-/** 用了 kkkshot 只提示一次（每张卡片都刷一行没意义） */
-let kkkshotLogged = false
+/** 用了 shotkit 只提示一次（每张卡片都刷一行没意义） */
+let shotkitLogged = false
 
-async function screenshot (htmlPath: string, selector: string, timeout: number, scale = 1, format: 'png' | 'jpeg' = 'jpeg'): Promise<string> {
+async function screenshot (htmlPath: string, selector: string, timeout: number, scale = 1, format: 'png' | 'jpeg' = 'jpeg'): Promise<{ base64: string; mime: string }> {
   const koishiCtx: any = getKoishiContext()
-  /**
-   * **优先用 kkkshot**（装了 koishi-plugin-kkkshot 就有这个服务）。
-   *
-   * 它复用常驻浏览器与页面、导航只等 domcontentloaded + 字体/图片，不等网络空闲，
-   * 同一张卡片实测比「每次新开页面 + networkidle0」快 2 倍以上（用户反馈 pupp 渲染特别慢）。
-   * 没有这个服务（或它出错）就退回下面的 puppeteer 路径，行为与以前一致。
-   */
-  const kkkshot: any = koishiCtx?.kkkshot
-  const puppeteer: any = koishiCtx?.puppeteer
-  if (!kkkshot && !puppeteer) {
-    throw new Error('未安装 koishi-plugin-puppeteer（或 koishi-plugin-kkkshot），无法渲染图片')
+  /** 首选：浏览器渲染服务（koishi-plugin-puppeteer / puppeteer-without-canvas 之类） */
+  const puppeteer: any = koishiCtx?.get ? koishiCtx.get('puppeteer') : koishiCtx?.puppeteer
+  /** 兜底：kernel 渲染服务（koishi-plugin-shotkit），没有浏览器时才用 */
+  const shotkit: any = typeof koishiCtx?.get === 'function' ? koishiCtx.get('shotkit') : koishiCtx?.shotkit
+  if (!puppeteer && !shotkit) {
+    throw new Error('未安装 koishi-plugin-puppeteer（或 koishi-plugin-shotkit），无法渲染图片')
   }
 
   // 卡片是给手机看的：**低于 2x 会明显发虚**，所以下限锁 2（上限 3）。
@@ -370,23 +366,37 @@ async function screenshot (htmlPath: string, selector: string, timeout: number, 
   } catch { /* 忽略 */ }
 
   /**
-   * kkkshot 快路径：接口与下面的 capture 一样（按元素盒子裁切、底色贴卡片），
-   * 但页面是复用的、也不等网络空闲。出错就继续往下走原来的路径。
+   * shotkit 兜底路径：**只在没有浏览器渲染服务时**才走内核。
+   *
+   * 内核一次调用出一张图、直接按 `selector` 截元素盒子，不需要 evaluate 量尺寸，
+   * 也不执行页面 JS —— 但实测这个预编译内核在 Windows 上**加载不了 https 资源**
+   * （http / data: / file: 正常），而卡片里的封面、头像、图标全是 https，
+   * 走它会把好看的卡片渲染成一片空白。所以有人能用 Chrome 就让 Chrome 上。
+   *
+   * 哪天内核的 TLS 修好了，把上面那句 `!puppeteer &&` 去掉就能让内核优先。
+   *
+   * 格式固定 PNG：内核不支持 JPEG（支持 webp，要压体积可以把 type 改成 'webp'
+   * 并把下面的 mime 一起改掉）。
    */
-  if (kkkshot && typeof kkkshot.renderFile === 'function') {
+  if (!puppeteer && shotkit && typeof shotkit.renderFile === 'function') {
     try {
       const started = Date.now()
-      const buffer = await kkkshot.renderFile(htmlPath, { selector, timeout, deviceScaleFactor, format, quality: 92 })
+      const buffer = await shotkit.renderFile(htmlPath, {
+        selector,
+        timeout,
+        deviceScaleFactor,
+        type: 'png',
+      })
       if (buffer && buffer.length) {
-        if (!kkkshotLogged) {
-          kkkshotLogged = true
-          logger.info('[Render] 使用 kkkshot 高速截图服务渲染卡片（复用常驻页面，不等网络空闲）')
+        if (!shotkitLogged) {
+          shotkitLogged = true
+          logger.info('[Render] 使用 shotkit 内核渲染卡片（静态内核，不执行页面 JS）')
         }
-        logger.debug('[Render] kkkshot 渲染 ' + htmlPath.split(/[\\/]/).pop() + ' 用时 ' + (Date.now() - started) + 'ms')
-        return Buffer.from(buffer).toString('base64')
+        logger.debug('[Render] shotkit 渲染 ' + htmlPath.split(/[\\/]/).pop() + ' 用时 ' + (Date.now() - started) + 'ms')
+        return { base64: Buffer.from(buffer).toString('base64'), mime: 'image/png' }
       }
     } catch (error: any) {
-      logger.warn('[Render] kkkshot 渲染失败，回退到 koishi-plugin-puppeteer：' + String(error?.message ?? error))
+      logger.warn('[Render] shotkit 渲染失败，回退到 koishi-plugin-puppeteer：' + String(error?.message ?? error))
     }
   }
 
@@ -466,7 +476,7 @@ async function screenshot (htmlPath: string, selector: string, timeout: number, 
       type: format,
       quality: format === 'jpeg' ? 92 : undefined
     } as any)
-    return buffer.toString('base64')
+    return { base64: buffer.toString('base64'), mime: 'image/' + format }
   }
 
   /**
@@ -594,12 +604,13 @@ export const Render = async (_event: any, route: string, data: any): Promise<any
     // 二维码：必须像素级清晰（JPEG 压缩会影响扫码），继续用 PNG；其它卡片用 JPEG 压体积
     const isQrCode = /qrcode/i.test(route)
     const format: 'png' | 'jpeg' = isQrCode ? 'png' : 'jpeg'
-    const base64 = await screenshot(htmlPath, '#container', Number(Config.app?.RenderWaitTime ?? 10) * 1000, scale, format)
+    // mime 由 screenshot 返回实际产出的格式：shotkit 走 PNG，其余路径仍是传入的 format
+    const { base64, mime } = await screenshot(htmlPath, '#container', Number(Config.app?.RenderWaitTime ?? 10) * 1000, scale, format)
     const buffer = Buffer.from(base64, 'base64')
     const meta = getImageMetadata(buffer)
-    logger.debug('[Render] ' + route + ' 渲染完成 ' + format + ' ' + (meta.width ?? '?') + 'x' + (meta.height ?? '?') + ' ' + Math.round(buffer.length / 1024) + 'KB')
-    // 用带 mime 的 data URL，适配器才知道按 JPEG 上传（base64:// 会被当成 PNG）
-    return [segment.image('data:image/' + format + ';base64,' + base64)]
+    logger.debug('[Render] ' + route + ' 渲染完成 ' + mime + ' ' + (meta.width ?? '?') + 'x' + (meta.height ?? '?') + ' ' + Math.round(buffer.length / 1024) + 'KB')
+    // 用带 mime 的 data URL，适配器才知道按对应格式上传（base64:// 会被当成 PNG）
+    return [segment.image('data:' + mime + ';base64,' + base64)]
   } catch (error: any) {
     logger.warn('[Render] ' + route + ' 渲染失败：' + (error?.message ?? error))
     return []

@@ -84,8 +84,8 @@ export const inject = {
   // ffmpeg：由 koishi-plugin-ffmpeg-path 提供，兼容层的 ffmpeg()/ffprobe() 会优先用它
   // assets：koishi-plugin-assets-qqbot-part-file 之类提供的图床服务，
   // 面板卡片要上传成 https 地址才能放进 QQ 的 markdown 图片里
-  // kkkshot：koishi-plugin-kkkshot 提供的高速截图服务；装了就用它渲染卡片（没装走 puppeteer）
-  optional: ['puppeteer', 'kkkshot', 'database', 'http', 'ffmpeg', 'assets', 'server', 'console']
+  // shotkit：koishi-plugin-shotkit 提供的内核截图服务；装了就用它渲染卡片（没装退回 puppeteer）
+  optional: ['shotkit', 'puppeteer', 'database', 'http', 'ffmpeg', 'assets', 'server', 'console']
 }
 
 export interface Config {

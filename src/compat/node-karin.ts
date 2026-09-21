@@ -684,7 +684,7 @@ export const db = {
 export const render = {
   /**
    * karin 的 render.render：给 HTML 文件截图。
-   * 这里走 koishi-plugin-puppeteer（可选依赖）。
+   * 优先用 koishi-plugin-puppeteer，没有浏览器服务时才退回 koishi-plugin-shotkit 内核。
    */
   async render (options: {
     name?: string
@@ -698,7 +698,33 @@ export const render = {
   }): Promise<string> {
     const runtime = getRuntime()
     const puppeteer: any = (runtime.ctx as any).puppeteer
-    if (!puppeteer) throw new Error('[kkk] 渲染失败：未安装 koishi-plugin-puppeteer')
+    /**
+     * shotkit 兜底：**只在没有浏览器渲染服务时**才走内核。
+     * 这个预编译内核在 Windows 上加载不了 https 资源（http / data: / file: 正常），
+     * 弹幕条这类带远程图的内容走它会缺图，所以能开浏览器就用浏览器。
+     */
+    const shotkit: any = !puppeteer && typeof (runtime.ctx as any).get === 'function'
+      ? (runtime.ctx as any).get('shotkit')
+      : (!puppeteer ? (runtime.ctx as any).shotkit : undefined)
+    if (shotkit && typeof shotkit.renderFile === 'function') {
+      try {
+        const request: any = {
+          // fullPage 和 selector 互斥：要整页就别给选择器
+          fullPage: options.fullPage ?? false,
+          omitBackground: options.omitBackground ?? true,
+          type: options.type ?? 'png',
+          scale: 2,
+          pageGotoParams: options.pageGotoParams
+        }
+        if (!request.fullPage) request.selector = options.selector ?? '#container'
+        const buffer = await shotkit.renderFile(options.file, request)
+        if (buffer && buffer.length) return buffer.toString('base64')
+      } catch (error: any) {
+        logger.debug('[kkk] shotkit 渲染失败，回退到 puppeteer：' + String(error?.message ?? error))
+      }
+    }
+
+    if (!puppeteer) throw new Error('[kkk] 渲染失败：未安装 koishi-plugin-puppeteer（或 koishi-plugin-shotkit）')
 
     const screenshotOptions: any = {
       file: options.file,
