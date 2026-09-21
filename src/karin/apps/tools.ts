@@ -17,6 +17,8 @@ import {
   type PanelRequest
 } from '@/module/utils/QqPanel'
 import { isBurnDanmakuForbidden, isBurnDanmakuSupported } from '@/module/utils/DanmakuPolicy'
+// 解析结果合并转发（支持的平台）：把一次解析产生的所有内容合并成一条转发，过程提示不进去
+import { withParseForward } from '@/module/utils/ParseForward'
 // 注意路径同样不能用 @/：@/ 指向 karin/，而播放器在 src/player（见 src/player/index.ts）
 // 这里在 src/karin/apps/ 下，到 src/ 是两级；写成三级会解析到仓库根，tools 整个应用会加载失败
 import { isOnlinePlayerEnabled } from '../../player'
@@ -134,8 +136,17 @@ const tryQqPanel = async (
 }
 
 // 包装抖音处理函数
-const handleDouyin = wrapWithErrorHandler(
+const handleDouyin = withParseForward(wrapWithErrorHandler(
   async (e, next) => {
+    /**
+     * 平台解析总开关（配置里的「抖音解析」）：关掉时这个平台**什么都不做** ——
+     * 不回提示、不报缺 Cookie、不记统计，也不去碰消息（用户要求：
+     * 「关闭平台解析，这个平台的逻辑不要做任何处理」）。
+     */
+    if (!Config.douyin.switch) {
+      logger.debug('[抖音] 平台解析已关闭，忽略这条消息')
+      return next()
+    }
     // 面板指令里的参数先摘掉，避免污染后面的链接匹配
     const flags = parseParseFlags(e.msg)
     e.msg = flags.cleaned
@@ -212,11 +223,16 @@ const handleDouyin = wrapWithErrorHandler(
   {
     businessName: '抖音视频解析'
   }
-)
+))
 
 // 包装B站处理函数
-const handleBilibili = wrapWithErrorHandler(
+const handleBilibili = withParseForward(wrapWithErrorHandler(
   async (e, next) => {
+    /** 平台解析总开关（「哔哩哔哩解析」）：关掉时这个平台什么都不做（详见 handleDouyin 上的说明） */
+    if (!Config.bilibili.switch) {
+      logger.debug('[B站] 平台解析已关闭，忽略这条消息')
+      return next()
+    }
     // 面板指令里的参数先摘掉，避免污染后面的链接匹配（BV 号是整串匹配，多一个参数就匹配不上）
     const flags = parseParseFlags(e.msg)
     e.msg = flags.cleaned
@@ -319,11 +335,17 @@ const handleBilibili = wrapWithErrorHandler(
   {
     businessName: 'B站视频解析'
   }
-)
+))
 
 // 包装快手处理函数
-const handleKuaishou = wrapWithErrorHandler(
+const handleKuaishou = withParseForward(wrapWithErrorHandler(
   async (e) => {
+    /** 平台解析总开关（「快手解析」）：关掉时这个平台什么都不做（详见 handleDouyin 上的说明）。
+     *  快手这条链路没有 next()，直接返回即可。 */
+    if (!Config.kuaishou.switch) {
+      logger.debug('[快手] 平台解析已关闭，忽略这条消息')
+      return
+    }
     const kuaishouUrl = e.msg.replaceAll('\\', '').match(/(https:\/\/v\.kuaishou\.com\/\w+|https:\/\/www\.kuaishou\.com\/f\/[a-zA-Z0-9]+)/g)
     const startedAt = Date.now()
     // 解析参数（--q= 画质等）：之前这个分支没解析参数，面板选的画质从来没生效过
@@ -346,11 +368,20 @@ const handleKuaishou = wrapWithErrorHandler(
   {
     businessName: '快手视频解析'
   }
-)
+))
 
 // 包装小红书处理函数
-const handleXiaohongshu = wrapWithErrorHandler(
+const handleXiaohongshu = withParseForward(wrapWithErrorHandler(
   async (e, next) => {
+    /**
+     * 平台解析总开关（「小红书解析」）：关掉时**必须**在这里拦住 ——
+     * 以前只在「自动解析」那条命令上判断，走 #解析 / 引用解析进来的链接照样会跑到底，
+     * 于是用户关了小红书仍会收到「我还没有小红书的 Cookies」（线上反馈就是这个）。
+     */
+    if (!Config.xiaohongshu.switch) {
+      logger.debug('[小红书] 平台解析已关闭，忽略这条消息')
+      return next()
+    }
     const cleaned = e.msg.replaceAll('\\', '')
     const m = cleaned.match(/https?:\/\/[^\s"'<>]+/)
     const url = m?.[0]
@@ -379,7 +410,7 @@ const handleXiaohongshu = wrapWithErrorHandler(
   {
     businessName: '小红书视频解析'
   }
-)
+))
 
 // 包装引用解析函数（支持 #解析 和 #弹幕解析）
 const handlePrefix = wrapWithErrorHandler(

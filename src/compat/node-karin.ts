@@ -15,6 +15,7 @@ import { h } from 'koishi'
 import type { Bot, Context, Session } from 'koishi'
 
 import { logger } from './logger'
+import { COLLECTED_MESSAGE_ID, collectForward } from './forward-collect'
 import { commandQueue, eventQueue, getRuntime, karinPathBase, taskQueue, tryGetRuntime } from './runtime'
 import { segment } from './segment'
 import { syncUpstreamToKoishi } from './syncConfig'
@@ -174,6 +175,9 @@ export class KkkBot {
     const channelId = typeof contact === 'string' ? contact : contact.peer
     const payload = elements instanceof ForwardPayload ? elements : new ForwardPayload(normalizeContent(elements))
 
+    /** 解析结果合并转发：已经在收集了就并进去，别再套一层转发 */
+    if (collectForward(channelId, payload.elements)) return { messageId: COLLECTED_MESSAGE_ID }
+
     if (supportsForward(this.bot)) {
       try {
         const ids = await this.bot.sendMessage(channelId, [h('message', ...payload.elements)] as any)
@@ -220,6 +224,8 @@ export class KkkBot {
       if (!fs.existsSync(filePath)) throw new Error('上传文件不存在: ' + filePath)
       element = segment.file(fs.readFileSync(filePath), name ?? path.basename(filePath))
     }
+    /** 解析结果合并转发：文件（视频/群文件）也要进转发 */
+    if (collectForward(channelId, [element])) return { messageId: COLLECTED_MESSAGE_ID, rawData: undefined }
     return this.bot.sendMessage(channelId, [element] as any)
   }
 
@@ -272,6 +278,8 @@ export class KkkBot {
 
   /** 发送消息（karin 的 bot.sendMsg） */
   async sendMsg (contact: Contact | string, content: any, _options?: any): Promise<{ messageId: string }> {
+    /** 解析结果合并转发：正在收集就攒起来（见 compat/forward-collect） */
+    if (collectForward(peerOf(contact), content)) return { messageId: COLLECTED_MESSAGE_ID }
     const channelId = typeof contact === 'string' ? contact : contact.peer
     const ids = await this.bot.sendMessage(channelId, normalizeContent(content) as any)
     return { messageId: ids[ids.length - 1] ?? '' }
@@ -396,6 +404,12 @@ export class Message {
     const elements = normalizeContent(content)
 
     /**
+     * 解析结果合并转发：正在收集就攒起来，等解析结束发一条转发（见 compat/forward-collect）。
+     * 回一个假的消息 ID：调用方普遍只看「有没有拿到 ID」（例如 uploadFile 判断发送成没成功）。
+     */
+    if (collectForward(this.contact?.peer ?? '', elements)) return { messageId: COLLECTED_MESSAGE_ID }
+
+    /**
      * 主动消息兜底（重点）。
      *
      * QQ 适配器在「被动回复超限」时**不一定抛异常**：它只是发不出去、返回空数组，
@@ -440,6 +454,11 @@ function normalizeContent (content: any): any[] {
   return Array.isArray(content) ? content : [content]
 }
 
+/** 取出一个 contact 对应的频道 id（字符串直接当 id） */
+function peerOf (contact: Contact | string): string {
+  return typeof contact === 'string' ? contact : String((contact as Contact)?.peer ?? '')
+}
+
 /**
  * 合并转发的载荷。
  *
@@ -465,6 +484,14 @@ export function makeForward (elements: any, botId?: string, botName?: string): F
  * OneBot 系（platform 为 onebot / red / chronocat…）支持 Satori 的 \`<message>\` 元素；
  * QQ 官方 API（qqguild / qq / qqbot）没有这个能力，必须退化。
  */
+/**
+ * 这台适配器能不能发合并转发（导出给「解析结果合并转发」用：不支持就保持逐条发送的老样子）。
+ * @param bot Koishi 的 Bot（或任何带 platform 的对象）
+ */
+export function isForwardSupported (bot: any): boolean {
+  return supportsForward(bot)
+}
+
 function supportsForward (bot: any): boolean {
   const platform = String(bot?.platform ?? '')
   if (!platform) return false
@@ -512,7 +539,11 @@ function on (event: string, handler: (...args: any[]) => any) {
 async function sendMsg (selfId: string, contact: Contact | string, content: any, _options?: any) {
   const bot = resolveBot(selfId)
   if (!bot) throw new Error('[kkk] 没有可用的机器人实例，无法发送消息')
-  const channelId = typeof contact === 'string' ? contact : contact.peer
+  const channelId = peerOf(contact)
+  /** 解析结果合并转发：这条也走漏斗（karin.sendMsg 是业务代码另一条常用出口） */
+  if (collectForward(channelId, normalizeContent(content))) {
+    return { messageId: COLLECTED_MESSAGE_ID, rawData: [] }
+  }
   const ids = await bot.bot.sendMessage(channelId, normalizeContent(content) as any)
   return { messageId: ids[ids.length - 1] ?? '', rawData: ids }
 }
@@ -1408,6 +1439,14 @@ export const karin = {
   segment,
   root: {}
 }
+
+/**
+ * 解析结果合并转发用的收集器（见 compat/forward-collect）。
+ *
+ * 业务侧一般只用得到 `withoutForwardCollect`：把「过程提示」那次发送包起来，
+ * 让它不要被收进最终那条转发里。
+ */
+export { COLLECTED_MESSAGE_ID, collectForward, currentForwardBag, drainForward, runWithForwardBag, withoutForwardCollect } from './forward-collect'
 
 export { logger, segment, syncUpstreamToKoishi }
 export default karin

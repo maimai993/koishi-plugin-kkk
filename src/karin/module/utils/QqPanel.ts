@@ -20,7 +20,7 @@
  * 「烧录弹幕」那一列出不出现由**配置**决定（见 DanmakuPolicy），面板里没有开关按钮：
  * 关着就只有「清晰度 / 大小」两列，用户点哪个都是纯视频。
  */
-import { logger, segment, type Message } from 'node-karin'
+import { logger, segment, withoutForwardCollect, type Message } from 'node-karin'
 import fs from 'node:fs'
 
 import { commandInvocation, tryGetRuntime } from '../../../compat/runtime'
@@ -401,7 +401,8 @@ export async function recallLastPanel (e: Message): Promise<void> {
 async function showLoadingTip (e: Message): Promise<string | undefined> {
   try {
     await recallLastPanel(e)
-    const tip: any = await e.reply('加载中…')
+    // 「加载中…」也是过程提示，不进合并转发
+    const tip: any = await withoutForwardCollect(() => e.reply('加载中…'))
     const id = tip?.messageId
     rememberPanelMessage(e, id)
     return id
@@ -470,7 +471,11 @@ export async function replyReplacing (e: Message, content: any): Promise<any> {
   try {
     if (runtime?.config?.recallPanel !== false) await recallLastPanel(e)
   } catch { /* 撤不掉就继续发 */ }
-  const sent: any = await e.reply(content)
+  /**
+   * 「检测到链接，开始解析」「收到请求，开始下载」这类都是**过程提示**：
+   * 照常直接发，但不参与「解析结果合并转发」（用户要求：转发里不包含过程提示）。
+   */
+  const sent: any = await withoutForwardCollect(() => e.reply(content))
   rememberPanelMessage(e, sent?.messageId)
   return sent
 }

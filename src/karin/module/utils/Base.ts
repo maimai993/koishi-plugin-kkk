@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 
-import karin, { type Contact, logger, Message, segment } from 'node-karin'
+import karin, { type Contact, logger, Message, segment, withoutForwardCollect } from 'node-karin'
 import type { AxiosHeaders, AxiosRequestConfig, Method, RawAxiosRequestHeaders } from 'node-karin/axios'
 
 import { baseHeaders, Common, compressVideo, extractTotalBytesFromHeaders, getMediaDuration, Networks } from '@/module/utils'
@@ -245,7 +245,8 @@ export const uploadFile = async (event: Message, file: fileInfo, videoUrl: strin
       options?.message_id ? segment.reply(options.message_id) : segment.text('')
     ]
 
-    const msg1 = await karin.sendMsg(selfId, contact, message)
+    // 「正在压缩」属于过程提示：不进合并转发
+    const msg1 = await withoutForwardCollect(() => karin.sendMsg(selfId, contact, message))
     // 计算目标视频平均码率
     const targetBitrate = Common.calculateBitrate(Config.app.compresstrigger, Duration) * 0.75
     // 执行压缩
@@ -264,7 +265,7 @@ export const uploadFile = async (event: Message, file: fileInfo, videoUrl: strin
       segment.text(`压缩后最终视频大小为: ${newFileSize.toFixed(1)} MB，压缩耗时：${((endTime - startTime) / 1000).toFixed(1)} 秒`),
       segment.reply(msg1.messageId)
     ]
-    await karin.sendMsg(selfId, contact, message2)
+    await withoutForwardCollect(() => karin.sendMsg(selfId, contact, message2))
   }
 
   /**
@@ -320,7 +321,8 @@ export const uploadFile = async (event: Message, file: fileInfo, videoUrl: strin
       const tipText = useGroupFile
         ? '发送中…（超过 QQ 限制，将以群文件发送）'
         : '发送中…'
-      const tip: any = await event.reply(tipText)
+      // 「发送中…」是过程提示：不进合并转发（视频本体才进）
+      const tip: any = await withoutForwardCollect(() => event.reply(tipText))
       sendingTipId = tip?.messageId
     }
   } catch (error) {
