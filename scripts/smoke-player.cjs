@@ -591,6 +591,18 @@ setTimeout(async () => {
     const expiredPage = await request('/kkk/player/' + token)
     check('过期后的链接 → 404', expiredPage.status === 404, 'status=' + expiredPage.status)
     check('404 页面提示「链接已过期」', expiredPage.body.toString('utf-8').includes('链接已过期'))
+    /**
+     * 过期页也要有「直接跳转 / 手动复制」两个按钮（用户要求）：用户多是点聊天记录里的旧链接进来的，
+     * 这时能直接复制这条链接去别处重试、或换浏览器打开。
+     */
+    const expiredHtml = expiredPage.body.toString('utf-8')
+    check('过期页有「直接跳转」与「手动复制」两个按钮',
+      /id="pageLinkJump"/.test(expiredHtml) && /id="pageLinkCopy"/.test(expiredHtml) &&
+      expiredHtml.includes('直接跳转') && expiredHtml.includes('手动复制'),
+      (expiredHtml.match(/<div class="linkrow">[\s\S]{0,180}/) || ['（没有链接行）'])[0].replace(/\s+/g, ' ').slice(0, 160))
+    check('过期页的按钮用剪贴板 + 降级方案（不依赖外网脚本）',
+      expiredHtml.includes('navigator.clipboard') && expiredHtml.includes('execCommand') &&
+      !/https?:\/\/[^"']*\.js/.test(expiredHtml))
     const expiredVideo = await request('/kkk/player/' + token + '/video')
     check('过期后的视频接口 → 404', expiredVideo.status === 404, 'status=' + expiredVideo.status)
 
@@ -1155,6 +1167,10 @@ setTimeout(async () => {
       dlHtml.includes('href="/kkk/player/' + dlToken + '/video?download=1"') &&
       /class="dlbtn"[^>]*>\s*<svg viewBox="0 0 24 24"/.test(dlHtml),
       (dlHtml.match(/<a class="dlbtn"[^>]*>/) || ['（没有下载按钮）'])[0])
+    check('播放页也有「直接跳转 / 手动复制」两个按钮',
+      /id="pageLinkJump"/.test(dlHtml) && /id="pageLinkCopy"/.test(dlHtml) &&
+      dlHtml.includes('本页链接') && dlHtml.includes('手动复制'),
+      (dlHtml.match(/<div class="linkrow">[\s\S]{0,180}/) || ['（没有链接行）'])[0].replace(/\s+/g, ' ').slice(0, 160))
     check('下载按钮不引外链（页面依旧零外网依赖）',
       !/https?:\/\//.test((dlHtml.match(/<a class="dlbtn"[^>]*>/) || [''])[0]))
     const dl = await request('/kkk/player/' + dlToken + '/video?download=1')

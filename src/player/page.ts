@@ -234,6 +234,15 @@ const PLAYER_STYLE = [
   '.act svg{font-size:21px;color:#c9ccd3}',
   /* 下载按钮：B站那排操作按钮里「下载」的位置，做成实心主色按钮，一眼能看见 */
   '.downbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:14px 2px 2px;}',
+  /* 链接行：本页链接 + 直接跳转 / 手动复制（用户要求） */
+  '.linkrow{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:12px 2px 2px;'
+  + 'padding:10px 14px;background:var(--card);border-radius:8px;}',
+  '.linklabel{color:var(--muted);font-size:13px;flex:0 0 auto;}',
+  '.linktext{color:#dfe2e8;font-size:13px;word-break:break-all;flex:1 1 220px;min-width:0;}',
+  '.linkbtn{height:32px;padding:0 14px;border-radius:6px;border:1px solid #3a3d44;background:#25272d;'
+  + 'color:#e6e8ec;font-size:13px;cursor:pointer;}',
+  '.linkbtn:hover{border-color:var(--pink);color:#fff;}',
+  '.linkhint{color:var(--pink);font-size:12px;flex:0 0 auto;}',
   '.dlbtn{display:inline-flex;align-items:center;gap:8px;height:38px;padding:0 18px;border-radius:8px;',
   'background:var(--pink);color:#fff;font-size:14px;font-weight:600;cursor:pointer;}',
   '.dlbtn svg{font-size:20px}',
@@ -319,6 +328,21 @@ export function renderPlayerPage (info: PlayerPageInfo): string {
     actionHtml(ICON.share, '分享', info.shares)
   ].join('')
 
+  /**
+   * 链接行（用户要求）：把「本页链接」显示出来，下面配两个按钮 ——
+   *   - 直接跳转：新标签打开这条链接（QQ 内置浏览器里想换系统浏览器时很有用）；
+   *   - 手动复制：复制到剪贴板（失败就退化成可全选的文本框，QQ 里长按也能复制）。
+   * 真地址在浏览器里由脚本填（服务端不知道用户到底是从哪个域名/端口进来的，反代场景尤其如此）。
+   * 点完任一按钮就把原始链接文本收起来（用户要求：点击后删除链接的显示），页面干净些。
+   */
+  const linkRow = '<div class="linkrow">'
+    + '<span class="linklabel">本页链接</span>'
+    + '<span class="linktext" id="pageLinkText">（正在获取…）</span>'
+    + '<button type="button" class="linkbtn" id="pageLinkJump">直接跳转</button>'
+    + '<button type="button" class="linkbtn" id="pageLinkCopy">手动复制</button>'
+    + '<span class="linkhint" id="pageLinkHint"></span>'
+    + '</div>'
+
   const cover = info.cover
     ? '<div class="cover"><img src="/kkk/player/' + token + '/cover" alt="">'
       + (duration ? '<span class="dur">' + duration + '</span>' : '') + '</div>'
@@ -390,6 +414,7 @@ export function renderPlayerPage (info: PlayerPageInfo): string {
     + '<a class="dlbtn" id="downloadBtn" href="/kkk/player/' + token + '/video?download=1" download>'
     + ICON.download + '<span>下载视频</span></a>'
     + '<span class="dlhint">保存到本机（原画质，不重新编码）</span></div>\n'
+    + linkRow + '\n'
     + (actions ? '  <div class="actions">' + actions + '</div>\n' : '')
     + (info.localOnly
       ? '  <div class="warnlocal"><b>未配置公网地址，仅本机可访问</b>：这条链接用的是管理员机器的本机地址，'
@@ -409,6 +434,53 @@ export function renderPlayerPage (info: PlayerPageInfo): string {
  * 过期 / 无效令牌的提示页（HTTP 状态码是 404）。
  * 用户从群里点进来的链接多半已经躺在聊天记录里很久了，这里要说清楚「为什么打不开」。
  */
+/**
+ * 「直接跳转 / 手动复制」两个按钮的行为（播放页与过期页共用一份逻辑）。
+ *
+ * 真地址用 `location.href` 在浏览器里取：服务端不知道用户是从哪个域名/端口进来的
+ * （配了公网地址 + 反向代理时更是如此），写死服务端看到的地址会给出错链接。
+ * 剪贴板 API 在 http / QQ 内置浏览器里可能不可用，失败就退化成可全选的文本框。
+ */
+const EXPIRED_LINK_SCRIPT = [
+  "(function () {",
+  "  'use strict'",
+  "  var textEl = document.getElementById('pageLinkText')",
+  "  var hintEl = document.getElementById('pageLinkHint')",
+  "  var jumpBtn = document.getElementById('pageLinkJump')",
+  "  var copyBtn = document.getElementById('pageLinkCopy')",
+  "  var pageUrl = location.href",
+  "  if (textEl) textEl.textContent = pageUrl",
+  "  /** 点完按钮收起原始链接文本（用户要求：点击后删除链接的显示） */",
+  "  function collapseLink (hint) {",
+  "    if (textEl) { textEl.textContent = '（链接已收起，点上方按钮仍可使用）'; textEl.style.color = '#7d818a' }",
+  "    if (hintEl) hintEl.textContent = hint || ''",
+  "  }",
+  "  if (jumpBtn) jumpBtn.addEventListener('click', function () {",
+  "    window.open(pageUrl, '_blank', 'noopener')",
+  "    collapseLink('已在新标签打开')",
+  "  })",
+  "  if (copyBtn) copyBtn.addEventListener('click', function () {",
+  "    function fallbackCopy () {",
+  "      var ta = document.createElement('textarea')",
+  "      ta.value = pageUrl",
+  "      ta.style.position = 'fixed'; ta.style.opacity = '0'",
+  "      document.body.appendChild(ta)",
+  "      ta.select(); ta.setSelectionRange(0, ta.value.length)",
+  "      var ok = false",
+  "      try { ok = document.execCommand('copy') } catch (err) { ok = false }",
+  "      document.body.removeChild(ta)",
+  "      collapseLink(ok ? '已复制' : '复制失败，请长按上面的链接文本手动复制')",
+  "      return ok",
+  "    }",
+  "    if (navigator.clipboard && navigator.clipboard.writeText) {",
+  "      navigator.clipboard.writeText(pageUrl).then(function () { collapseLink('已复制') }, fallbackCopy)",
+  "    } else {",
+  "      fallbackCopy()",
+  "    }",
+  "  })",
+  "})()"
+].join('\n')
+
 export function renderExpiredPage (): string {
   return '<!DOCTYPE html>\n<html lang="zh-CN">\n<head>\n'
     + '<meta charset="utf-8">\n'
@@ -418,10 +490,36 @@ export function renderExpiredPage (): string {
     + '.box{max-width:520px;margin:18vh auto 0;padding:0 24px;text-align:center;}'
     + '.box h1{font-size:20px;margin:0 0 12px;color:#fff;font-weight:600;}'
     + '.box p{color:var(--muted);font-size:14px;line-height:1.9;margin:0;}'
+    + '.linkrow{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:center;'
+    + 'margin-top:18px;padding:10px 14px;background:var(--card);border-radius:8px;}'
+    + '.linklabel{color:var(--muted);font-size:13px;}'
+    + '.linktext{color:#dfe2e8;font-size:13px;word-break:break-all;flex:1 1 200px;min-width:0;text-align:left;}'
+    + '.linkbtn{height:32px;padding:0 14px;border-radius:6px;border:1px solid #3a3d44;background:#25272d;'
+    + 'color:#e6e8ec;font-size:13px;cursor:pointer;}'
+    + '.linkbtn:hover{border-color:var(--pink);color:#fff;}'
+    + '.linkhint{color:var(--pink);font-size:12px;}'
     + '</style>\n</head>\n<body>\n'
+    /**
+     * 过期页的内联脚本：跟播放页那两个按钮同一套行为（填链接 / 跳转 / 复制 / 点击后收起链接文本）。
+     * 单独放一份是因为过期页不加载播放器脚本（那边有 canvas 弹幕那一大坨，没必要带进来）。
+     */
+    + '<script>' + EXPIRED_LINK_SCRIPT + '<\/script>'
     + '<div class="box">\n<h1>链接已过期</h1>\n'
     + '<p>这个在线播放链接已经过期（或者视频已经被清理），视频与弹幕都不再保留。<br>'
-    + '需要再看的话，重新发一次链接让机器人解析即可。</p>\n</div>\n'
+    + '需要再看的话，重新发一次链接让机器人解析即可。</p>\n'
+    /**
+     * 过期页也给「直接跳转 / 手动复制」两个按钮（用户要求）：
+     * 用户往往是点聊天记录里的旧链接进来的，这时能直接复制这条链接去别处重试、或换浏览器打开。
+     */
+    + '<div class="linkrow">'
+    + '<span class="linklabel">这条链接</span>'
+    + '<span class="linktext" id="pageLinkText">（正在获取…）</span>'
+    + '<button type="button" class="linkbtn" id="pageLinkJump">直接跳转</button>'
+    + '<button type="button" class="linkbtn" id="pageLinkCopy">手动复制</button>'
+    + '<span class="linkhint" id="pageLinkHint"></span>'
+    + '</div>\n'
+    + '</div>\n'
+    + '<script>' + EXPIRED_LINK_SCRIPT + '</script>\n'
     + '</body>\n</html>\n'
 }
 
@@ -999,6 +1097,43 @@ const PLAYER_SCRIPT = [
   "    .catch(function (error) {",
   "      showNotice('弹幕加载失败：' + (error && error.message ? error.message : error) + '（视频仍可播放）')",
   "    })",
+  "  /* ===== 本页链接：直接跳转 / 手动复制（用户要求） ===== */",
+  "  var linkTextEl = document.getElementById('pageLinkText')",
+  "  var linkHintEl = document.getElementById('pageLinkHint')",
+  "  var linkJumpBtn = document.getElementById('pageLinkJump')",
+  "  var linkCopyBtn = document.getElementById('pageLinkCopy')",
+  "  var pageUrl = location.href",
+  "  if (linkTextEl) linkTextEl.textContent = pageUrl",
+  "  /** 点完按钮就把原始链接文本收起来（用户要求：点击后删除链接的显示），只留一句状态 */",
+  "  function collapseLink (hint) {",
+  "    if (linkTextEl) { linkTextEl.textContent = '（链接已收起，点上方按钮仍可使用）'; linkTextEl.style.color = '#7d818a' }",
+  "    if (linkHintEl) linkHintEl.textContent = hint || ''",
+  "  }",
+  "  if (linkJumpBtn) linkJumpBtn.addEventListener('click', function () {",
+  "    window.open(pageUrl, '_blank', 'noopener')",
+  "    collapseLink('已在新标签打开')",
+  "  })",
+  "  if (linkCopyBtn) linkCopyBtn.addEventListener('click', function () {",
+  "    /** 剪贴板 API 在 http / 老浏览器 / QQ 内置浏览器里可能不可用，失败就给一个可全选的文本框 */",
+  "    function fallbackCopy () {",
+  "      var ta = document.createElement('textarea')",
+  "      ta.value = pageUrl",
+  "      ta.style.position = 'fixed'; ta.style.opacity = '0'",
+  "      document.body.appendChild(ta)",
+  "      ta.select(); ta.setSelectionRange(0, ta.value.length)",
+  "      var ok = false",
+  "      try { ok = document.execCommand('copy') } catch (err) { ok = false }",
+  "      document.body.removeChild(ta)",
+  "      if (ok) collapseLink('已复制')",
+  "      else collapseLink('复制失败，请长按上面的链接文本手动复制')",
+  "      return ok",
+  "    }",
+  "    if (navigator.clipboard && navigator.clipboard.writeText) {",
+  "      navigator.clipboard.writeText(pageUrl).then(function () { collapseLink('已复制') }, fallbackCopy)",
+  "    } else {",
+  "      fallbackCopy()",
+  "    }",
+  "  })",
   "})()",
   ''
 ].join('\n')
