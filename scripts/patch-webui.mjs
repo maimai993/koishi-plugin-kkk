@@ -73,13 +73,30 @@ const PLAYER_GROUP_OFF = 'Q(e,' + arr(['qq', PLAYER_MASTER_KEY]) + ',!0)===!1'
 /** 被总开关关掉时补一句说明 */
 const GROUP_LOCK_HINT = '（这一项要先把上面的「在线播放器总开关」打开才能改）'
 
+/**
+ * 「这一项跟着某个开关走」的联动表（键 = 字段，值 = 它依赖的那个开关字段）。
+ *
+ * 开关关掉时这一项禁用变灰，视觉与「在线播放器总开关」那把锁完全一致。
+ * 目前：重复解析间隔（分钟）只有「短时间不重复解析」打开时才可改。
+ */
+const FIELD_DISABLED_BY = {
+  parseDedupeMinutes: 'parseDedupe'
+}
+
+/** 取字段的 label（联动提示语里要用「短时间不重复解析」这种用户看到的说法） */
+const labelOfField = (key) => (fields.find((item) => item.key === key)?.label) || key
+
 const appFieldCall = (field) => {
   const path = '[' + [q('qq'), q(field.key)].join(',') + ']'
   const locked = field.editableWhen === 'danmaku'
   /** 在线播放器设置这一组里，除总开关以外的字段都跟着总开关联动 */
   const lockedByGroup = field.section === PLAYER_SECTION && field.key !== PLAYER_MASTER_KEY
-  const disabled = [locked ? DANMAKU_LOCKED : '', lockedByGroup ? PLAYER_GROUP_OFF : ''].filter(Boolean).join('||')
-  const description = q(String(field.description) + (locked ? LOCK_HINT : '') + (lockedByGroup ? GROUP_LOCK_HINT : ''))
+  /** 这一项依赖的开关（见 FIELD_DISABLED_BY） */
+  const dependsOn = FIELD_DISABLED_BY[field.key]
+  const dependsOff = dependsOn ? 'Q(e,' + arr(['qq', dependsOn]) + ',!0)===!1' : ''
+  const disabled = [locked ? DANMAKU_LOCKED : '', lockedByGroup ? PLAYER_GROUP_OFF : '', dependsOff].filter(Boolean).join('||')
+  const dependsHint = dependsOn ? '（这一项要先把上面的「' + labelOfField(dependsOn) + '」打开才能改）' : ''
+  const description = q(String(field.description) + (locked ? LOCK_HINT : '') + (lockedByGroup ? GROUP_LOCK_HINT : '') + dependsHint)
   // renderSwitch 的第 4 个参数、renderTextField 的 options.disabled 都是「不可编辑」
   if (field.type === 'boolean') {
     return 's(' + path + ',' + q(field.label) + ',' + description + (disabled ? ',' + disabled : '') + ')'

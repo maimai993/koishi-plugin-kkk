@@ -252,10 +252,30 @@ const makeVideo = (name) => {
 /** 收集回复消息的假事件对象 */
 const collector = (sent) => ({ reply: async (content) => { sent.push(String(content)) } })
 
+/**
+ * 等插件把在线播放器初始化完（存储 + 路由）再开跑。
+ *
+ * 原来是写死 setTimeout 5 秒 —— 机器一忙（比如宿主 koishi 同时在跑）插件还没初始化完，
+ * 就会出现「[在线播放] 存储尚未初始化」和 15200 端口连不上这种假失败。
+ * playerStoreDir() 在 setupPlayerStore 之前是空串，正好当就绪信号用。
+ */
+const waitForPlayerReady = async (store, timeoutMs = 90000) => {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      if (store.playerStoreDir()) return true
+    } catch { /* 还没准备好 */ }
+    await new Promise((resolve) => setTimeout(resolve, 500))
+  }
+  return false
+}
+
 setTimeout(async () => {
   try {
     const store = require(path.join(pluginRoot, 'lib/player/index.js'))
     const runtime = require(path.join(pluginRoot, 'lib/compat/runtime.js')).getRuntime()
+    const ready = await waitForPlayerReady(store)
+    console.log('  在线播放器就绪: ' + ready + '（存储目录 ' + (store.playerStoreDir() || '（空）') + '）')
     const { QQ_DEFAULTS } = require(path.join(pluginRoot, 'lib/qqOptions.js'))
 
     console.log('\n[1] 默认配置：总开关就是开启的')

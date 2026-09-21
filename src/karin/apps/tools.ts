@@ -350,6 +350,16 @@ const handleKuaishou = withParseForward(wrapWithErrorHandler(
     const startedAt = Date.now()
     // 解析参数（--q= 画质等）：之前这个分支没解析参数，面板选的画质从来没生效过
     const flags = parseParseFlags(e)
+    /**
+     * 短时间不重复解析（通用 →「短时间不重复解析」，默认开）：
+     * 连点 / 重复投递的同一条链接只放行一次；用链接本身当作品标识，
+     * 这样连「跟随短链」的那次请求都能省掉。
+     */
+    const kuaishouKey = ['kuaishou', e.contact?.peer ?? '', e.userId, String(kuaishouUrl), flags.override.xiaohongshuQuality ?? ''].join(':')
+    if (!acquireParseLock(kuaishouKey)) {
+      logger.debug('短时间内重复的快手解析请求，已忽略: %s', kuaishouKey)
+      return
+    }
     const iddata = await getKuaishouID(String(kuaishouUrl))
     const WorkData = await fetchKuaishouData(iddata.type, iddata)
     const kuaishou = new Kuaishou(e, iddata)
@@ -392,6 +402,12 @@ const handleXiaohongshu = withParseForward(wrapWithErrorHandler(
     const startedAt = Date.now()
     // 同上：补上解析参数与面板标记
     const flags = parseParseFlags(e)
+    /** 短时间不重复解析（通用 →「短时间不重复解析」，默认开）：同一条笔记只放行一次 */
+    const xiaohongshuKey = ['xiaohongshu', e.contact?.peer ?? '', e.userId, url, flags.override.xiaohongshuQuality ?? ''].join(':')
+    if (!acquireParseLock(xiaohongshuKey)) {
+      logger.debug('短时间内重复的小红书解析请求，已忽略: %s', xiaohongshuKey)
+      return
+    }
     const iddata = await getXiaohongshuID(url)
     const xiaohongshu = new Xiaohongshu(e, iddata)
     await runWithParseOverride(
