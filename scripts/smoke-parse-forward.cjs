@@ -107,8 +107,11 @@ setTimeout(async () => {
       await setSwitch(savedSwitch)
     }
 
-    console.log('\n[3] 合并转发：解析结果攒起来，结束时只发一条转发')
+    console.log('\n[3] 合并转发开关开着：解析结果攒起来，结束时只发一条转发')
     {
+      /** 开关开着才有合并这回事（通用 →「解析结果合并转发」= app.fakeForward） */
+      const savedFakeForSection3 = Config.app.fakeForward
+      await Config.Modify('app', 'fakeForward', true)
       const sent = []
       const e = makeEvent('onebot', sent)
       /** 解析进行到一半时的发送快照：结果应该还没发出去 */
@@ -156,31 +159,45 @@ setTimeout(async () => {
       check('发往别的频道的消息没有被吞进转发（去了 999999）',
         sent.some((item) => item.channel === '999999' && JSON.stringify(item.payload).includes('发给主人的日志')))
       // 身份跟着 fakeForward 走：默认配置里它是 true（触发者），这里按当前取值断言
-      const expectFake = Config.app.fakeForward === true
-      check('日志里说明这次合并了几条、用的什么身份',
-        hasLog(new RegExp('\\[合并转发\\] 本次解析产生 2 条内容.*身份：' + (expectFake ? '触发者' : '机器人'))),
+      check('日志里说明这次合并了几条、用的什么身份（开着=触发者身份）',
+        hasLog(/\[合并转发\] 本次解析产生 2 条内容.*身份：触发者/),
         (logs.find((line) => /\[合并转发\]/.test(line)) || '（没有）').slice(0, 140))
+      await Config.Modify('app', 'fakeForward', savedFakeForSection3)
     }
 
-    console.log('\n[3b] 身份：fakeForward 开着用触发者，关着用机器人')
+    /**
+     * 用户实测反馈：「关闭合并转发 还是合并的」。
+     * 之前的实现里这个开关只管「用谁的身份展示」，关掉照样合并 —— 现在关掉就不合并了。
+     */
+    console.log('\n[3b] 合并转发开关关着：不合并，内容逐条发')
     {
       const savedFake = Config.app.fakeForward
-      await Config.Modify('app', 'fakeForward', true)
+      await Config.Modify('app', 'fakeForward', false)
       const sent = []
       const e = makeEvent('onebot', sent)
       captureOn()
-      await withParseForward(async (ev) => { await ev.reply(segment.text('身份测试')) })(e, () => Symbol('next'))
+      await withParseForward(async (ev) => {
+        await ev.reply(segment.text('结果一'))
+        await ev.reply(segment.text('结果二'))
+      })(e, () => Symbol('next'))
       captureOff()
-      check('开着时日志写的是触发者身份', hasLog(/身份：触发者 smoke/),
-        (logs.find((line) => /\[合并转发\]/.test(line)) || '（没有）').slice(0, 140))
-
-      await Config.Modify('app', 'fakeForward', false)
-      const sent2 = []
-      captureOn()
-      await withParseForward(async (ev) => { await ev.reply(segment.text('身份测试2')) })(makeEvent('onebot', sent2), () => Symbol('next'))
-      captureOff()
-      check('关掉后日志写的是机器人身份', hasLog(/身份：机器人 smoke-bot/),
-        (logs.find((line) => /\[合并转发\]/.test(line)) || '（没有）').slice(0, 140))
+      const texts = sent.map((item) => JSON.stringify(item.payload))
+      check('两条结果各自立刻发出（没有被攒起来）',
+        texts.length === 2 && texts[0].includes('结果一') && texts[1].includes('结果二'),
+        texts.length + ' 条')
+      check('没有发出任何合并转发（这就是用户反馈的那条）',
+        !texts.some((text) => text.includes('"type":"message"')))
+      check('日志里说明这次按逐条发送处理', hasLog(/「解析结果合并转发」关着/),
+        (logs.find((line) => /合并转发/.test(line)) || '（没有）').slice(0, 140))
+      /** 开关打开时又是合并的（确认开关真的能来回切） */
+      await Config.Modify('app', 'fakeForward', true)
+      const sent3 = []
+      await withParseForward(async (ev) => {
+        await ev.reply(segment.text('结果三'))
+        await ev.reply(segment.text('结果四'))
+      })(makeEvent('onebot', sent3), () => Symbol('next'))
+      const hasForward = sent3.some((item) => JSON.stringify(item.payload).includes('"type":"message"'))
+      check('再打开又变回合并转发', hasForward, sent3.length + ' 条')
       await Config.Modify('app', 'fakeForward', savedFake)
     }
 
