@@ -699,13 +699,23 @@ export const render = {
     const runtime = getRuntime()
     const puppeteer: any = (runtime.ctx as any).puppeteer
     /**
-     * shotkit 兜底：**只在没有浏览器渲染服务时**才走内核。
-     * 这个预编译内核在 Windows 上加载不了 https 资源（http / data: / file: 正常），
-     * 弹幕条这类带远程图的内容走它会缺图，所以能开浏览器就用浏览器。
+     * 优先渲染器（面板「通用设置 → 优先渲染器」，配置项 `app.renderer`，默认 shotkit）。
+     *
+     * 和卡片主渲染走同一个开关：选了谁谁先上，没装或渲染失败就落到另一个。
+     * 这里用延迟 require 读配置：Config 依赖本文件（node-karin 兼容层），
+     * 顶部 import 会和本文件形成循环依赖，放到调用时读最稳。
      */
-    const shotkit: any = !puppeteer && typeof (runtime.ctx as any).get === 'function'
-      ? (runtime.ctx as any).get('shotkit')
-      : (!puppeteer ? (runtime.ctx as any).shotkit : undefined)
+    let preferShotkit = true
+    try {
+      const { Config } = require('../karin/module/utils/Config')
+      preferShotkit = String(Config?.app?.renderer ?? 'shotkit').toLowerCase() !== 'puppeteer'
+    } catch { /* 读不到配置就按默认值 shotkit */ }
+    const useShotkit = preferShotkit || !puppeteer
+    const shotkit: any = useShotkit
+      ? (typeof (runtime.ctx as any).get === 'function'
+        ? (runtime.ctx as any).get('shotkit')
+        : (runtime.ctx as any).shotkit)
+      : undefined
     if (shotkit && typeof shotkit.renderFile === 'function') {
       try {
         const request: any = {

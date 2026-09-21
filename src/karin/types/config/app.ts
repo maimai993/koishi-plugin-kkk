@@ -9,6 +9,15 @@ export interface appConfig {
   /** 缓存自动删除，非必要不修改！ */
   removeCache: boolean
 
+  /**
+   * 优先渲染器。
+   *
+   * - `shotkit`（默认）：shotkit 内核，不依赖浏览器、单张几十毫秒、内存低；
+   *   但预编译内核在 Windows 上加载不了 https 资源，远程封面/头像会缺图；
+   * - `puppeteer`：浏览器（Chrome / Edge），完整渲染、远程资源正常。
+   */
+  renderer: 'shotkit' | 'puppeteer'
+
   /** 渲染精度，可选值50~200，建议100。设置高精度会提高图片的精细度，过高可能会影响渲染与发送速度 */
   renderScale: number
 

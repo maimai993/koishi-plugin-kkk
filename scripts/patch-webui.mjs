@@ -129,6 +129,54 @@ const APP_SECTION_CODE = [...new Set(APP_FIELDS.filter((field) => field.section)
 const SECT_START = '/*KKK-SECTION-START*/'
 const SECT_END = '/*KKK-SECTION-END*/'
 
+
+/* ------------------------------------------------------------------ *
+ * 通用设置：优先渲染器（app.renderer）
+ * ------------------------------------------------------------------ */
+
+const RENDERER_START = '/*KKK-RENDERER-START*/'
+const RENDERER_END = '/*KKK-RENDERER-END*/'
+
+/**
+ * 「优先渲染器」这一项挂在「通用」分类下，**作为「渲染设置」的兄弟分组**插在它后面。
+ *
+ * 存储位置是上游配置的 `app.renderer`（和 renderScale 同一个段），取值 'shotkit' | 'puppeteer'。
+ * 面板里用下拉框（i = 该分类的选项渲染器），默认值放在上游 config.json / app.yaml 里，
+ * 这里只负责把控件画出来。
+ *
+ * 文案里那句 https 的提醒是实测结论，不是猜测：预编译内核在 Windows 上拉不到 https 资源，
+ * 而卡片里的封面、头像基本都是 https，选内核会缺图 —— 用户看到选项说明就知道该选哪个。
+ */
+const RENDERER_FIELD = 'i(' + arr(['app', 'renderer']) + ',' + q('优先渲染器') + ',' + q(
+  '卡片优先用哪个渲染器渲染。两个渲染服务都在时会按这里选的走，缺一个就自动用另一个；',
+) + ',['
+  + '{label:' + q('shotkit 内核（默认）') + ',value:' + q('shotkit') + ',description:' + q(
+    '不依赖浏览器，单张几十毫秒、内存低。注意：当前预编译内核在 Windows 上加载不了 https 资源，卡片里的远程封面、头像会缺图。',
+  ) + '}'
+  + ',{label:' + q('浏览器（Chrome / Edge）') + ',value:' + q('puppeteer') + ',description:' + q(
+    '完整渲染、远程资源正常，单张通常 1 秒以上，需要浏览器渲染服务（koishi-plugin-puppeteer 或同类）。',
+  ) + '}'
+  + '],e=>e)'
+
+const RENDERER_CODE = 'o(' + q('通用设置') + ',(0,U.jsxs)(U.Fragment,{children:[' + RENDERER_FIELD + ']}))'
+
+/** 插到「渲染设置」这个分组后面（兄弟节点）。可重复执行：先按标记删上次插的，再插一次。 */
+function patchRendererSetting (text, name) {
+  let out = stripMarkedWithComma(text, RENDERER_START, RENDERER_END)
+  const at = out.indexOf('`渲染设置`')
+  if (at < 0) return out
+  let open = -1
+  for (let i = at - 1; i >= 0 && i > at - 40; i--) {
+    if (out[i] === '(') { open = i; break }
+  }
+  if (open < 0) return out
+  const close = matchParen(out, open)
+  if (close < 0) return out
+  out = out.slice(0, close + 1) + ',' + RENDERER_START + RENDERER_CODE + RENDERER_END + out.slice(close + 1)
+  console.log('[kkk] 「通用设置 → 优先渲染器」已注入到「渲染设置」之后: ' + name)
+  return out
+}
+
 /**
  * 把带 section 的分组插到「交互设置」后面（兄弟节点）。
  *
@@ -687,6 +735,8 @@ for (const file of files) {
   // 必须在 patchPermFields 之后：那个函数会先剥掉旧的 APP 标记块再重写「交互设置」里的字段，
   // 我们的分组要插在「交互设置」**之后**，顺序反了会插到它里面去（就是这次要修的样式问题）
   text = patchAppSections(text, name)
+  // 同样必须晚于 patchPermFields / patchAppSections：它锚定的是「渲染设置」的收尾括号
+  text = patchRendererSetting(text, name)
   text = patchDescriptions(text, name)
   text = applyTextReplacements(text, name)
 
