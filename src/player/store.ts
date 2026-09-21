@@ -56,6 +56,12 @@ export interface PlayerSession {
   createdAt: number
   /** 失效时间（到点删文件） */
   expireAt: number
+  /**
+   * 这条链接只有本机 / 内网能打开（管理员没配「播放器公网地址」）。
+   *
+   * 播放页上要显式写出来：用户打不开的时候得知道是「没配域名」而不是「插件坏了」。
+   */
+  localOnly?: boolean
   /* ---------------- 作品信息（播放页上按B站那样展示，拿不到就不显示，绝不编数据） ---------------- */
   /** UP 主 / 作者名 */
   author?: string
@@ -178,6 +184,7 @@ function normalizeSession (raw: any): PlayerSession | null {
     danmakuCount: Number(raw.danmakuCount) || 0,
     createdAt: Number(raw.createdAt) || Date.now(),
     expireAt: Number(raw.expireAt) || Date.now(),
+    localOnly: raw.localOnly === true ? true : undefined,
     // 作品信息（可选）：重启后也要能还原
     author: raw.author ? String(raw.author) : undefined,
     cover: raw.cover ? String(raw.cover) : undefined,
@@ -264,6 +271,8 @@ export function registerPlayerSession (input: {
   work?: PlayerWorkInfo
   /** 已经下载到本地的封面文件（会复制进会话目录） */
   coverPath?: string
+  /** 链接是否只有本机 / 内网能打开（没配「播放器公网地址」），播放页会提示一句 */
+  localOnly?: boolean
 }): PlayerSession | null {
   if (!storeDir) {
     logger.warn('[在线播放] 存储尚未初始化，无法登记播放会话')
@@ -316,6 +325,7 @@ export function registerPlayerSession (input: {
       danmakuCount: danmaku.length,
       createdAt: now,
       expireAt: now + normalizeExpireMinutes(input.expireMinutes) * 60 * 1000,
+      localOnly: input.localOnly === true ? true : undefined,
       author: work.author ? String(work.author) : undefined,
       cover,
       views: optionalNumber(work.views),

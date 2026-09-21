@@ -122,18 +122,39 @@ export function markOnlinePlayerOverride (): void {
 /**
  * 有效体积上限（MB）：0 表示不限制。
  *
- * 「在线播放最大文件」（playerMaxFileMB）留空 / 填 0 时就**跟随全局** ——
+ * 「在线播放最大文件」（playerMaxFileMB）显式填了就用它；留空 / 填 0 就**跟随全局** ——
  * 用上游「文件大小限制」那一项（usefilelimit / filelimit）的值，由调用方读出来传进来。
- * 例外：打开了「超限转在线播放」时，留空按**不限制**处理 ——
- * 这个开关服务的就是「比全局上限还大」的视频，跟随全局等于刚转过来就被拦回去。
+ *
+ * **「超限转在线播放」不再有例外**（用户实测要求）：以前开了转播、留空就按不限制处理，
+ * 结果几十 GB 的视频会被原样搬进播放器目录，把机器磁盘塞满。
+ * 现在的口径是「转播也不能突破这条上限」：超限的视频照旧走拒绝 / 普通发送。
  * @param globalLimitMB 全局限制（MB），0 = 全局没开限制
  */
 export function effectivePlayerSizeLimitMB (globalLimitMB = 0): number {
   const configured = Number((tryGetRuntime()?.config as any)?.playerMaxFileMB)
   if (Number.isFinite(configured) && configured > 0) return configured
-  if (isPlayerOversizeRedirectOn()) return 0
   const global = Number(globalLimitMB)
   return Number.isFinite(global) && global > 0 ? global : 0
+}
+
+/**
+ * 这个体积能不能走在线播放（上限为 0 = 不限制）。
+ *
+ * 给**同步**场景用（例如 Base.downloadVideoFile 里已经读到了视频体积，
+ * 决定要不要「超限转在线播放」）；异步场景直接用 resolvePlayerSizeLimitMB。
+ * @param sizeMB 视频体积（MB）
+ * @param globalLimitMB 全局限制（MB），0 = 全局没开限制
+ */
+export function withinPlayerSizeLimit (sizeMB: number, globalLimitMB = 0): boolean {
+  const limit = effectivePlayerSizeLimitMB(globalLimitMB)
+  if (limit <= 0) return true
+  const size = Number(sizeMB)
+  return !Number.isFinite(size) || size <= limit
+}
+
+/** 在线播放体积上限的说明文案（日志 / 提示里统一口径） */
+export function describePlayerSizeLimit (limitMB: number): string {
+  return limitMB > 0 ? formatMB(limitMB) : '不限制'
 }
 
 /**
@@ -199,6 +220,15 @@ function koishiPort (): number {
   return 5140
 }
 
+/** 配了「播放器公网地址」没有（留空 → 链接只有本机 / 内网能打开） */
+export function hasPublicBaseUrl (): boolean {
+  try {
+    return !!String((tryGetRuntime()?.config as any)?.playerBaseUrl ?? '').trim()
+  } catch {
+    return false
+  }
+}
+
 /** 只警告一次「没配公网地址」：每条链接都刷一行日志太吵 */
 let warnedLocalBase = false
 
@@ -241,6 +271,19 @@ const MAX_PLAYER_DANMAKU = 50000
  *     抖音的弹幕表情是图片贴纸，这里直接降级成它的文字占位（例如 [捂脸]）
  * @param list 原始弹幕数组（两种形状都认）
  */
+/**
+ * 弹幕颜色（十进制 RGB，0 = 纯黑也是合法值）。
+ *
+ * 以前写的是 `Number(raw.color) || 0xffffff` —— **0 会被 `||` 当成缺省值吃掉**，
+ * 黑字弹幕就变成白字了。这里用显式的空值判断，并且夹到 24 位。
+ */
+function normalizeDanmakuColor (value: unknown): number {
+  if (value === undefined || value === null || value === '') return 0xffffff
+  const num = Number(value)
+  if (!Number.isFinite(num) || num < 0 || num > 0xffffff) return 0xffffff
+  return Math.floor(num)
+}
+
 export function normalizePlayerDanmaku (list: any): PlayerDanmakuItem[] {
   if (!Array.isArray(list)) return []
   const items: PlayerDanmakuItem[] = []
@@ -251,12 +294,14 @@ export function normalizePlayerDanmaku (list: any): PlayerDanmakuItem[] {
     const text = String(isBili ? (raw.content ?? '') : (raw.text ?? '')).trim()
     if (!text || !Number.isFinite(time) || time < 0) continue
     const mode = Number(isBili ? raw.mode : 1) || 1
+    const rawColor = isBili ? raw.color : (raw.color ?? raw.color_decimal ?? 0xffffff)
     items.push({
       time: Math.round(time),
       // 1/2/3 滚动，4 底部，5 顶部；认不出来的当滚动处理
       mode: [1, 2, 3, 4, 5].includes(mode) ? mode : 1,
       size: Number(isBili ? raw.fontsize : 25) || 25,
-      color: Number(isBili ? raw.color : 0xffffff) || 0xffffff,
+      // 颜色原样保留：播放页要按弹幕自带的颜色渲染
+      color: normalizeDanmakuColor(rawColor),
       text: text.slice(0, 200)
     })
   }
@@ -359,8 +404,12 @@ export async function publishOnlinePlayer (e: any, input: {
     const sizeMB = Number(fs.statSync(input.videoPath).size) / 1024 / 1024
     const limitMB = await resolvePlayerSizeLimitMB()
     if (limitMB > 0 && sizeMB > limitMB) {
-      logger.info('[在线播放] 视频 ' + sizeMB.toFixed(1) + 'MB 超过在线播放上限 ' + limitMB + 'MB，改回原来的发送流程')
-      await reply('视频 ' + formatMB(sizeMB) + '，超过在线播放的体积上限 ' + formatMB(limitMB) + '，这里按原来的方式发送')
+      /**
+       * 判定必须发生在**把文件搬进播放器目录之前**（registerPlayerSession 才搬文件）——
+       * 超限的视频一点都不占播放器目录，用户的磁盘不会被塞满。
+       */
+      logger.info('[在线播放] 视频 ' + sizeMB.toFixed(1) + 'MB 超过在线播放上限 ' + limitMB + 'MB，按原来的方式处理')
+      await reply('视频 ' + formatMB(sizeMB) + '，超过在线播放的体积上限 ' + formatMB(limitMB) + '，按原来的方式处理')
       return false
     }
     await reply(TIP_PREPARING)
@@ -370,6 +419,7 @@ export async function publishOnlinePlayer (e: any, input: {
      * 下载失败不影响播放，页面上就不显示封面。
      */
     const coverPath = input.coverPath ?? await downloadCoverQuietly(input.work?.coverUrl)
+    const localOnly = !hasPublicBaseUrl()
     const session = registerPlayerSession({
       videoPath: input.videoPath,
       title: input.title,
@@ -377,14 +427,20 @@ export async function publishOnlinePlayer (e: any, input: {
       danmaku,
       expireMinutes: minutes,
       work: input.work,
-      coverPath: coverPath ?? undefined
+      coverPath: coverPath ?? undefined,
+      localOnly
     })
     if (!session) {
       await reply('在线播放准备失败（详情见日志），这里直接发送视频')
       return false
     }
+    /**
+     * 没配公网地址时，链接只有本机 / 内网能打开 —— 这一点必须写在回复里，
+     * 否则用户点了打不开，只会以为「插件坏了」（用户实测就这么以为过）。
+     */
     await reply('在线播放：' + buildPlayerLink(session.token)
-      + '\n链接 ' + minutes + ' 分钟内有效，弹幕就在网页里，过期后自动清理。')
+      + '\n链接 ' + minutes + ' 分钟内有效，弹幕就在网页里，过期后自动清理。'
+      + (localOnly ? '\n（未配置公网地址，仅本机可访问；公网用户请让管理员在「在线播放器设置 → 播放器公网地址」里填上域名）' : ''))
     return true
   } catch (error: any) {
     logger.error('[在线播放] 发布播放会话失败: ' + String(error?.stack ?? error))

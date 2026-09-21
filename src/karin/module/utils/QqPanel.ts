@@ -26,6 +26,7 @@ import fs from 'node:fs'
 import { commandInvocation, tryGetRuntime } from '../../../compat/runtime'
 import { getParseOverride } from './ParseOverride'
 import { isBurnDanmakuSupported } from './DanmakuPolicy'
+import { resolvePlayerSizeLimitMB } from '../../../player'
 import { Config } from './Config'
 import { getDouyinQualityLevel } from '@/platform/douyin/videoQuality'
 import { getImageMetadata, Render } from '@/module/utils/Render'
@@ -800,15 +801,33 @@ export async function sendQqParsePanel (e: Message, request: PanelRequest): Prom
   const onlinePlayer = runtime.config.playerEnabled !== false
   const danmakuLabel = onlinePlayer ? '弹幕' : '烧录弹幕'
   const danmakuEnabled = onlinePlayer || (runtime.config.qqPanelDanmaku === true && isBurnDanmakuSupported())
+  /**
+   * 在线播放的体积上限（「在线播放最大文件」显式填了就用它，留空跟随全局；0 = 不限制）。
+   *
+   * 超过这一档的预估体积就不该给「弹幕」按钮：点了也只会退回原来的发送流程，
+   * 用户白点一次还以为坏了（用户实测反馈）。这里直接把那一格换成「超上限」文字 ——
+   * markdown 里的按钮没有 disabled 状态，不给按钮才是真的点不了。
+   */
+  const playerLimitMB = onlinePlayer ? await resolvePlayerSizeLimitMB() : 0
+  const overPlayerLimit = (sizeMB: number): boolean =>
+    onlinePlayer && playerLimitMB > 0 && Number(sizeMB) > playerLimitMB
+  let playerLimitHit = false
   if (danmakuEnabled) {
     lines.push('| 清晰度 | ' + danmakuLabel + ' | 大小 |')
     lines.push('| :--- | :---: | ---: |')
     for (const option of shown) {
       const size = Math.round(option.sizeMB) + 'M'
-      lines.push(
-        '| ' + cell(parseCommand, option.id, option.label) + ' | ' +
-        cell(parseCommand, option.id, danmakuLabel, true) + ' | ' + size + ' |'
-      )
+      let danmakuCell = cell(parseCommand, option.id, danmakuLabel, true)
+      if (overPlayerLimit(option.sizeMB)) {
+        // 在线播放模式下这一档超过上限：不给按钮，标清楚「超上限」
+        danmakuCell = onlinePlayer ? '超上限' : danmakuCell
+        if (onlinePlayer) playerLimitHit = true
+      }
+      lines.push('| ' + cell(parseCommand, option.id, option.label) + ' | ' + danmakuCell + ' | ' + size + ' |')
+    }
+    if (playerLimitHit) {
+      lines.push('标「超上限」的画质超过在线播放的体积上限（' + Math.round(playerLimitMB) + 'MB），'
+        + '想在线播放请选更小的画质；那些档位点「清晰度」仍可按原来的方式发送。')
     }
   } else {
     // 没开弹幕时，画质名直接当按钮，省掉中间那一步

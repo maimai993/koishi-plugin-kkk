@@ -13,7 +13,9 @@
  *   8. 手动删除会话同样会删文件；总开关关掉时不做任何事；
  *   9. 面板文案随开关动态选：默认（播放器开启）写「弹幕」，关掉后写「烧录弹幕」；
  *  10. 「在线播放最大文件」留空跟随全局、超限拒绝且文件不动；「超限转在线播放」的判定与覆盖项标记；
- *  11. 端到端：视频超过全局上限 + 开着转播开关 → 真的被转到在线播放（B站链路，视频源是本机小服务）。
+ *  11. 端到端：视频超过全局上限 + 开着转播开关 → 真的被转到在线播放（B站链路，视频源是本机小服务）；
+ *  12. 弹幕设置：任意百分比（字号 / 透明度）、颜色解析与「彩色弹幕」开关、三类弹幕开关与位置
+ *      （顶部贴顶 / 底部贴底 / 滚动自上而下）、默认值（显示区域 1/4 · 透明度 50 · 字号小）与全屏拦截。
  *
  * 用独立端口 15200（不占 Koishi 的 5200），所以「播放器端口」这条链路也一并验证了。
  *
@@ -109,7 +111,14 @@ const videoSourceServer = http.createServer((req, res) => {
 })
 videoSourceServer.listen(VIDEO_SOURCE_PORT)
 
-/** B站 info 接口的固定数据（第 [11] 节用） */
+/**
+ * B站 info 接口的固定数据（第 [11] 节用）。
+ *
+ * 两个 bvid：插件对「短时间内重复的同一作品请求」会去重（日志里那句「已忽略」），
+ * 第 [11] / [11b] 节要连跑两次解析，第二次必须换个 ID 才不会被去重吃掉。
+ */
+const BILI_BVID = 'BV1xx411c7mD'
+const BILI_BVID_ALT = 'BV1yy411c7mE'
 const biliInfoFixture = {
   aid: 12345,
   bvid: 'BV1xx411c7mD',
@@ -252,7 +261,9 @@ setTimeout(async () => {
       { progress: 1000, mode: 1, fontsize: 25, color: 16777215, content: '滚动弹幕' },
       { progress: 2000, mode: 5, fontsize: 36, color: 16711680, content: '顶部弹幕' },
       { progress: 3000, mode: 4, fontsize: 18, color: 65280, content: '底部弹幕' },
-      { progress: 4000, mode: 1, fontsize: 25, color: 255, content: '第四条' }
+      { progress: 4000, mode: 1, fontsize: 25, color: 255, content: '第四条' },
+      // 黑色（0）最容易被「假值判断」吃成白色，特意留一条
+      { progress: 5000, mode: 4, fontsize: 25, color: 0, content: '黑色弹幕' }
     ]
     const sent = []
     const videoPath = makeVideo('tmp_player_smoke.mp4')
@@ -303,12 +314,28 @@ setTimeout(async () => {
      * 用户要求：播放页照 **B站播放页**（夜间模式）的 UI 做，而且**必须零外网依赖**
      * （不引 CDN、不引第三方库、图标一律内联 SVG、封面走同源）。
      */
-    check('弹幕控制条：开关 + 「弹幕设置」按钮',
+    check('弹幕开关 + 「弹幕设置」按钮',
       /id="dmOn"/.test(html) && html.includes('弹幕设置') && !/id="dmOn"[^>]*type="range"/.test(html),
       '开关是样式化的 switch（.sw-track/.sw-thumb）')
+    check('自己的 H5 播放器：没有用浏览器原生 controls',
+      !/<video[^>]*\scontrols/.test(html) && /id="ctrl"/.test(html) && /id="playBtn"/.test(html) &&
+      /id="prog"/.test(html) && /id="progBuf"/.test(html) && /id="timeLabel"/.test(html) &&
+      /id="muteBtn"/.test(html) && /id="fullscreenBtn"/.test(html),
+      '播放 / 暂停 · 时间 · 进度条（带缓冲）· 静音 · 弹幕设置 · 全屏')
+    check('进度条可拖可点可键盘微调',
+      html.includes("prog.addEventListener('pointerdown'") && html.includes('seekToRate') &&
+      html.includes("prog.addEventListener('keydown'"))
+    check('点画面中间能播放 / 暂停（大播放按钮）',
+      /id="bigPlay"/.test(html) && html.includes("video.addEventListener('click', togglePlay)") &&
+      /bigplay/.test(html))
     check('弹幕设置面板默认收起（点一下才展开）',
       /id="dmPanel"[^>]*hidden/.test(html) && html.includes("getElementById('dmPanel')") &&
       html.includes("settingsPanel.hidden = !open"))
+    // 用户要求：设置要放进播放器里（全屏时跟着一起进去）
+    check('控制条和设置面板都在播放器容器里面',
+      html.indexOf('id="videoWrap"') > -1 && html.indexOf('id="dmPanel"') > html.indexOf('id="videoWrap"') &&
+      html.indexOf('id="dmPanel"') < html.indexOf('class="foot"'),
+      '面板浮在画面上，不是视频下面单独一块')
     check('三类控件齐备：字号 / 透明度 / 显示区域',
       /id="dmSize"/.test(html) && html.includes('字号') &&
       /id="dmOpacity"/.test(html) && html.includes('透明度') &&
@@ -345,6 +372,96 @@ setTimeout(async () => {
       check('内联脚本语法正确（node --check）', syntaxOk, matched ? matched[1].length + ' 字符' : '（没找到内联脚本）')
     }
     check('视频地址按令牌拼成绝对路径', html.includes('/kkk/player/' + token + '/video'))
+
+    console.log('\n[4c] 弹幕设置：任意百分比 / 颜色 / 位置 / 全屏')
+    {
+      /**
+       * 用户要求：「弹幕设置可以自由调整百分比并且可以解析颜色还有位置」。
+       * 页面脚本里 KKK-DANMAKU-PURE 那段是纯计算（类型判定 / 颜色 / 轨道位置 / 尺寸比例），
+       * 抠出来在 Node 里直接断言，不用起浏览器。
+       */
+      const pureBlock = /\* KKK-DANMAKU-PURE-START \*\/([\s\S]*?)\/\* KKK-DANMAKU-PURE-END \*\//.exec(html)
+      let PURE = null
+      try {
+        PURE = pureBlock ? new Function(pureBlock[1] + '\n return KKK_DANMAKU_PURE')() : null
+      } catch (error) {
+        console.log('     ' + String(error?.message ?? error).slice(0, 200))
+      }
+      check('能抠出纯计算段（KKK-DANMAKU-PURE）', !!PURE && typeof PURE.classify === 'function')
+      if (PURE) {
+        // 类型：B站 1/2/3 滚动、4 底部、5 顶部
+        check('mode 1/2/3 → 滚动，4 → 底部，5 → 顶部',
+          PURE.classify(1) === 'scroll' && PURE.classify(2) === 'scroll' && PURE.classify(3) === 'scroll' &&
+          PURE.classify(4) === 'bottom' && PURE.classify(5) === 'top',
+          [1, 2, 3, 4, 5].map((m) => m + ':' + PURE.classify(m)).join(' '))
+        // 颜色：十进制 RGB → #rrggbb，黑 0 不能丢
+        check('颜色解析：十进制 RGB → #rrggbb（含黑 0 / 白 / 纯色）',
+          PURE.colorOf(16777215, true) === '#ffffff' && PURE.colorOf(16711680, true) === '#ff0000' &&
+          PURE.colorOf(255, true) === '#0000ff' && PURE.colorOf(0, true) === '#000000',
+          [0, 255, 16711680, 16777215].map((c) => PURE.colorOf(c, true)).join(' '))
+        check('关掉彩色弹幕 → 一律白字', PURE.colorOf(16711680, false) === '#ffffff' && PURE.colorOf(0, false) === '#ffffff')
+        check('描边按底色明暗选（深色配白描边）',
+          PURE.isDark(0) === true && PURE.isDark(16777215) === false,
+          '黑=' + PURE.isDark(0) + ' 白=' + PURE.isDark(16777215))
+        check('三类弹幕各自可关',
+          PURE.visible(5, { top: false }) === false && PURE.visible(5, { bottom: false }) === true &&
+          PURE.visible(1, null) === true)
+        // 位置：顶部贴顶、底部贴底、滚动自上而下
+        const H = 400
+        const LH = 40
+        const N = 10
+        check('位置：顶部贴顶 / 底部贴底 / 滚动自上而下',
+          PURE.laneY(5, 0, H, LH, N) === 0 && PURE.laneY(4, 0, H, LH, N) === H - LH &&
+          PURE.laneY(4, 1, H, LH, N) === H - 2 * LH && PURE.laneY(1, 2, H, LH, N) === 2 * LH,
+          'top0=' + PURE.laneY(5, 0, H, LH, N) + ' bottom0=' + PURE.laneY(4, 0, H, LH, N) +
+          ' scroll2=' + PURE.laneY(1, 2, H, LH, N))
+        check('轨道越界也不会画到画面外',
+          PURE.laneY(5, 99, H, LH, N) === (N - 1) * LH && PURE.laneY(4, 99, H, LH, N) === H - N * LH)
+        // 字号：任意百分比 → 缩放系数（夹在 0.5~2）
+        check('字号百分比换算：小 75% / 中 100% / 大 135% / 越界夹紧',
+          PURE.sizeScaleOf(75) === 0.75 && PURE.sizeScaleOf(100) === 1 && PURE.sizeScaleOf(135) === 1.35 &&
+          PURE.sizeScaleOf(500) === 2 && PURE.sizeScaleOf(1) === 0.5 && PURE.sizeScaleOf('abc') === 1)
+        // 透明度：0~100 任意整数
+        check('百分比输入夹紧（任意整数，含小数 / 非数字 / 越界）',
+          PURE.clampInt('50', 0, 100, 100) === 50 && PURE.clampInt(37.6, 0, 100, 100) === 38 &&
+          PURE.clampInt('120', 0, 100, 100) === 100 && PURE.clampInt('-5', 0, 100, 100) === 0 &&
+          PURE.clampInt('abc', 0, 100, 100) === 100)
+      }
+      // 面板控件：两个百分比数字框 + 三档区域 + 三类开关 + 彩色开关
+      check('透明度是「滑块 + 任意百分比数字框」',
+        /type="range" id="dmOpacity"/.test(html) &&
+        /<input type="number" id="dmOpacityValue"[^>]*min="0"[^>]*max="100"/.test(html),
+        '滑块 + 0~100 数字框，双向同步')
+      check('字号是「档位 + 任意百分比数字框」',
+        /<input type="number" id="dmSizeValue"[^>]*min="50"[^>]*max="200"/.test(html) &&
+        html.includes('data-value="small"') && html.includes('data-value="medium"') && html.includes('data-value="large"'))
+      check('显示区域三档：1/4 · 半屏 · 全屏',
+        html.includes('data-value="quarter"') && html.includes('data-value="half"') &&
+        html.includes('data-value="full"') && html.includes('AREA_RATE'))
+      check('弹幕类型三开关（滚动 / 顶部 / 底部）',
+        /id="dmType"/.test(html) && html.includes('data-type="scroll"') && html.includes('data-type="top"') &&
+        html.includes('data-type="bottom"') && html.includes('aria-pressed'))
+      check('彩色弹幕开关默认打开', /<input type="checkbox" id="dmColored" checked>/.test(html))
+      check('默认值：显示区域 1/4 · 透明度 50 · 字号 小 75%',
+        /var areaRate = 0\.25/.test(html) && /var opacityPercent = 50/.test(html) &&
+        /var sizePercent = 75/.test(html) &&
+        /class="segbtn active" data-value="quarter"/.test(html) &&
+        /id="dmOpacity" min="0" max="100" step="1" value="50"/.test(html) &&
+        /id="dmOpacityValue"[^>]*value="50"/.test(html) &&
+        /id="dmSizeValue"[^>]*value="75"/.test(html))
+      // 全屏：浏览器自带 controls 的全屏按钮只能让 video 元素自己全屏，
+      // 弹幕 canvas / 控制条都是它的兄弟节点 → 改成整个 .video-wrap 全屏，大家一起进去
+      check('全屏按钮全屏的是整个播放器容器（弹幕和控制条一起进去）',
+        /id="fullscreenBtn"/.test(html) &&
+        /if \(fullscreenBtn\) fullscreenBtn\.addEventListener\('click', toggleFullscreen\)/.test(html) &&
+        html.includes('wrapEl.requestFullscreen') && html.includes('.video-wrap:fullscreen'))
+      // 曾经在 fullscreenchange 里「先退出、再请求容器全屏」：用户手势只能授权一次全屏，
+      // 第二次请求会被浏览器拒掉 —— 结果就是「全屏闪一下就退出来」（用户实测反馈）
+      check('全屏不会「先退出再请求」（那会让全屏直接失败）',
+        !/exitFullscreen\(\)\s*\.then/.test(html),
+        '进全屏只请求一次，退出走 exitFullscreen')
+      check('全屏前后重新量一次画布尺寸', /window\.setTimeout\(fitCanvas, 60\)/.test(html))
+    }
 
     console.log('\n[4b] 作品信息（B站那套：标题 / UP 主 / 播放量 / 封面 / 操作按钮排）')
     {
@@ -406,11 +523,16 @@ setTimeout(async () => {
     let parsed = null
     try { parsed = JSON.parse(dm.body.toString('utf-8')) } catch { /* 下面会报错 */ }
     check('返回 200 + JSON', dm.status === 200 && !!parsed, 'status=' + dm.status)
-    check('弹幕条数正确（4 条）', !!parsed && parsed.total === 4 && parsed.items.length === 4,
+    check('弹幕条数正确（5 条）', !!parsed && parsed.total === 5 && parsed.items.length === 5,
       parsed ? 'total=' + parsed.total : '解析失败')
     check('弹幕字段归一正确', !!parsed && parsed.items[0].text === '滚动弹幕' && parsed.items[0].time === 1000 &&
       parsed.items[1].mode === 5 && parsed.items[2].mode === 4 && parsed.items[2].size === 18,
       parsed ? JSON.stringify(parsed.items.map((item) => [item.time, item.mode, item.size, item.text])) : '')
+    // 播放页要按弹幕自带的颜色渲染，所以服务端这条链路必须把十进制 RGB 原样带过来（黑色 0 也不能丢）
+    check('弹幕自带颜色原样保留（黑 0 / 白 16777215 / 红 16711680）',
+      !!parsed && parsed.items[0].color === 16777215 && parsed.items[1].color === 16711680 &&
+      parsed.items[2].color === 65280 && parsed.items[4].color === 0,
+      parsed ? parsed.items.map((item) => item.color).join(' ') : '')
 
     console.log('\n[6] 视频接口 + HTTP Range')
     const full = await request('/kkk/player/' + token + '/video')
@@ -496,6 +618,13 @@ setTimeout(async () => {
      * 现在在线播放模式下这一列只跟播放器开关走，所以下面**故意不设置 qqPanelDanmaku**。
      */
     runtime.config.qqPanelDanmaku = savedPanelDanmaku
+    /**
+     * 本文件的全局「文件大小限制」被压到 1MB（上面写进上游配置的），
+     * 而面板里的画质动辄几十 MB —— 不放开「在线播放最大文件」的话，
+     * 每一档都会按新规则标成「超上限」（见下面的 [9c]），这一节就看不到「弹幕」按钮了。
+     */
+    const savedMaxForPanel = runtime.config.playerMaxFileMB
+    runtime.config.playerMaxFileMB = 2048
     const playerPanel = await collect()
     // 显式关掉播放器 + 允许烧录 → 列头写「烧录弹幕」（这时才轮到 qqPanelDanmaku 决定）
     runtime.config.playerEnabled = false
@@ -539,6 +668,26 @@ setTimeout(async () => {
       burnButtons(playerPanel).every((button) => /--dm=1/.test(button.data)) &&
       burnButtons(burnPanel).every((button) => /--dm=1/.test(button.data)),
       burnButtons(playerPanel)[0] && burnButtons(playerPanel)[0].data)
+
+    console.log('\n[9c] 面板：超过「在线播放最大文件」的档位不给「弹幕」按钮，直接标「超上限」')
+    /**
+     * 用户实测要求：某档预估体积超过「在线播放最大文件」时，点「弹幕」也只会退回原来的发送流程，
+     * 不如别给按钮（markdown 按钮没有 disabled 状态，不给才是真的点不了）。
+     */
+    runtime.config.playerEnabled = savedEnabled
+    runtime.config.playerMaxFileMB = 1
+    const limitedPanel = await collect()
+    runtime.config.playerMaxFileMB = savedMaxForPanel
+    const limitedButtons = burnButtons(limitedPanel)
+    check('超上限的档位不再提供「弹幕」按钮', limitedButtons.length === 0,
+      limitedButtons.map((button) => button.label).join(' / ') || '（一个都没有，符合预期）')
+    check('超上限的档位在表格里标成「超上限」', /\| 超上限 \|/.test(limitedPanel.markdown),
+      (limitedPanel.markdown.split('\n').find((line) => line.includes('超上限')) || '（没有标注）').slice(0, 90))
+    check('面板上说清楚为什么（并指出点「清晰度」仍可发送）',
+      /在线播放的体积上限/.test(limitedPanel.markdown) && /原来的方式发送/.test(limitedPanel.markdown),
+      (limitedPanel.markdown.match(/标「超上限」[^\n]*/) || ['（没有说明）'])[0].slice(0, 110))
+    check('放开上限后「弹幕」按钮回来了', burnButtons(playerPanel).length > 0,
+      burnButtons(playerPanel).length + ' 个')
 
     console.log('\n[9b] 播放器端口：浏览器禁止访问的要能识别出来')
     // 用户实测：端口配成 6666 之后，链接在浏览器里直接 ERR_UNSAFE_PORT（服务端其实是好的）
@@ -639,10 +788,41 @@ setTimeout(async () => {
     runtime.config.playerEnabled = savedEnabledFlag
     runtime.config.playerOnOversize = true
     runtime.config.playerMaxFileMB = 0
-    check('开了转播后，「跟随全局」按不限制处理（否则超限视频会被上限拦回去）',
-      store.effectivePlayerSizeLimitMB(200) === 0, 'effective=' + store.effectivePlayerSizeLimitMB(200))
+    /**
+     * 用户实测要求：以前开了转播、留空就按「不限制」处理，
+     * 结果几十 GB 的视频会被原样搬进播放器目录、把机器磁盘塞满。
+     * 现在改成「转播也不能突破这条上限」。
+     */
+    check('开了转播也不会突破上限：留空依旧跟随全局（不再按不限制处理）',
+      store.effectivePlayerSizeLimitMB(200) === 200, 'effective=' + store.effectivePlayerSizeLimitMB(200))
     runtime.config.playerMaxFileMB = 50
     check('显式填了上限时仍然以上限为准', store.effectivePlayerSizeLimitMB(200) === 50)
+    runtime.config.playerMaxFileMB = 0
+    check('withinPlayerSizeLimit：上限 0 = 不限制', store.withinPlayerSizeLimit(99999, 0) === true)
+    check('withinPlayerSizeLimit：超过上限 false，正好等于上限算通过',
+      store.withinPlayerSizeLimit(50, 50) === true && store.withinPlayerSizeLimit(50.1, 50) === false)
+
+    /**
+     * 磁盘保护：判定必须发生在「把文件搬进播放器目录」之前 ——
+     * 超限的视频连搬都不会搬，播放器目录一个条目都不该多。
+     * （这里同时把「超限转在线播放」打开：转播也吃这条上限。）
+     */
+    const dirsBeforeDisk = fs.existsSync(PLAYER_DIR) ? fs.readdirSync(PLAYER_DIR).length : 0
+    runtime.config.playerMaxFileMB = 0.001
+    runtime.config.playerOnOversize = true
+    const diskSent = []
+    const diskVideo = makeVideo('tmp_player_disk.mp4')
+    const diskOk = await store.publishOnlinePlayer(collector(diskSent), {
+      videoPath: diskVideo,
+      title: '磁盘保护验证',
+      platform: 'bilibili',
+      danmaku: []
+    })
+    const dirsAfterDisk = fs.existsSync(PLAYER_DIR) ? fs.readdirSync(PLAYER_DIR).length : 0
+    check('超限时判定早于搬文件（播放器目录一个条目都没多、源文件还在原处）',
+      diskOk === false && dirsAfterDisk === dirsBeforeDisk && fs.existsSync(diskVideo) &&
+      /超过在线播放的体积上限/.test(diskSent[0] || ''),
+      '目录 ' + dirsBeforeDisk + ' -> ' + dirsAfterDisk + ' / ' + (diskSent[0] || '（没有回复）').slice(0, 70))
     runtime.config.playerMaxFileMB = 0
     // markOnlinePlayerOverride 的链路：下载那一步标记之后，handler 这边就该按在线播放处理
     const { runWithParseOverride } = require(path.join(pluginRoot, 'lib/karin/module/utils/ParseOverride.js'))
@@ -677,39 +857,52 @@ setTimeout(async () => {
     const { commandQueue } = require(path.join(pluginRoot, 'lib/compat/runtime.js'))
     const { Message: CompatMessage } = require(path.join(pluginRoot, 'lib/compat/node-karin.js'))
     const biliReg = commandQueue.find((item) => String(item.options?.name ?? '').includes('B站'))
+    check('B站解析命令已注册', !!biliReg, biliReg ? String(biliReg.options?.name) : '（没找到）')
+
+    /** 跑一次完整的B站解析，把用户实际收到的内容拼成一段文本（bvid 换一个，避免被去重） */
+    const runBiliParse = async (bvid = BILI_BVID) => {
+      biliInfoFixture.bvid = bvid
+      const sent = []
+      const bot = {
+        selfId: '10000', platform: 'qqguild', status: 1, user: { id: '10000', name: 'smoke' }, ctx,
+        sendMessage: async (channel, payload) => { sent.push(payload); return ['msg-1'] },
+        getGuild: async () => ({ name: 'smoke-guild' })
+      }
+      const session = {
+        content: 'https://www.bilibili.com/video/' + bvid,
+        selfId: '10000', userId: '12345', guildId: '456', channelId: '456', messageId: 'm1',
+        bot, author: { nick: 'smoke' }, username: 'smoke', event: {},
+        send: async (payload) => { sent.push(payload); return ['msg-2'] }
+      }
+      try {
+        await biliReg.handler(CompatMessage.fromSession(session), () => Symbol('next'))
+      } catch (error) {
+        // 渲染类步骤在没装 puppeteer 的机器上会失败，流程最后按约定聚合成一个错误抛出；
+        // 这里只记一笔，判断仍然基于用户实际收到的消息。
+        console.log('     （解析流程最后聚合抛错，属预期：' + String(error && error.message).slice(0, 70) + '）')
+      }
+      const text = sent
+        .map((item) => (Array.isArray(item) ? item : [item])).flat()
+        .map((el) => (typeof el === 'string' ? el : JSON.stringify(el?.attrs ?? el)))
+        .join('\n')
+      const link = /(https?:\/\/[^\s]+\/kkk\/player\/[0-9a-z]+)/.exec(text)
+      return { text, link: link ? link[1] : '', token: link ? link[1].split('/').pop() : '' }
+    }
+
     const savedQqPanelFlag = runtime.config.qqPanel
     runtime.config.qqPanel = false // 直接跑解析，不要先发面板
     runtime.config.playerOnOversize = true
-    const biliSent = []
-    const biliBot = {
-      selfId: '10000', platform: 'qqguild', status: 1, user: { id: '10000', name: 'smoke' }, ctx,
-      sendMessage: async (channel, payload) => { biliSent.push(payload); return ['msg-1'] },
-      getGuild: async () => ({ name: 'smoke-guild' })
-    }
-    const biliSession = {
-      content: 'https://www.bilibili.com/video/BV1xx411c7mD',
-      selfId: '10000', userId: '12345', guildId: '456', channelId: '456', messageId: 'm1',
-      bot: biliBot, author: { nick: 'smoke' }, username: 'smoke', event: {},
-      send: async (payload) => { biliSent.push(payload); return ['msg-2'] }
-    }
-    check('B站解析命令已注册', !!biliReg, biliReg ? String(biliReg.options?.name) : '（没找到）')
-    try {
-      await biliReg.handler(CompatMessage.fromSession(biliSession), () => Symbol('next'))
-    } catch (error) {
-      // 渲染类步骤在没装 puppeteer 的机器上会失败，流程最后按约定聚合成一个错误抛出；
-      // 这里只记一笔，判断仍然基于用户实际收到的消息。
-      console.log('     （解析流程最后聚合抛错，属预期：' + String(error && error.message).slice(0, 70) + '）')
-    }
-    const biliText = biliSent
-      .map((item) => (Array.isArray(item) ? item : [item])).flat()
-      .map((el) => (typeof el === 'string' ? el : JSON.stringify(el?.attrs ?? el)))
-      .join('\n')
-    const biliLink = /(https?:\/\/[^\s]+\/kkk\/player\/[0-9a-z]+)/.exec(biliText)
-    const biliToken = biliLink ? biliLink[1].split('/').pop() : ''
+    /**
+     * 上限之内才转播：全局上限是 1MB（第 [10] 节写进配置的），视频声明 5MB →
+     * 超过全局上限、但没超过「在线播放最大文件」10MB → 走「超限转在线播放」。
+     */
+    runtime.config.playerMaxFileMB = 10
+    const converted = await runBiliParse()
+    const biliToken = converted.token
     const biliPlayerSession = biliToken ? store.getPlayerSession(biliToken) : undefined
-    check('超限视频没有被拒绝（没有「视频太大了」）', !/太大了/.test(biliText), biliText.split('\n')[0].slice(0, 80))
-    check('超限视频没有走「已取消上传」', !/已取消上传/.test(biliText))
-    check('用户收到了在线播放链接', !!biliLink, biliLink ? biliLink[1] : '（没有链接）')
+    check('超限视频没有被拒绝（没有「视频太大了」）', !/太大了/.test(converted.text), converted.text.split('\n')[0].slice(0, 80))
+    check('超限视频没有走「已取消上传」', !/已取消上传/.test(converted.text))
+    check('用户收到了在线播放链接', !!converted.link, converted.link || '（没有链接）')
     check('播放会话已登记、视频落在播放器目录', !!biliPlayerSession && fs.existsSync(biliPlayerSession.filePath),
       biliPlayerSession ? biliPlayerSession.filePath : '（没有会话）')
     check('弹幕也一起存了下来（这次用户并没有主动要弹幕）',
@@ -735,9 +928,30 @@ setTimeout(async () => {
       biliHtml.includes('测试UP主') && biliHtml.includes('528.1万') && biliHtml.includes('19:32') &&
       biliHtml.includes('/kkk/player/' + biliToken + '/cover'), '标题 + UP 主 + 528.1万 + 19:32 + 同源封面')
     if (biliToken) await store.deletePlayerSession(biliToken)
+
+    console.log('\n[11b] 转播也有上限：超过「在线播放最大文件」就不转播，按原来的方式处理')
+    /**
+     * 用户实测要求：开着「超限转在线播放」时同样要受「在线播放最大文件」约束，
+     * 免得几十 GB 的视频被搬进播放器目录、把机器磁盘塞满。
+     * 这里把上限压到 2MB（视频声明 5MB）→ 不转播，回到原来的「太大了」拒绝流程。
+     */
+    runtime.config.playerMaxFileMB = 2
+    const dirsBefore = fs.existsSync(PLAYER_DIR) ? fs.readdirSync(PLAYER_DIR) : []
+    const refused = await runBiliParse(BILI_BVID_ALT)
+    const dirsAfter = fs.existsSync(PLAYER_DIR) ? fs.readdirSync(PLAYER_DIR) : []
+    check('超过在线播放上限时不转播（没有给用户任何播放链接）', !refused.link,
+      refused.link ? refused.link : '（没有链接，符合预期）')
+    check('按原来的方式拒绝，并说明「超过在线播放的体积上限、按原来的方式处理」',
+      /太大了/.test(refused.text) && /在线播放的体积上限/.test(refused.text) && /按原来的方式处理/.test(refused.text),
+      (refused.text.match(/[^\n]*太大[^\n]*/) || ['（没有说明）'])[0].slice(0, 140))
+    check('播放器目录没有被塞进新会话（一个文件都没多）',
+      dirsAfter.length === dirsBefore.length, '目录项 ' + dirsBefore.length + ' -> ' + dirsAfter.length)
+    check('超限的这次没有登记任何播放会话', store.listPlayerSessions().length === 0,
+      'sessions=' + store.listPlayerSessions().length)
+
     runtime.config.qqPanel = savedQqPanelFlag
     runtime.config.playerOnOversize = savedOnOversize
-
+    runtime.config.playerMaxFileMB = savedMax
     console.log('\n[12] 会话索引 / 弹幕带 BOM 也能读回来（Windows 上写文件很容易带 BOM）')
     const bomDir = path.join(dataRoot, 'bom-check')
     const bomToken = 'bomcheck00000001'

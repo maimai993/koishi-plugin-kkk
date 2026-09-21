@@ -14,7 +14,7 @@ import { AmagiBase } from './amagiClient'
 // 取不到 qqGroupFileLimitMB 时会返回 {}，Number({}) 就是 NaN —— 阈值失效的元凶
 import { tryGetRuntime } from '../../../compat/runtime'
 // 超限转在线播放：视频超过全局体积上限时，不拒绝而是挂到播放页（见 src/player）
-import { markOnlinePlayerOverride, shouldRedirectOversizeToPlayer } from '../../../player'
+import { effectivePlayerSizeLimitMB, markOnlinePlayerOverride, shouldRedirectOversizeToPlayer, withinPlayerSizeLimit } from '../../../player'
 // 解析阶段（「下载进度」指令读的就是这里登记的状态）
 import { DOWNLOAD_STAGES, clearParseStage, updateDownloadStage } from './Network/Downloader'
 
@@ -404,7 +404,15 @@ export const downloadVideoFile = async (event: Message, downloadOpt: downloadFil
   const fileSizeInMB = (fileSizeContent / (1024 * 1024)).toFixed(2)
   const fileSize = parseInt(parseFloat(fileSizeInMB).toFixed(2))
   if (fileSizeContent > 0 && Config.app.usefilelimit && fileSize > Config.app.filelimit) {
-    if (shouldRedirectOversizeToPlayer()) {
+    /**
+     * 「超限转在线播放」也不能突破「在线播放最大文件」这条上限（用户实测要求）：
+     * 转播的意义是「让看不了的视频还能看」，不是「把几十 GB 搬进播放器目录把磁盘塞满」。
+     * 上限口径：playerMaxFileMB 显式填了就用它，留空 / 0 = 跟随全局（就是上面这个 filelimit）。
+     */
+    const playerLimitMB = effectivePlayerSizeLimitMB(Number(Config.app.filelimit))
+    const playerAccepts = withinPlayerSizeLimit(parseFloat(fileSizeInMB), Number(Config.app.filelimit))
+    const redirectOn = shouldRedirectOversizeToPlayer()
+    if (redirectOn && playerAccepts) {
       /**
        * 「超限转在线播放」：视频还是**照常下载**（只是改由播放页提供，不再发到群里）。
        *
@@ -414,10 +422,17 @@ export const downloadVideoFile = async (event: Message, downloadOpt: downloadFil
       markOnlinePlayerOverride()
       logger.mark(`[在线播放] 视频 ${fileSizeInMB}MB 超过全局上限 ${Config.app.filelimit}MB，按「超限转在线播放」继续下载`)
     } else {
+      // 转播开着但这一档连在线播放上限都超了：明确说一句「按原来的方式处理」，别让人以为是坏了
+      const oversizeNote = redirectOn && !playerAccepts
+        ? `（超过在线播放的体积上限 ${Math.round(playerLimitMB)}MB，按原来的方式处理）`
+        : ''
+      if (redirectOn && !playerAccepts) {
+        logger.info(`[在线播放] 视频 ${fileSizeInMB}MB 超过在线播放上限 ${Math.round(playerLimitMB)}MB，不转播，按原来的方式处理`)
+      }
       const message = segment.text(
         `视频：「${
           downloadOpt.title.originTitle ?? 'Error: 文件名获取失败'
-        }」大小 (${fileSizeInMB} MB) 超出最大限制（设定值：${Config.app.filelimit} MB），已取消上传`
+        }」大小 (${fileSizeInMB} MB) 超出最大限制（设定值：${Config.app.filelimit} MB），已取消上传${oversizeNote}`
       )
       const selfId = event.selfId || (uploadOpt?.activeOption?.uin as string)
       const contact = event.contact || karin.contactGroup(uploadOpt?.activeOption?.group_id as string) || karin.contactFriend(selfId)

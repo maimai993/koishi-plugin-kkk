@@ -356,24 +356,31 @@ export class Bilibili extends Base {
          * 体积检查。三种情形：
          *   1. 用户点了带弹幕的那一档（在线播放请求）：视频不下发到 QQ，上限换成播放器自己的
          *      （「在线播放最大文件」，留空跟随全局）—— 免得几十 GB 的视频把磁盘塞满；
-         *   2. 超过全局「文件大小限制」、而管理员开了「超限转在线播放」：**不拒绝**，
-         *      照常下载并改成在线播放 —— 用户至少还能点开看，而不是只收到一句「太大了」；
+         *   2. 超过全局「文件大小限制」、而管理员开了「超限转在线播放」**并且没超过上面那条上限**：
+         *      **不拒绝**，照常下载并改成在线播放 —— 用户至少还能点开看，而不是只收到一句「太大了」；
+         *      超过上限的照旧走第 3 种（转播也不能把机器磁盘塞满，用户实测要求）；
          *   3. 其余情况：老规矩（全局上限 + 不压缩）。
          */
         const onlinePlayerNow = isOnlinePlayerRequest()
         /** 全局口径的「太大了」（原来的判定） */
         const globalOversize = !!Config.app.usefilelimit && Number(videoSize) > Number(Config.app.filelimit) && !Config.app.compress
-        /** 超限转在线播放：这次真的超了全局上限，并且两个开关都开着 */
-        const redirectToPlayer = !onlinePlayerNow && globalOversize && shouldRedirectOversizeToPlayer()
+        /** 在线播放自己的体积上限（「在线播放最大文件」，留空 / 0 = 跟随全局；0 = 不限制） */
+        const playerLimitMB = effectivePlayerSizeLimitMB(Config.app.usefilelimit ? Number(Config.app.filelimit) : 0)
+        /** 这一档体积在线播放接不接受 */
+        const playerAcceptsSize = playerLimitMB <= 0 || Number(videoSize) <= playerLimitMB
+        /** 超限转在线播放：这次真的超了全局上限、两个开关都开着，而且在线播放也接得下 */
+        const redirectToPlayer = !onlinePlayerNow && globalOversize && shouldRedirectOversizeToPlayer() && playerAcceptsSize
+        /** 想让转播兜底、但视频连在线播放的上限都超了：不转播，按原来的方式处理（要说清原因） */
+        const redirectBlocked = !onlinePlayerNow && globalOversize && shouldRedirectOversizeToPlayer() && !playerAcceptsSize
         if (redirectToPlayer) {
           // 标记成在线播放：后面的取弹幕、下载、发送都会按播放器走
           markOnlinePlayerOverride()
           logger.mark('[在线播放] 视频 ' + Number(videoSize) + 'MB 超过全局上限 ' + Config.app.filelimit
             + 'MB，按「超限转在线播放」改为在线播放')
+        } else if (redirectBlocked) {
+          logger.info('[在线播放] 视频 ' + Number(videoSize) + 'MB 超过在线播放上限 ' + Math.round(playerLimitMB)
+            + 'MB，不转播，按原来的方式处理（免得把机器磁盘塞满）')
         }
-        const playerLimitMB = (onlinePlayerNow || redirectToPlayer)
-          ? effectivePlayerSizeLimitMB(Config.app.usefilelimit ? Number(Config.app.filelimit) : 0)
-          : 0
         const videoOversize = (onlinePlayerNow || redirectToPlayer)
           ? (playerLimitMB > 0 && Number(videoSize) > playerLimitMB)
           : globalOversize
@@ -499,8 +506,8 @@ export class Bilibili extends Base {
         if (willSendVideo) {
           if (videoOversize) {
             // 在线播放模式下限制来自播放器自己，文案别再说「最大上传大小」（那个视频根本不上传）
-            const limitText = (onlinePlayerNow || redirectToPlayer)
-              ? `在线播放的体积上限为 ${playerLimitMB}MB`
+            const limitText = (onlinePlayerNow || redirectToPlayer || redirectBlocked)
+              ? `超过在线播放的体积上限（${Math.round(playerLimitMB)}MB），按原来的方式处理`
               : `设定的最大上传大小为 ${Config.app.filelimit}MB`
             this.e.reply(
               `${limitText}\n当前解析到的视频大小为 ${Number(videoSize)}MB\n` +
