@@ -837,18 +837,26 @@ setTimeout(async () => {
      * 而且判断还写反了（关掉强制不烧录反而变灰）。现在只有总开关联动，其余字段随时可改。
      */
     const gated = playerFields.filter((field) => field.editableWhen === 'danmaku')
-    check('只有「弹幕重定向在线播放器」这一个开关和「强制不烧录弹幕」联动',
+    check('只有「在线播放器总开关」这一个字段和「强制不烧录弹幕」联动',
       playerFields.length === 7 && gated.length === 1 && gated[0].key === 'playerEnabled',
       playerFields.map((field) => field.key + ':' + (field.editableWhen || '-')).join(' | '))
-    check('总开关名字改成了「弹幕重定向在线播放器」',
-      playerFields.find((field) => field.key === 'playerEnabled')?.label === '弹幕重定向在线播放器',
-      playerFields.find((field) => field.key === 'playerEnabled')?.label)
+    /**
+     * 用户要求：这一组要有自己的**总开关** —— playerEnabled 就是它，标题写清总开关语义，
+     * 它关掉时组内其它字段（面板显示在线看 / 公网地址 / 端口 / 有效期 / 最大文件 / 超限转播）全部变灰。
+     */
+    check('组内第一个字段就是「在线播放器总开关」（总开关语义的标题）',
+      playerFields[0]?.key === 'playerEnabled' && playerFields[0]?.label === '在线播放器总开关',
+      playerFields.map((field) => field.label).join(' / '))
+    check('总开关自己的说明写清了「关掉这一组其它设置都会变灰」',
+      /总开关/.test(playerFields.find((field) => field.key === 'playerEnabled')?.description ?? '') &&
+      /变灰/.test(playerFields.find((field) => field.key === 'playerEnabled')?.description ?? ''),
+      (playerFields.find((field) => field.key === 'playerEnabled')?.description ?? '').slice(0, 90))
     check('新增「面板显示「在线看」按钮」（默认开、不参与联动、说明写清了两个开关的关系）',
       (() => {
         const field = playerFields.find((item) => item.key === 'playerWatchButton')
         return !!field && field.default === true && field.type === 'boolean' &&
           field.section === '在线播放器设置' && field.editableWhen === undefined &&
-          /在线看/.test(field.description) && /弹幕重定向在线播放器/.test(field.description)
+          /在线看/.test(field.description) && /在线播放器总开关/.test(field.description)
       })(),
       JSON.stringify(playerFields.find((item) => item.key === 'playerWatchButton') || {}).slice(0, 160))
     // WebUI 面板里的门控是 patch-webui 生成到前端包里的，这里直接检查产物：
@@ -856,14 +864,38 @@ setTimeout(async () => {
     const webAssetsDir = path.join(pluginRoot, 'assets', 'web', 'assets')
     const bundleName = fs.readdirSync(webAssetsDir).find((name) => /^index-.*\.js$/.test(name))
     const bundleText = bundleName ? fs.readFileSync(path.join(webAssetsDir, bundleName), 'utf-8') : ''
-    const lockedMarker = 'Q(e,[' + "`" + 'qq' + "`" + ',' + "`" + 'forceNoDanmaku' + "`" + '],!0)===!0'
-    const openMarker = 'Q(e,[' + "`" + 'qq' + "`" + ',' + "`" + 'forceNoDanmaku' + "`" + '],!0)===!1'
+    const BT = '`'
+    const lockedMarker = 'Q(e,[' + BT + 'qq' + BT + ',' + BT + 'forceNoDanmaku' + BT + '],!0)===!0'
+    const openMarker = 'Q(e,[' + BT + 'qq' + BT + ',' + BT + 'forceNoDanmaku' + BT + '],!0)===!1'
     check('WebUI 里「强制不烧录弹幕」开着时该开关是锁住的（方向正确）',
       !!bundleText && bundleText.split(lockedMarker).length - 1 === 1 && !bundleText.includes(openMarker),
       '锁住表达式 ' + (bundleText.split(lockedMarker).length - 1) + ' 处 / 反向 ' + (bundleText.split(openMarker).length - 1) + ' 处')
-    check('其余在线播放字段没有被灰掉（前端包里只有这一处 disabled）',
+    check('其余在线播放字段没有被「强制不烧录弹幕」灰掉（那套锁只作用在总开关上）',
       !!bundleText && bundleText.split('disabled:' + lockedMarker).length - 1 === 0,
-      '（文本框/数字框都不带 disabled）')
+      '（文本框/数字框都不带那条锁）')
+    /**
+     * 用户要求：这一组要有自己的总开关，关掉时组内其它字段全部变灰。
+     * 门控表达式是 patch-webui 生成到前端包里的，这里直接数产物里的出现次数。
+     */
+    const playerOffMarker = 'Q(e,[' + BT + 'qq' + BT + ',' + BT + 'playerEnabled' + BT + '],!0)===!1'
+    check('WebUI 里「在线播放器总开关」关掉时组内 6 个字段全部变灰（开关 2 个 + 输入框 4 个）',
+      !!bundleText && bundleText.split(playerOffMarker).length - 1 === 6,
+      '门控表达式 ' + (bundleText.split(playerOffMarker).length - 1) + ' 处')
+    check('其中文本框/数字框用的是 options.disabled（4 个）',
+      !!bundleText && bundleText.split('disabled:' + playerOffMarker).length - 1 === 4,
+      'disabled: 形式 ' + (bundleText.split('disabled:' + playerOffMarker).length - 1) + ' 处')
+    check('总开关自己不带这条门控（它只受「强制不烧录弹幕」锁）',
+      !!bundleText && bundleText.split(BT + 'playerEnabled' + BT + '],!0)===!1,').length - 1 === 0)
+    /**
+     * 样式修复的回归守卫：「在线播放器设置」必须是「交互设置」的**兄弟**分组。
+     * 以前它被注入到「交互设置」的 children 里，于是被渲染成卡片内的 grid 子卡片，
+     * 外框内缩、字段挤成两列（用户反馈「和其它分组样式不一致」）。
+     */
+    const appEndAt = bundleText.indexOf('/*KKK-APP-END*/')
+    const sectAt = bundleText.indexOf('/*KKK-SECTION-START*/')
+    check('「在线播放器设置」插在「交互设置」之后（是兄弟分组，不再嵌在它里面）',
+      appEndAt > 0 && sectAt > appEndAt && /\]\}\)\)/.test(bundleText.slice(appEndAt, sectAt)),
+      JSON.stringify(bundleText.slice(appEndAt, sectAt)).slice(0, 80))
     check('「在线播放最大文件」默认 0 = 跟随全局', QQ_DEFAULTS.playerMaxFileMB === 0,
       'default=' + QQ_DEFAULTS.playerMaxFileMB)
     check('「面板显示「在线看」按钮」默认 true（用户要的就是这个按钮）', QQ_DEFAULTS.playerWatchButton === true,

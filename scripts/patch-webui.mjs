@@ -58,13 +58,31 @@ const DANMAKU_LOCKED = 'Q(e,' + arr(['qq', 'forceNoDanmaku']) + ',!0)===!0'
 /** 锁住时在字段说明后面补一句，免得用户以为是界面坏了 */
 const LOCK_HINT = '（这一项要先关掉上面的「强制不烧录弹幕」（也就是打开弹幕功能）才能改）'
 
+/**
+ * 「在线播放器设置」这一组的**总开关**。
+ *
+ * 用户要求：这一组要有自己的总开关，关掉时组内其它字段（公网地址 / 端口 / 有效期 /
+ * 在线播放最大文件 / 超限转在线播放 / 面板显示「在线看」按钮）全部禁用变灰，
+ * 打开即恢复可编辑 —— 用面板现成的「不可编辑」门控（和「强制不烧录弹幕」锁那一套同一视觉）。
+ *
+ * 极性：`Q(e,['qq','playerEnabled'],true)` 取到当前值（缺省即开），`===false` 表示「关着」= 锁住。
+ */
+const PLAYER_SECTION = '在线播放器设置'
+const PLAYER_MASTER_KEY = 'playerEnabled'
+const PLAYER_GROUP_OFF = 'Q(e,' + arr(['qq', PLAYER_MASTER_KEY]) + ',!0)===!1'
+/** 被总开关关掉时补一句说明 */
+const GROUP_LOCK_HINT = '（这一项要先把上面的「在线播放器总开关」打开才能改）'
+
 const appFieldCall = (field) => {
   const path = '[' + [q('qq'), q(field.key)].join(',') + ']'
   const locked = field.editableWhen === 'danmaku'
-  const description = q(String(field.description) + (locked ? LOCK_HINT : ''))
+  /** 在线播放器设置这一组里，除总开关以外的字段都跟着总开关联动 */
+  const lockedByGroup = field.section === PLAYER_SECTION && field.key !== PLAYER_MASTER_KEY
+  const disabled = [locked ? DANMAKU_LOCKED : '', lockedByGroup ? PLAYER_GROUP_OFF : ''].filter(Boolean).join('||')
+  const description = q(String(field.description) + (locked ? LOCK_HINT : '') + (lockedByGroup ? GROUP_LOCK_HINT : ''))
   // renderSwitch 的第 4 个参数、renderTextField 的 options.disabled 都是「不可编辑」
   if (field.type === 'boolean') {
-    return 's(' + path + ',' + q(field.label) + ',' + description + (locked ? ',' + DANMAKU_LOCKED : '') + ')'
+    return 's(' + path + ',' + q(field.label) + ',' + description + (disabled ? ',' + disabled : '') + ')'
   }
   const opts = ["type:" + q(field.type === 'number' ? 'number' : 'text')]
   if (field.type === 'number') {
@@ -72,18 +90,51 @@ const appFieldCall = (field) => {
     if (field.min !== undefined) opts.push('min:' + field.min)
     if (field.max !== undefined) opts.push('max:' + field.max)
   }
-  if (locked) opts.push('disabled:' + DANMAKU_LOCKED)
+  if (disabled) opts.push('disabled:' + disabled)
   return 'c(' + path + ',' + q(field.label) + ',' + description + ',{' + opts.join(',') + '})'
 }
 const sectionFields = (section) => APP_FIELDS.filter((field) => field.section === section)
-const APP_FIELDS_CODE = [
-  ...APP_FIELDS.filter((field) => !field.section).map(appFieldCall),
-  ...[...new Set(APP_FIELDS.filter((field) => field.section).map((field) => field.section))].map((section) =>
-    'o(' + q(section)
-    + ',(0,U.jsx)(U.Fragment,{children:['
-    + sectionFields(section).map(appFieldCall).join(',')
-    + ']}))'),
-].join(',')
+/** 直接跟在「交互设置」里的散字段（没有 section 的那些） */
+const APP_FIELDS_CODE = APP_FIELDS.filter((field) => !field.section).map(appFieldCall).join(',')
+/**
+ * 带 section 的字段（在线播放器设置）：**必须是「交互设置」的兄弟节点**，不能塞进它里面。
+ *
+ * 踩过的坑：原来这段被注入到「交互设置」的 children 里，于是它被渲染成交互设置卡片里的
+ * 一个 `card__content > grid grid-cols-2` 子卡片 —— 和「缓存设置 / 交互设置」那种顶层卡片
+ * 完全不是一个样式（外框内缩、字段被挤成两列）。现在按标记插在「交互设置」这个分组调用之后，
+ * 和其它分组一样直接挂在表单根下的 Fragment 里，走的是同一套卡片容器与间距。
+ */
+const APP_SECTION_CODE = [...new Set(APP_FIELDS.filter((field) => field.section).map((field) => field.section))].map((section) =>
+  'o(' + q(section)
+  + ',(0,U.jsx)(U.Fragment,{children:['
+  + sectionFields(section).map(appFieldCall).join(',')
+  + ']}))').join(',')
+const SECT_START = '/*KKK-SECTION-START*/'
+const SECT_END = '/*KKK-SECTION-END*/'
+
+/**
+ * 把带 section 的分组插到「交互设置」后面（兄弟节点）。
+ *
+ * 可重复执行：先按标记删掉上次插的（连同前面那个逗号），再插一次 —— 不会越套越多。
+ */
+function patchAppSections (text, name) {
+  let out = stripMarkedWithComma(text, SECT_START, SECT_END)
+  if (!APP_SECTION_CODE) return out
+  const at = out.indexOf('`交互设置`')
+  // 只在真正注入时打日志：这个函数会对每个前端包都跑一遍，没找到分组的是正常情况
+  if (at < 0) return out
+  // 往前找到这次分组调用的左括号（形如 o(`交互设置`,(…))）
+  let open = -1
+  for (let i = at - 1; i >= 0 && i > at - 40; i--) {
+    if (out[i] === '(') { open = i; break }
+  }
+  if (open < 0) return out
+  const close = matchParen(out, open)
+  if (close < 0) return out
+  out = out.slice(0, close + 1) + ',' + SECT_START + APP_SECTION_CODE + SECT_END + out.slice(close + 1)
+  console.log('[kkk] 在线播放器设置已作为「交互设置」的兄弟分组注入: ' + name)
+  return out
+}
 
 /** 一个字段 → 一行渲染器调用 */
 function renderField (field) {
@@ -594,6 +645,9 @@ for (const file of files) {
   text = patchErrorBoundary(text, name)
   text = patchTextFields(text, name)
   text = patchPermFields(text, name)
+  // 必须在 patchPermFields 之后：那个函数会先剥掉旧的 APP 标记块再重写「交互设置」里的字段，
+  // 我们的分组要插在「交互设置」**之后**，顺序反了会插到它里面去（就是这次要修的样式问题）
+  text = patchAppSections(text, name)
   text = patchDescriptions(text, name)
   text = applyTextReplacements(text, name)
 
