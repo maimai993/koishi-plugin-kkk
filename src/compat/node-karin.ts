@@ -15,7 +15,7 @@ import { h } from 'koishi'
 import type { Bot, Context, Session } from 'koishi'
 
 import { logger } from './logger'
-import { commandQueue, eventQueue, getRuntime, taskQueue, tryGetRuntime } from './runtime'
+import { commandQueue, eventQueue, getRuntime, karinPathBase, taskQueue, tryGetRuntime } from './runtime'
 import { segment } from './segment'
 import { syncUpstreamToKoishi } from './syncConfig'
 import { normalizeMessageText } from './text'
@@ -911,8 +911,26 @@ export const createServerErrorResponse = (res: any, message = '服务器内部�
  *
  * 这里给它一个真实现：子进程直接跑 ffmpeg / ffprobe，返回值形状保持 karin 的
  * `{ status, stdout, stderr }`（`status` 为真表示成功，kkk 里到处这么判断）。
- * 可执行文件来源优先级：karin 传入的 options.ffmpegPath → koishi-plugin-ffmpeg-path 服务
- * → 环境变量 FFMPEG_PATH/FFPROBE_PATH → PATH 里的 ffmpeg/ffprobe。
+ *
+ * ## 可执行文件从哪来（每一份都要**校验通过**才会被用）
+ *
+ * 线上事故：koishi-plugin-ffmpeg-path 自动下载的 ffmpeg 给出来的是**相对路径**
+ * （`./downloads/ffmpeg-linux-amd64-xxxx/ffmpeg`），兼容层原样拿去 spawn →
+ * `spawn … EACCES`，B站 m4s 修复失败、整条解析跟着失败，用户还没法自救。
+ * 所以现在按下述顺序挑，并且**每一份都先归一化成绝对路径 + 校验存在与可执行**：
+ *   1. **Koishi 的 ffmpeg 服务**（`ctx.ffmpeg`，本部署由 koishi-plugin-ffmpeg-path 提供）
+ *      —— 优先用它的 `executable`；给的是相对路径就按 karinPathBase / 进程工作目录归一化；
+ *      校验不过就跳过并打日志，同时提示去该插件配置里指定绝对路径或关掉自动下载；
+ *   2. karin 传进来的 `options.ffmpegPath`（上游有调用点会带）；
+ *   3. 环境变量 `FFMPEG_PATH` / `FFMPEG_BIN`（ffprobe 是 `FFPROBE_PATH`）；
+ *   4. PATH 里的 `ffmpeg` / `ffprobe`（最终兜底）。
+ *
+ * spawn 阶段报错（EACCES / ENOENT / EINVAL / UNKNOWN…也就是「文件在但起不来」）时
+ * **自动换下一个候选重试**；所有候选都起不来时，stderr 里会附上「都试过哪些」，
+ * 免得用户只看到一句「m4s 文件修复失败」却无从下手。
+ *
+ * 另外：本插件**不下载** ffmpeg（仓库里没有任何下载逻辑）；自动下载是 koishi-plugin-ffmpeg-path
+ * 自己的事（它的 `autoDownload` 默认开着）。我们要做的只是**别盲目相信它给的路径**。
  * ------------------------------------------------------------------ */
 
 function ffmpegRuntimeCtx (): any {
@@ -923,25 +941,268 @@ function ffmpegRuntimeCtx (): any {
   }
 }
 
-/** 由 ffmpeg 路径推出同目录的 ffprobe（找不到就交给 PATH） */
-function siblingFfprobe (ffmpegPath: string): string {
+/** 相对路径归一化时依次尝试的根目录：karin 数据目录 → 进程工作目录 */
+export function ffmpegResolveRoots (): string[] {
+  const roots: string[] = []
   try {
-    if (!ffmpegPath || ffmpegPath === 'ffmpeg') return 'ffprobe'
-    const dir = path.dirname(ffmpegPath)
-    const name = process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe'
-    const candidate = path.join(dir, name)
-    return fs.existsSync(candidate) ? candidate : 'ffprobe'
+    roots.push(karinPathBase())
+  } catch { /* 运行时还没绑定：只用进程工作目录 */ }
+  try {
+    roots.push(process.cwd())
+  } catch { /* 忽略 */ }
+  return roots.filter((root, index) => !!root && roots.indexOf(root) === index)
+}
+
+/**
+ * 这个文件现在能不能被执行。
+ *
+ * Windows 没有 X_OK 的概念（任何存在的文件都能「通过」），所以那边看**可执行扩展名**；
+ * Linux / macOS 老老实实查 `X_OK`（下载下来的 ffmpeg 常见问题就是没有 +x）。
+ */
+export function canExecuteFile (file: string, platform: NodeJS.Platform = process.platform): boolean {
+  try {
+    if (!fs.existsSync(file)) return false
+    if (platform === 'win32') return /\.(exe|cmd|bat|com)$/i.test(file)
+    fs.accessSync(file, fs.constants.X_OK)
+    return true
   } catch {
-    return 'ffprobe'
+    return false
   }
 }
 
-function resolveFfmpegBin (options: any = {}): string {
-  if (typeof options?.ffmpegPath === 'string' && options.ffmpegPath) return options.ffmpegPath
+/** 在 PATH 里找一个可执行文件（找不到返回空串）；Windows 会把 .exe/.cmd/.bat/.com 都试一遍 */
+export function findExecutableInPath (name: string, platform: NodeJS.Platform = process.platform): string {
+  const dirs = String(process.env.PATH ?? process.env.Path ?? '').split(path.delimiter).filter(Boolean)
+  const extensions = platform === 'win32' ? ['', '.exe', '.cmd', '.bat', '.com'] : ['']
+  for (const dir of dirs) {
+    for (const extension of extensions) {
+      const candidate = path.join(dir, name + extension)
+      if (canExecuteFile(candidate, platform)) return candidate
+    }
+  }
+  return ''
+}
+
+/** 校验候选时可注入的依赖（冒烟测试要能构造「不存在 / 不可执行」这些场景） */
+export interface FfmpegCheckDeps {
+  platform?: NodeJS.Platform
+  exists?: (file: string) => boolean
+  canExecute?: (file: string, platform: NodeJS.Platform) => boolean
+  roots?: () => string[]
+  isDirectory?: (file: string) => boolean
+  findInPath?: (name: string, platform: NodeJS.Platform) => string
+}
+
+/** 一份候选的校验结果 */
+export interface FfmpegCheckResult {
+  ok: boolean
+  /** 通过校验时：可以直接 spawn 的绝对路径（PATH 兜底那边同样是绝对路径） */
+  bin: string
+  /** 没通过的原因（日志与冒烟测试都读它） */
+  reason?: string
+}
+
+/**
+ * 校验一份候选可执行文件。
+ *
+ *   - 相对路径：按 karinPathBase → 进程工作目录**逐个归一化**成绝对路径，谁存在用谁；
+ *   - 必须存在；Linux / macOS 还要有执行权限（Windows 看可执行扩展名）；
+ *   - 传进来的是目录：当成「ffmpeg 所在目录」，自动补上平台对应的文件名；
+ *   - 不带路径分隔符的裸名字（`ffmpeg`）：去 PATH 里找，找到就给绝对路径，找不到算这个候选不可用。
+ * @param raw 原始值（可能是相对路径 / 绝对路径 / 目录 / PATH 里的名字）
+ * @param from 来源说明，日志里用
+ */
+export function checkFfmpegCandidate (raw: string, from: string, deps: FfmpegCheckDeps = {}): FfmpegCheckResult {
+  const platform = deps.platform ?? process.platform
+  const exists = deps.exists ?? fs.existsSync
+  const isDirectory = deps.isDirectory ?? ((file: string) => {
+    try {
+      return fs.statSync(file).isDirectory()
+    } catch {
+      return false
+    }
+  })
+  const executable = deps.canExecute ?? canExecuteFile
+  const inPath = deps.findInPath ?? findExecutableInPath
+  const text = String(raw ?? '').trim()
+  if (!text) return { ok: false, bin: '', reason: from + '：值为空' }
+
+  /** 裸名字：交给 PATH 解析（spawn 也是这么找的），找不到就直接判不可用 */
+  if (!/[/\\]/.test(text)) {
+    const hit = inPath(text, platform)
+    return hit
+      ? { ok: true, bin: hit }
+      : { ok: false, bin: '', reason: 'PATH 里找不到 ' + text }
+  }
+
+  const tried: string[] = []
+  const reasons: string[] = []
+  const roots = deps.roots ?? ffmpegResolveRoots
+  const targets = path.isAbsolute(text) ? [text] : roots().map((root) => path.resolve(root, text))
+  for (const target of targets) {
+    tried.push(target)
+    if (!exists(target)) continue
+    /** 目录：补上平台对应的文件名（有人会把「ffmpeg 所在目录」填进来） */
+    const file = isDirectory(target) ? path.join(target, platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg') : target
+    if (!exists(file)) {
+      reasons.push('目录里没有 ' + path.basename(file) + '：' + file)
+      continue
+    }
+    if (!executable(file, platform)) {
+      /**
+       * 这句要能直接照做：线上那份自动下载的 ffmpeg 最常见的毛病就是没有 +x
+       * （报错是 `spawn ./downloads/…/ffmpeg EACCES`，看着像「文件不存在」，其实是权限）。
+       */
+      reasons.push(platform === 'win32'
+        ? '不是可执行文件（Windows 需要 .exe/.cmd/.bat/.com）: ' + file
+        : '没有执行权限，可在服务器上执行 “chmod +x ' + file + '”（我们每次都会重新校验，改完直接重新解析一次即可）: ' + file)
+      continue
+    }
+    return { ok: true, bin: file }
+  }
+  return {
+    ok: false,
+    bin: '',
+    reason: reasons.length ? reasons.join('；') : '文件不存在: ' + tried.join(' / '),
+  }
+}
+
+interface FfmpegSource {
+  /** 来源说明（日志里显示「跳过 <来源>」，也用来判断要不要提示 ffmpeg-path 配置） */
+  from: string
+  /** 原始值 */
+  raw: string
+}
+
+/** 已经跳过过的候选：同一条只打一次日志，别把日志刷爆 */
+const ffmpegSkipped = new Set<string>()
+/** 当前选中的可执行文件（来源或文件变了才打日志，别刷屏） */
+const ffmpegChosen = new Map<string, string>()
+
+function logFfmpegSkip (kind: 'ffmpeg' | 'ffprobe', source: FfmpegSource, reason: string): void {
+  const key = kind + '|' + source.from + '|' + source.raw + '|' + reason
+  if (ffmpegSkipped.has(key)) return
+  ffmpegSkipped.add(key)
+  logger.warn('[ffmpeg] 跳过' + source.from + '（' + source.raw + '）：' + reason)
+  /** 自动下载下来的那份最常见的毛病就是相对路径 / 没有执行权限，顺手给一句能照做的提示 */
+  if (/[/\\]downloads[/\\]|ffmpeg-path|ffmpeg-linux|ffmpeg-win32|ffmpeg-darwin/i.test(source.raw)) {
+    logger.warn('[ffmpeg] 这个路径像是 ffmpeg-path 自动下载/缓存下来的：'
+      + '要么到「koishi-plugin-ffmpeg-path」配置里把 path 指到系统 ffmpeg 的绝对路径，'
+      + '要么关掉它的 autoDownload、改用 PATH 里的 ffmpeg（本插件会自动接着往下找）')
+  }
+}
+
+function logFfmpegChosen (kind: 'ffmpeg' | 'ffprobe', from: string, bin: string): void {
+  const key = kind + '|' + from + '|' + bin
+  if (ffmpegChosen.get(kind) === key) return
+  ffmpegChosen.set(kind, key)
+  logger.info('[ffmpeg] 使用' + from + '：' + bin)
+}
+
+/** 按优先级列出 ffmpeg 的候选（还没校验） */
+function ffmpegSources (options: any = {}): FfmpegSource[] {
+  const sources: FfmpegSource[] = []
   const ctx = ffmpegRuntimeCtx()
-  const servicePath = ctx?.ffmpeg?.executable ?? ctx?.ffmpeg?.path
-  if (typeof servicePath === 'string' && servicePath) return servicePath
-  return process.env.FFMPEG_PATH || process.env.FFMPEG_BIN || 'ffmpeg'
+  /** 1. Koishi 的 ffmpeg 服务（koishi-plugin-ffmpeg-path 这类插件提供） */
+  const service = ctx?.ffmpeg
+  const servicePath = typeof service?.executable === 'string' && service.executable
+    ? service.executable
+    : (typeof service?.path === 'string' ? service.path : '')
+  if (servicePath) sources.push({ from: 'Koishi 的 ffmpeg 服务（ctx.ffmpeg）', raw: servicePath })
+  /** 2. karin 传进来的 options.ffmpegPath */
+  if (typeof options?.ffmpegPath === 'string' && options.ffmpegPath) {
+    sources.push({ from: 'ffmpegPath 参数', raw: options.ffmpegPath })
+  }
+  /** 3. 环境变量 */
+  if (process.env.FFMPEG_PATH) sources.push({ from: '环境变量 FFMPEG_PATH', raw: process.env.FFMPEG_PATH })
+  if (process.env.FFMPEG_BIN) sources.push({ from: '环境变量 FFMPEG_BIN', raw: process.env.FFMPEG_BIN })
+  /** 4. PATH 兜底 */
+  sources.push({ from: 'PATH', raw: 'ffmpeg' })
+  return sources
+}
+
+/** 由 ffmpeg 路径推出同目录的 ffprobe（同名不同后缀，Windows 是 .exe） */
+function siblingFfprobe (ffmpegPath: string): string {
+  try {
+    if (!ffmpegPath) return ''
+    const name = process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe'
+    return path.join(path.dirname(ffmpegPath), name)
+  } catch {
+    return ''
+  }
+}
+
+function ffprobeSources (options: any = {}): FfmpegSource[] {
+  const sources: FfmpegSource[] = []
+  /** 1. 与选中的 ffmpeg 同目录的 ffprobe（下载的 ffmpeg 一般自带一份） */
+  const ffmpegPick = pickFfmpeg(options, true)
+  const sibling = ffmpegPick ? siblingFfprobe(ffmpegPick.bin) : ''
+  if (sibling) sources.push({ from: '与 ffmpeg 同目录', raw: sibling })
+  /** 2. karin 传进来的 options.ffprobePath */
+  if (typeof options?.ffprobePath === 'string' && options.ffprobePath) {
+    sources.push({ from: 'ffprobePath 参数', raw: options.ffprobePath })
+  }
+  /** 3. 环境变量 */
+  if (process.env.FFPROBE_PATH) sources.push({ from: '环境变量 FFPROBE_PATH', raw: process.env.FFPROBE_PATH })
+  /** 4. PATH 兜底 */
+  sources.push({ from: 'PATH', raw: 'ffprobe' })
+  return sources
+}
+
+/**
+ * 选出第一个通过校验的候选。
+ * @param quiet 为 true 时不打「跳过」日志（给 ffprobe 的「同目录探测」用，避免重复刷）
+ */
+function pickFfmpeg (options: any = {}, quiet = false): FfmpegCheckResult | null {
+  const deps: FfmpegCheckDeps = options?.__ffmpegDeps ?? {}
+  for (const source of ffmpegSources(options)) {
+    const checked = checkFfmpegCandidate(source.raw, source.from, deps)
+    if (!checked.ok) {
+      if (!quiet) logFfmpegSkip('ffmpeg', source, String(checked.reason ?? '校验不通过'))
+      continue
+    }
+    if (!quiet) logFfmpegChosen('ffmpeg', source.from, checked.bin)
+    return checked
+  }
+  return null
+}
+
+/** ffmpeg 用的候选（校验过、可直接 spawn 的） */
+function resolveFfmpegCandidates (options: any = {}): Array<{ from: string, bin: string }> {
+  const deps: FfmpegCheckDeps = options?.__ffmpegDeps ?? {}
+  const list: Array<{ from: string, bin: string }> = []
+  const seen = new Set<string>()
+  for (const source of ffmpegSources(options)) {
+    const checked = checkFfmpegCandidate(source.raw, source.from, deps)
+    if (!checked.ok) {
+      logFfmpegSkip('ffmpeg', source, String(checked.reason ?? '校验不通过'))
+      continue
+    }
+    if (seen.has(checked.bin)) continue
+    seen.add(checked.bin)
+    list.push({ from: source.from, bin: checked.bin })
+  }
+  if (list.length) logFfmpegChosen('ffmpeg', list[0].from, list[0].bin)
+  return list
+}
+
+/** ffprobe 用的候选（校验过、可直接 spawn 的） */
+function resolveFfprobeCandidates (options: any = {}): Array<{ from: string, bin: string }> {
+  const deps: FfmpegCheckDeps = options?.__ffmpegDeps ?? {}
+  const list: Array<{ from: string, bin: string }> = []
+  const seen = new Set<string>()
+  for (const source of ffprobeSources(options)) {
+    const checked = checkFfmpegCandidate(source.raw, source.from, deps)
+    if (!checked.ok) {
+      logFfmpegSkip('ffprobe', source, String(checked.reason ?? '校验不通过'))
+      continue
+    }
+    if (seen.has(checked.bin)) continue
+    seen.add(checked.bin)
+    list.push({ from: source.from, bin: checked.bin })
+  }
+  if (list.length) logFfmpegChosen('ffprobe', list[0].from, list[0].bin)
+  return list
 }
 
 /** 把 karin 那种「一整条参数串」拆成 argv（引号内的空格要保留） */
@@ -960,6 +1221,8 @@ interface FfmpegResult {
   stdout: string
   stderr: string
   code: number | null
+  /** spawn 阶段就失败（文件在但起不来 / 找不到）时的错误码，用来决定要不要换下一个候选 */
+  spawnError?: string
 }
 
 function runFfmpegBinary (bin: string, args: string[], options: any = {}): Promise<FfmpegResult> {
@@ -968,7 +1231,14 @@ function runFfmpegBinary (bin: string, args: string[], options: any = {}): Promi
     try {
       child = spawn(bin, args, { windowsHide: true })
     } catch (error: any) {
-      resolve({ status: false, stdout: '', stderr: String(error?.message ?? error), code: null })
+      /** Windows 上 spawn 一个不是可执行格式的文件会**同步**抛（spawn UNKNOWN），这里也要认 */
+      resolve({
+        status: false,
+        stdout: '',
+        stderr: String(error?.message ?? error),
+        code: null,
+        spawnError: String(error?.code ?? 'UNKNOWN'),
+      })
       return
     }
     let stdout = ''
@@ -980,7 +1250,10 @@ function runFfmpegBinary (bin: string, args: string[], options: any = {}): Promi
         child.kill('SIGKILL')
       } catch { /* 忽略 */ }
     }, timeout) : null
+    let settled = false
     const done = (result: FfmpegResult) => {
+      if (settled) return
+      settled = true
       if (timer) clearTimeout(timer)
       resolve(result)
     }
@@ -995,7 +1268,13 @@ function runFfmpegBinary (bin: string, args: string[], options: any = {}): Promi
       options?.onStderr?.(text)
     })
     child.on('error', (error: any) => {
-      done({ status: false, stdout, stderr: stderr + String(error?.message ?? error), code: null })
+      done({
+        status: false,
+        stdout,
+        stderr: stderr + String(error?.message ?? error),
+        code: null,
+        spawnError: String(error?.code ?? 'UNKNOWN'),
+      })
     })
     child.on('close', (code: number | null) => {
       done({ status: code === 0, stdout, stderr, code })
@@ -1003,25 +1282,84 @@ function runFfmpegBinary (bin: string, args: string[], options: any = {}): Promi
   })
 }
 
-export const ffmpeg = (input: string, options: any = {}): Promise<FfmpegResult> =>
-  runFfmpegBinary(resolveFfmpegBin(options), splitCommandArgs(input), options)
-
-export const ffprobe = (input: string, options: any = {}): Promise<FfmpegResult> => {
-  const bin = typeof options?.ffprobePath === 'string' && options.ffprobePath
-    ? options.ffprobePath
-    : (process.env.FFPROBE_PATH || siblingFfprobe(resolveFfmpegBin(options)))
-  return runFfmpegBinary(bin, splitCommandArgs(input), options)
+/**
+ * 跑一次 ffmpeg / ffprobe：候选按优先级来，spawn 阶段失败就换下一个再试。
+ *
+ * 只有 spawn 阶段的失败（EACCES / ENOENT / EINVAL / UNKNOWN…「压根没跑起来」）才换候选；
+ * 命令本身跑完但是**非 0 退出**（比如文件损坏）不会去试别的 ffmpeg —— 换一份也一样失败。
+ */
+async function runFfmpegCommand (
+  kind: 'ffmpeg' | 'ffprobe',
+  input: string,
+  options: any = {}
+): Promise<FfmpegResult> {
+  const args = splitCommandArgs(input)
+  const candidates = kind === 'ffmpeg' ? resolveFfmpegCandidates(options) : resolveFfprobeCandidates(options)
+  if (!candidates.length) {
+    return {
+      status: false,
+      stdout: '',
+      stderr: '没有可用的 ' + kind + '：所有候选都没通过校验（先确认机器上装了 ffmpeg，或在配置里指定绝对路径）',
+      code: null,
+      spawnError: 'ENOENT',
+    }
+  }
+  const tried: string[] = []
+  let last: FfmpegResult | null = null
+  for (const candidate of candidates) {
+    const attempt = await runFfmpegBinary(candidate.bin, args, options)
+    if (!attempt.spawnError) return attempt
+    tried.push(candidate.bin + '（' + attempt.spawnError + '）')
+    logger.warn('[ffmpeg] ' + candidate.bin + ' 起不来（' + attempt.spawnError + '），换下一个候选')
+    last = attempt
+  }
+  /** 全部候选都在 spawn 阶段失败：把「都试过哪些」写进 stderr，用户照着装/改就行 */
+  if (last) {
+    last.stderr = last.stderr + '\n（已尝试的 ' + kind + '：' + tried.join('、')
+      + '；都不行，请安装 ' + kind + ' 或在配置/环境变量里指定它的绝对路径）'
+  }
+  return last ?? { status: false, stdout: '', stderr: '没有可用的 ' + kind, code: null }
 }
 
-/** 是否真的能用 ffmpeg（弹幕烧录 / 转码相关功能用它决定要不要提示「未接入」） */
+/**
+ * 给别处（例如自己 spawn 的图片切片）用的「一个可以直接 spawn 的 ffmpeg」。
+ *
+ * 走的是同一套候选与校验（Koishi 服务 → ffmpegPath → 环境变量 → PATH），
+ * 所以不会再出现「某个模块读 process.env.FFMPEG_PATH 拿到相对路径 / 坏路径就 EACCES」。
+ * 一个都没通过校验时返回 `'ffmpeg'`（交给 PATH 最后一次机会，反正也没更好的了）。
+ */
+export function resolveFfmpegBin (options: any = {}): string {
+  try {
+    const picked = pickFfmpeg(options, true)
+    if (picked?.bin) return picked.bin
+  } catch { /* 取不到就走下面的兜底 */ }
+  return 'ffmpeg'
+}
+
+/** 同上，ffprobe 版 */
+export function resolveFfprobeBin (options: any = {}): string {
+  try {
+    const candidates = resolveFfprobeCandidates(options)
+    if (candidates.length) return candidates[0].bin
+  } catch { /* 取不到就走下面的兜底 */ }
+  return 'ffprobe'
+}
+
+export const ffmpeg = (input: string, options: any = {}): Promise<FfmpegResult> =>
+  runFfmpegCommand('ffmpeg', input, options)
+
+export const ffprobe = (input: string, options: any = {}): Promise<FfmpegResult> =>
+  runFfmpegCommand('ffprobe', input, options)
+
+/**
+ * 是否真的能用 ffmpeg（弹幕烧录 / 转码相关功能用它决定要不要提示「未接入」）。
+ *
+ * 判定口径和真正跑命令时**一致**：候选要能归一化成绝对路径、存在、并且可执行；
+ * PATH 那一档会真的去 PATH 里找文件（不再像以前那样「看到名字是 ffmpeg 就返回 true」）。
+ */
 export const isFfmpegAvailable = (): boolean => {
   try {
-    const bin = resolveFfmpegBin()
-    if (bin === 'ffmpeg') {
-      // PATH 里的 ffmpeg：查一下常见位置即可，不为了探测去启动进程
-      return true
-    }
-    return fs.existsSync(bin)
+    return !!pickFfmpeg({}, true)
   } catch {
     return false
   }

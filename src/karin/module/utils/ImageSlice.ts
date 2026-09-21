@@ -17,7 +17,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { logger, segment, type Message } from 'node-karin'
+import { logger, resolveFfmpegBin, segment, type Message } from 'node-karin'
 
 import { commandInvocation, tryGetRuntime } from '../../../compat/runtime'
 import { getImageMetadata } from '@/module/utils/Render'
@@ -59,17 +59,19 @@ const cropWithFfmpeg = async (
   customFilter?: string
 ): Promise<boolean> => {
   const filter = customFilter ?? ('crop=' + width + ':' + height + ':0:' + y)
-  const runtime: any = tryGetRuntime()
-  const ffmpeg: any = runtime?.ctx?.ffmpeg
   const args = ['-y', '-i', input, '-vf', filter, '-frames:v', '1', output]
   /**
-   * **不要用宿主的 ffmpeg 服务** —— 实测 `ffmpeg.builder()...run()` 会**卡住不返回**
+   * **不要用宿主的 ffmpeg 服务自带的 builder** —— 实测 `ffmpeg.builder()...run()` 会**卡住不返回**
    * （既没有 ffmpeg 进程、也没有 CPU 占用、更没有任何日志，表现就是「怎么没反应了」）。
    * 命令行方式已经验证可用，直接用它。
+   *
+   * 但**可执行文件要走兼容层那一套候选**（Koishi 服务 → ffmpegPath → 环境变量 → PATH，
+   * 每份都校验存在与可执行）：以前这里直接读 `process.env.FFMPEG_PATH`，
+   * 拿到一份相对路径/没 +x 的 ffmpeg 时同样会 EACCES（和 m4s 那条链路一个坑）。
    */
   try {
     const { spawn } = await import('node:child_process')
-    const bin = process.env.FFMPEG_PATH || 'ffmpeg'
+    const bin = resolveFfmpegBin()
     await new Promise<void>((resolve, reject) => {
       const proc = spawn(bin, args, { stdio: 'ignore' })
       proc.on('error', reject)
