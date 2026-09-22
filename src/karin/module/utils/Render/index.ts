@@ -332,6 +332,179 @@ export async function renderTemplateHtml (route: string, data: any, dark: boolea
 }
 
 /* ------------------------------------------------------------------ *
+ * 截图前的降级（性能）
+ * ------------------------------------------------------------------ */
+
+/**
+ * ## 为什么需要这一段
+ *
+ * 上游模板每一张卡片都铺了一层**全屏 SVG 噪点**：一个 `absolute inset-0` 的 div，
+ * 里面是 `<svg class="w-full h-full">` + `<filter><feTurbulence type="fractalNoise">` +
+ * 一个铺满的 `<rect filter="url(#噪声)">`。
+ *
+ * 实测（koishi-plugin-shotkit 内核，bilibili/videoInfo，2880x4036 @2x，同一份 HTML）：
+ *
+ * | 变体 | 耗时 |
+ * | --- | --- |
+ * | 原样 | **31.1s** |
+ * | 噪点层换成可平铺小图 | 3.5s |
+ * | 直接去掉噪点层 | 2.8s |
+ * | 去掉噪点层 + 剔除失效 @font-face | 2.0s |
+ *
+ * 也就是**整张卡片九成以上的时间花在这一层噪声上**。原因是内核是**软件光栅化**
+ * （本进程内、没有 GPU、没有分块缓存），feTurbulence 要按设备像素逐个生成噪声：
+ * 1158 万像素的 fractalNoise 就是十几个 G 的浮点运算。浏览器里这层由 Skia 处理并
+ * 缓存成图层，代价低得多，所以这个坑只在 shotkit 上才这么明显。
+ *
+ * 而它换来的画面差异小到可以忽略：同一张卡逐像素比对（asis vs 去掉），
+ * **平均差 0.8/255、最大差 4/255、只有 5.4% 的像素差超过 2** —— 肉眼看不出。
+ *
+ * 处理方式由 `app.noiseOverlay` 决定：
+ *   - `off`（默认）：整层删掉，最快；
+ *   - `tile`：换成一枚 160x160 的噪点小图再平铺（保住颗粒感，仍然比原样快约 9 倍）；
+ *   - `keep`：保留原样（老行为，很慢，除非你有特别的理由）。
+ *
+ * ## 只有「整层就是噪点」的 svg 才会被动
+ *
+ * 判定条件是：这个 `<svg>` 里**除 filter/defs/mask 之外只剩下 <rect>**，而且带
+ * feTurbulence。装饰性噪点层正好长这样；万一将来有模板把 feTurbulence 用在别处
+ * （例如当遮罩喂给可见图形），它就不满足条件，原样保留 —— 宁可慢，也不要把内容删掉。
+ */
+
+/** 一枚 160x160 的噪点瓦片：同样的 fractalNoise，但只生成 2.5 万像素而不是 1158 万 */
+const NOISE_TILE_FILTER = '<filter id="kkkNoiseTile" x="0%" y="0%" width="100%" height="100%">'
+  + '<feTurbulence type="fractalNoise" baseFrequency="0.8" numOctaves="2" stitchTiles="stitch" result="noise" />'
+  + '<feColorMatrix type="saturate" values="0" result="gray" />'
+  + '<feComponentTransfer>'
+  + '<feFuncR type="discrete" tableValues="0 1" /><feFuncG type="discrete" tableValues="0 1" /><feFuncB type="discrete" tableValues="0 1" />'
+  + '</feComponentTransfer>'
+  + '</filter>'
+
+/** 平铺版本：把整个噪点 svg 换成「一枚小瓦片 + 平铺」，视觉接近，代价几乎为零 */
+const NOISE_TILE_SVG = '<svg class="w-full h-full" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="none">'
+  + '<defs>' + NOISE_TILE_FILTER
+  + '<pattern id="kkkNoisePattern" width="160" height="160" patternUnits="userSpaceOnUse">'
+  + '<rect width="160" height="160" filter="url(#kkkNoiseTile)" />'
+  + '</pattern></defs>'
+  + '<rect width="100%" height="100%" fill="url(#kkkNoisePattern)" />'
+  + '</svg>'
+
+/** svg 里除了 filter/defs/mask 之外，是否只剩下 <rect>（= 装饰性噪点层） */
+function isNoiseOnlySvg (inner: string): boolean {
+  if (!inner.includes('feTurbulence')) return false
+  const visible = inner
+    .replace(/<filter\b[\s\S]*?<\/filter>/g, '')
+    .replace(/<defs\b[\s\S]*?<\/defs>/g, '')
+    .replace(/<mask\b[\s\S]*?<\/mask>/g, '')
+  const tags = visible.match(/<\/?[a-zA-Z][\w:.-]*/g) ?? []
+  return tags.every((tag) => /^<\/?rect$/.test(tag))
+}
+
+/** 噪点层降级，返回处理后的 HTML 和被动过的层数（层数只用于日志） */
+export function downgradeNoiseLayers (html: string): { html: string; layers: number } {
+  const mode = String((Config.app as any)?.noiseOverlay ?? 'off').toLowerCase()
+  if (mode === 'keep') return { html, layers: 0 }
+  let layers = 0
+  const output = html.replace(/<svg\b[^>]*>[\s\S]*?<\/svg>/g, (block, ..._rest: any[]) => {
+    const inner = block.slice(block.indexOf('>') + 1, block.lastIndexOf('</svg>'))
+    if (!isNoiseOnlySvg(inner)) return block
+    layers++
+    if (mode === 'tile') return NOISE_TILE_SVG
+    return ''
+  })
+  return { html: output, layers }
+}
+
+/**
+ * 剔除「字体文件不存在」的 @font-face。
+ *
+ * 上游 `style.css` 里有 403 条 @font-face，其中 384 条指向 `./template-fonts/*.woff2`
+ * （HarmonyOS Sans 按 unicode-range 切了 384 个子集）。移植版把 karin 的本地服务地址
+ * 改写成同目录相对路径，但**这个目录并不存在** —— 于是每次渲染 WebKit 都要为这 384 条
+ * 声明去读一次不存在的文件，光这一项就占去掉噪点后单张卡片约 1s（2.9s → 2.0s）。
+ * 另外这些声明本身有 2.4MB，会原样写进每个 HTML 文件。
+ *
+ * 判定很保守：一条 @font-face 里的 url() 若**全部**指向不存在的本地文件才删；
+ * data:/http(s): 之类的内联或远程字体一律保留（上游就有 19 条内联 data: 字体）。
+ *
+ * @param baseDir 这段 HTML 最终落地目录，相对 url 以它为基准解析
+ */
+const fontProbeCache = new Map<string, boolean>()
+
+export function pruneMissingFontFaces (html: string, baseDir: string): string {
+  if (!html.includes('@font-face')) return html
+  return html.replace(/@font-face\s*\{[^}]*\}/g, (block) => {
+    const urls = Array.from(block.matchAll(/url\(\s*(['"]?)([^'")]+)\1\s*\)/g), (match) => match[2])
+    if (!urls.length) return block
+    const resolvable = urls.some((url) => {
+      // 内联 / 远程 / 片段引用：不归这里管
+      if (/^(?:data:|[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(url)) return true
+      const bare = url.split(/[?#]/)[0]
+      if (!bare) return true
+      let file: string
+      try {
+        file = path.resolve(baseDir, decodeURIComponent(bare))
+      } catch {
+        return true
+      }
+      const cached = fontProbeCache.get(file)
+      if (cached !== undefined) return cached
+      let exists = false
+      try {
+        exists = fs.existsSync(file)
+      } catch {
+        exists = true
+      }
+      fontProbeCache.set(file, exists)
+      return exists
+    })
+    return resolvable ? block : ''
+  })
+}
+
+/**
+ * 内核（shotkit）加载不了的远程资源，交给它之前先摘掉。
+ *
+ * 实测：内核在 Windows 上**加载不了 https 资源**（卡片里的 https 图片一律渲染成空白框），
+ * 但它照样会为这些地址发请求、并且等它们结束 —— 一张 1440x600 的小页面里只要有一个连不上的
+ * https 图片，截图就从 1.5 秒变成 22 秒。React 19 的 SSR 还会给每个 `<img>` 额外补一条
+ * `<link rel="preload" as="image">`（一张评论卡实测 27 条），这些 preload 同样算在页面加载里。
+ *
+ * 所以**只在 shotkit 这条路径**上做替换（puppeteer 那条路不动，它能正常加载远程图片）：
+ *   - 删掉 `<link rel="preload">`（纯预加载提示，本地渲染没有意义）
+ *   - 远程 `<img src>` 换成 1x1 透明图（反正渲染不出来），顺带删掉 srcset
+ *   - 内联样式/CSS 里的 `url(http…)` 换成 none
+ */
+export function neutralizeRemoteAssets (html: string): { html: string; links: number; images: number } {
+  let links = 0
+  let images = 0
+  let output = html.replace(/<link\b[^>]*\brel=["']?preload["']?[^>]*>/gi, () => {
+    links++
+    return ''
+  })
+  output = output.replace(/(<img\b[^>]*?)\ssrc="https?:\/\/[^"]*"/gi, (_all: string, head: string) => {
+    images++
+    return head + ' src="' + TRANSPARENT_PIXEL + '"'
+  })
+  output = output.replace(/(<img\b[^>]*?)\ssrcset="[^"]*"/gi, '$1')
+  output = output.replace(/url\(\s*(['"]?)https?:\/\/[^)'"]*\1\s*\)/gi, 'none')
+  return { html: output, links, images }
+}
+
+/** 顶掉远程图片用的 1x1 透明 gif（内联 data: 内核能正常解码） */
+const TRANSPARENT_PIXEL = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'
+
+/** 截图前的统一降级：先剔无效字体，再降级噪点层 */
+export function optimizeForScreenshot (html: string, baseDir: string): string {
+  const pruned = pruneMissingFontFaces(html, baseDir)
+  const { html: finalHtml, layers } = downgradeNoiseLayers(pruned)
+  if (layers > 0) {
+    logger.debug('[Render] 噪点层降级 ' + layers + ' 处（app.noiseOverlay=' + String((Config.app as any)?.noiseOverlay ?? 'off') + '）')
+  }
+  return finalHtml
+}
+
+/* ------------------------------------------------------------------ *
  * 截图
  * ------------------------------------------------------------------ */
 
@@ -346,7 +519,7 @@ export async function renderTemplateHtml (route: string, data: any, dark: boolea
 /** 用了 shotkit 只提示一次（每张卡片都刷一行没意义） */
 let shotkitLogged = false
 
-async function screenshot (htmlPath: string, selector: string, timeout: number, scale = 1, format: 'png' | 'jpeg' = 'jpeg'): Promise<{ base64: string; mime: string }> {
+async function screenshot (htmlPath: string, selector: string, timeout: number, scale = 1, format: 'png' | 'jpeg' = 'jpeg', htmlSource?: string): Promise<{ base64: string; mime: string; dsf: number }> {
   const koishiCtx: any = getKoishiContext()
   /** 浏览器渲染服务（koishi-plugin-puppeteer / puppeteer-without-canvas 之类） */
   const puppeteer: any = koishiCtx?.get ? koishiCtx.get('puppeteer') : koishiCtx?.puppeteer
@@ -367,7 +540,8 @@ async function screenshot (htmlPath: string, selector: string, timeout: number, 
   // 卡片是给手机看的：**低于 2x 会明显发虚**，所以下限锁 2（上限 3）。
   // 想更大更清晰就调 `app.renderScale`（100 → 2x，150 → 3x），配 100 时保持 2x 不出错。
   const requested = Number.isFinite(scale) && scale > 0 ? scale * 2 : 2
-  let deviceScaleFactor = Math.min(3, Math.max(2, requested))
+  // 下限是 1x：模板都按 1440 CSS 像素排版，1x 出图正好 1440 宽 —— 也就是切片时会被压到的那个宽度
+  let deviceScaleFactor = Math.min(3, Math.max(1, requested))
   // 安全阀：超大页面降一档缩放，避免单次渲染吃掉几 GB 内存（曾经把实例 OOM 崩掉）
   try {
     if (fs.statSync(htmlPath).size > 6 * 1024 * 1024) deviceScaleFactor = Math.max(1, deviceScaleFactor - 1)
@@ -389,19 +563,36 @@ async function screenshot (htmlPath: string, selector: string, timeout: number, 
   if (shotkit && typeof shotkit.renderFile === 'function' && (preferShotkit || !puppeteer)) {
     try {
       const started = Date.now()
-      const buffer = await shotkit.renderFile(htmlPath, {
-        selector,
-        timeout,
-        deviceScaleFactor,
-        type: 'png',
-      })
+      /**
+       * 交给内核的 HTML 先摘掉它加载不了的远程资源（见 neutralizeRemoteAssets 的说明）。
+       * 走 `screenshot({ html })` 而不是 renderFile：磁盘上那份保持原样，
+       * 万一内核失败要回退到 puppeteer，那边还能正常加载远程图片。
+       */
+      const sanitized = htmlSource ? neutralizeRemoteAssets(htmlSource) : null
+      if (sanitized && (sanitized.links > 0 || sanitized.images > 0)) {
+        logger.debug('[Render] 内核用 HTML：摘掉 preload ' + sanitized.links + ' 条、远程图片 ' + sanitized.images + ' 张')
+      }
+      const buffer = sanitized && typeof shotkit.screenshot === 'function'
+        ? ((await shotkit.screenshot({
+          html: sanitized.html,
+          selector,
+          timeout,
+          deviceScaleFactor,
+          type: 'png',
+        }))?.image)
+        : await shotkit.renderFile(htmlPath, {
+          selector,
+          timeout,
+          deviceScaleFactor,
+          type: 'png',
+        })
       if (buffer && buffer.length) {
         if (!shotkitLogged) {
           shotkitLogged = true
           logger.info('[Render] 使用 shotkit 内核渲染卡片（静态内核，不执行页面 JS）')
         }
         logger.debug('[Render] shotkit 渲染 ' + htmlPath.split(/[\\/]/).pop() + ' 用时 ' + (Date.now() - started) + 'ms')
-        return { base64: Buffer.from(buffer).toString('base64'), mime: 'image/png' }
+        return { base64: Buffer.from(buffer).toString('base64'), mime: 'image/png', dsf: deviceScaleFactor }
       }
     } catch (error: any) {
       shotkitFailure = error
@@ -485,7 +676,7 @@ async function screenshot (htmlPath: string, selector: string, timeout: number, 
       type: format,
       quality: format === 'jpeg' ? 92 : undefined
     } as any)
-    return { base64: buffer.toString('base64'), mime: 'image/' + format }
+    return { base64: buffer.toString('base64'), mime: 'image/' + format, dsf: deviceScaleFactor }
   }
 
   /**
@@ -604,9 +795,74 @@ function unwrapImageProxy (html: string): string {
   })
 }
 
+/**
+ * 「这张卡片该用 1x 还是 2x 渲染」——**不猜，试**。
+ *
+ * 起因：模板按 1440 CSS 像素排版，长图切片时又会被压回 1440 宽再切
+ * （见 ImageSlice 的 SLICE_WIDTH），所以长卡片用 2x 渲染出来的 2880 宽像素一个都用不上。
+ *
+ * 但不能按「高不高」一刀切：同一台机器上实测（都是 1440 宽、同样的 HTML），
+ * 内核在不同倍率下走的**光栅化路径不同**，谁快完全看内容 ——
+ *   评论卡（9489 CSS 高）：1x 1.5s vs 2x 3.9s，1x 快 2.6 倍；
+ *   B 站评论卡（17965）：1x 2.0s vs 2x 7.4s，1x 快 3.7 倍；
+ *   图集卡（2854）：1x 7.8s vs 2x 3.0s，**2x 反而快 2.6 倍**；
+ *   直播推荐卡（2593）：1x 10.1s vs 2x 4.4s，**2x 快 2.3 倍**。
+ * 按高度猜必然错一半，所以这里改成**每条路由各测一次**：第一次用配置的倍率，
+ * 第二次换另一档，之后固定用快的那档 —— 代价是每条路由多一次渲染（只在进程活着期间），
+ * 换来的是之后每次都走对路。用户把 renderScale 设成 50（只要 1x）时不试，直接听配置。
+ */
+interface CardScaleTrial {
+  /** 目前认为更快的倍率 */
+  best: number
+  bestMs: number
+  /** 还没试过的另一档，试完就清空 */
+  pending?: number
+}
+
+const cardScaleTrials = new Map<string, CardScaleTrial>()
+
+/** 配置里的倍率（面板 renderScale：100 = 2x，150 = 3x，50 = 1x） */
+function configuredCardScale (): number {
+  return Math.min(2, Math.max(0.25, Number(Config.app?.renderScale ?? 100) / 100))
+}
+
+/** 这张卡片这次该用多少倍渲染，以及这次是不是「试探」 */
+function resolveCardScale (route: string): { scale: number; trial: boolean } {
+  const configured = configuredCardScale()
+  // 用户明确只要 1x：不试，直接听配置
+  if (configured <= 0.5) return { scale: configured, trial: false }
+  const entry = cardScaleTrials.get(route)
+  if (!entry) return { scale: configured, trial: false }
+  if (entry.pending !== undefined) return { scale: entry.pending, trial: true }
+  return { scale: entry.best, trial: false }
+}
+
+/** 渲染完把这次的耗时喂回来，决定这条路之后固定用哪一档 */
+function recordCardScale (route: string, scale: number, ms: number): void {
+  const configured = configuredCardScale()
+  if (configured <= 0.5) return
+  const entry = cardScaleTrials.get(route)
+  if (!entry) {
+    cardScaleTrials.set(route, { best: scale, bestMs: ms, pending: scale > 0.5 ? 0.5 : configured })
+    return
+  }
+  if (entry.pending !== undefined && Math.abs(scale - entry.pending) < 1e-6) {
+    const better = ms < entry.bestMs
+    const best = better ? scale : entry.best
+    const bestMs = better ? ms : entry.bestMs
+    logger.info('[Render] ' + route + ' 倍率测完了：固定用 ' + best * 2 + 'x（' + Math.round(bestMs) + 'ms，'
+      + '本次 ' + scale * 2 + 'x=' + Math.round(ms) + 'ms / 上次 ' + entry.best * 2 + 'x=' + Math.round(entry.bestMs) + 'ms）')
+    cardScaleTrials.set(route, { best, bestMs })
+    return
+  }
+  // 稳态：顺手刷新一下耗时，万一机器负载变化明显也能留着对比
+  entry.bestMs = ms
+}
+
 export const Render = async (_event: any, route: string, data: any): Promise<any[]> => {
+  const startedAt = Date.now()
   const dark = await resolveUseDarkTheme(route, data).catch(() => false)
-  const scale = Math.min(2, Math.max(0.5, Number(Config.app?.renderScale ?? 100) / 100))
+  const { scale, trial } = resolveCardScale(route)
 
   let html = await renderTemplateHtml(route, data, dark)
   if (!html) {
@@ -617,15 +873,24 @@ export const Render = async (_event: any, route: string, data: any): Promise<any
   const htmlPath = path.resolve(karinPathHtml, Root.pluginName, route.replace(/[\\/]/g, '_') + '.html')
   try {
     fs.mkdirSync(path.dirname(htmlPath), { recursive: true })
+    // 截图前的降级（噪点层 / 失效 @font-face），见本文件「截图前的降级」一节
+    html = optimizeForScreenshot(html, path.dirname(htmlPath))
     fs.writeFileSync(htmlPath, html, 'utf8')
     // 二维码：必须像素级清晰（JPEG 压缩会影响扫码），继续用 PNG；其它卡片用 JPEG 压体积
     const isQrCode = /qrcode/i.test(route)
     const format: 'png' | 'jpeg' = isQrCode ? 'png' : 'jpeg'
     // mime 由 screenshot 返回实际产出的格式：shotkit 走 PNG，其余路径仍是传入的 format
-    const { base64, mime } = await screenshot(htmlPath, '#container', Number(Config.app?.RenderWaitTime ?? 10) * 1000, scale, format)
+    const htmlBuiltAt = Date.now()
+    const { base64, mime, dsf } = await screenshot(htmlPath, '#container', Number(Config.app?.RenderWaitTime ?? 10) * 1000, scale, format, html)
+    const shotAt = Date.now()
     const buffer = Buffer.from(base64, 'base64')
     const meta = getImageMetadata(buffer)
-    logger.debug('[Render] ' + route + ' 渲染完成 ' + mime + ' ' + (meta.width ?? '?') + 'x' + (meta.height ?? '?') + ' ' + Math.round(buffer.length / 1024) + 'KB')
+    // 把这次的截图耗时喂回去，决定这条路之后固定用哪一档（见上面 cardScaleTrials）
+    recordCardScale(route, scale, shotAt - htmlBuiltAt)
+    logger.info('[Render] ' + route + ' 渲染完成 ' + mime + ' ' + (meta.width ?? '?') + 'x' + (meta.height ?? '?')
+      + ' ' + Math.round(buffer.length / 1024) + 'KB'
+      + ' 用时 ' + (shotAt - startedAt) + 'ms（页面 ' + (htmlBuiltAt - startedAt) + 'ms / 截图 ' + (shotAt - htmlBuiltAt)
+      + 'ms，' + dsf + 'x' + (trial ? '，本次试另一档倍率' : '') + '）')
     // 用带 mime 的 data URL，适配器才知道按对应格式上传（base64:// 会被当成 PNG）
     return [segment.image('data:' + mime + ';base64,' + base64)]
   } catch (error: any) {

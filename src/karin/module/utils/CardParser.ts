@@ -18,7 +18,6 @@ import { createHash } from 'node:crypto'
 import { logger } from 'node-karin'
 
 import { tryGetRuntime } from '../../../compat/runtime'
-import { douyinFetcher } from './amagiClient'
 import { Config } from './Config'
 
 /** 卡片里挖出来的信息 */
@@ -236,15 +235,57 @@ export const ocrImageText = async (imageUrl: string): Promise<string> => {
  * 从 OCR 文本里认 UP 主名。
  * B站个人卡片的排版是「昵称 / UP主 / 粉丝数…」，所以拿「UP主」上一行最稳。
  */
-export const extractUpName = (text: string): string => {
-  const lines = String(text ?? '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
-  if (!lines.length) return ''
+export const extractUpName = (text: string): string => extractUpNames(text)[0] ?? ''
+
+/** 明显不是昵称的标签词 */
+const NICK_LABELS = new Set(['up', 'up主', 'upzhu', 'v', '粉丝', '关注', '获赞', '播放', '点赞', '弹幕', '投币', '收藏', '转发', '评论', '分享', '投稿', '作品', '简介', '主页', '更多', '展开', '未知', '半身像'])
+
+/**
+ * 从 OCR 文本里认**所有可能**的 UP 主名（按可能性排序）。
+ *
+ * 为什么要多个：B站个人卡片实测长这样（OCR 把结构压扁了、顺序也不一定）——
+ *
+ *     雾小霜暗区突围 1,052 半身像 UP主 4993粉丝 1,087 *未知" 5.3万播放1806点赞 11弹幕
+ *
+ * 真名是**第一行的「雾小霜暗区突围」**，而「UP主」前一行是「半身像」（封面上的字）。
+ * 只取「UP主前一行」这条老规则就会拿「半身像」去搜，标题又对不上，于是六个候选一个都不敢选。
+ * 现在两条都当候选（首行 + UP主前后行），搜索端**任一命中**就算作者对上，
+ * 谁真的搜得到就用谁 —— 不再赌某一种排版。
+ */
+export const extractUpNames = (text: string): string[] => {
+  const raw = String(text ?? '')
+  // OCR 有时整段只有一行（空格分隔），这时按空白切
+  const byLine = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  const tokens = byLine.length >= 2 ? byLine : raw.split(/[\s\u3000|/]+/).map((item) => item.trim()).filter(Boolean)
   const isStat = (line: string) =>
-    /(粉丝|播放|点赞|弹幕|投币|收藏|关注|转发|评论|分享)/.test(line) || /^\d+(\.\d+)?[万亿]?$/.test(line)
-  const idx = lines.findIndex((line) => /^(up主|UP主|up|UP)$/.test(line))
-  if (idx > 0) return lines[idx - 1]
-  if (idx === 0 && lines[1]) return lines[1]
-  return lines.find((line) => !isStat(line)) ?? ''
+    /(粉丝|播放|点赞|弹幕|投币|收藏|关注|转发|评论|分享|投稿)/.test(line) ||
+    /^[\d,.]+(\.\d+)?[万亿]?$/.test(line) ||
+    /^[*＊·.]+$/.test(line)
+  const clean = (line: string): string => line
+    .replace(/^[*＊·\s]+/, '')
+    .replace(/[*＊·\s]+$/, '')
+    .replace(/["“”'']/g, '')
+    .trim()
+  const candidates: string[] = []
+  const push = (line?: string) => {
+    if (!line) return
+    const value = clean(line)
+    if (value.length < 2 || value.length > 20) return
+    if (isStat(value)) return
+    if (NICK_LABELS.has(value.toLowerCase())) return
+    if (/^[\d,.万]+$/.test(value)) return
+    if (!candidates.includes(value)) candidates.push(value)
+  }
+  // ① UP主 前后各一行/一个词
+  const idx = tokens.findIndex((token) => /^(up主|up|upzhu)$/i.test(clean(token)))
+  if (idx > 0) push(tokens[idx - 1])
+  if (idx >= 0) push(tokens[idx + 1])
+  // ② 第一行（B站卡片昵称就在最上面）
+  push(tokens[0])
+  // ③ 任何一行像「粉丝数」这种统计的**前面**一行
+  const statIdx = tokens.findIndex((token) => /粉丝|关注/.test(token))
+  if (statIdx > 0) push(tokens[statIdx - 1])
+  return candidates
 }
 
 /* ------------------------------------------------------------------ *
@@ -305,9 +346,9 @@ const getWbiKeys = async (): Promise<{ imgKey: string; subKey: string; buvid3: s
 export const searchBiliVideos = async (
   keyword: string,
   title = '',
-  author = '',
+  author: string | string[] = '',
   limit = 8
-): Promise<Array<{ bvid: string; title: string; author: string; score: number; titleMatch: boolean; authorMatch: boolean }>> => {
+): Promise<Array<{ bvid: string; title: string; author: string; score: number; titleMatch: boolean; authorMatch: boolean; matchedAuthor: string }>> => {
   try {
     const { imgKey, subKey, buvid3 } = await getWbiKeys()
     const mixinKey = MIXIN_KEY_ENC_TAB.map((n) => (imgKey + subKey)[n]).join('').slice(0, 32)
@@ -329,7 +370,13 @@ export const searchBiliVideos = async (
     }
     const raw = Array.isArray(json?.data?.result) ? json.data.result : []
     const titleKey = normalizeText(title || keyword)
-    const authorKey = normalizeText(author)
+    /**
+     * 作者可以有**多个候选**（卡片摘要里的那个 + OCR 认出来的那几个），
+     * 结果只要命中任意一个就算作者对上了，用命中的那个算分。
+     */
+    const authorKeys = (Array.isArray(author) ? author : [author])
+      .map((item) => normalizeText(item))
+      .filter((item, index, list) => item.length >= 2 && list.indexOf(item) === index)
     return raw
       .filter((item: any) => item?.bvid)
       .map((item: any, index: number) => {
@@ -340,9 +387,15 @@ export const searchBiliVideos = async (
         let score = 0
         let titleMatch = false
         let authorMatch = false
-        if (authorKey && a) {
-          if (a === authorKey) { score += 120; authorMatch = true }
-          else if (a.includes(authorKey) || authorKey.includes(a)) { score += 70; authorMatch = true }
+        let matchedAuthor = ''
+        for (const authorKey of authorKeys) {
+          if (!a) break
+          if (a === authorKey) { score += 120; authorMatch = true; matchedAuthor = authorKey; break }
+          if (a.includes(authorKey) || authorKey.includes(a)) {
+            // 模糊命中：分少一点，并且只取最好的那次
+            if (!authorMatch) { score += 70; matchedAuthor = authorKey }
+            authorMatch = true
+          }
         }
         if (titleKey && t) {
           if (t === titleKey) { score += 100; titleMatch = true }
@@ -353,48 +406,12 @@ export const searchBiliVideos = async (
             score += Math.round(sim * 40)
           }
         }
-        return { bvid: String(item.bvid), title: itemTitle, author: itemAuthor, score: score - index, titleMatch, authorMatch }
+        return { bvid: String(item.bvid), title: itemTitle, author: itemAuthor, score: score - index, titleMatch, authorMatch, matchedAuthor }
       })
       .sort((left: any, right: any) => right.score - left.score)
       .slice(0, Math.max(1, Math.min(20, limit)))
   } catch (error: any) {
     logger.warn('[卡片解析] B站搜索异常: ' + String(error?.message ?? error))
-    return []
-  }
-}
-
-/* ------------------------------------------------------------------ *
- * 抖音搜索（直接用 amagi 的 search 端点）
- * ------------------------------------------------------------------ */
-
-export const searchDouyinWorks = async (keyword: string, limit = 8): Promise<Array<{ aweme_id: string; desc: string; author: string; score: number }>> => {
-  try {
-    // 这版接口库的抖音 fetcher 不一定有 search（实测 6.6.0 上没有），没有就干脆跳过
-    const fetcher: any = douyinFetcher as any
-    if (typeof fetcher?.search !== 'function') {
-      logger.debug('[卡片解析] 当前接口库没有抖音搜索能力，跳过')
-      return []
-    }
-    const res: any = await fetcher.search({ query: String(keyword ?? '').trim(), type: 'video', number: limit })
-    const list: any[] =
-      res?.data?.data?.aweme_list ?? res?.data?.aweme_list ?? res?.aweme_list ?? []
-    const titleKey = normalizeText(keyword)
-    return list
-      .filter((item: any) => item?.aweme_id)
-      .map((item: any, index: number) => {
-        const desc = String(item.desc ?? '')
-        const sim = titleSimilarity(normalizeText(desc), titleKey)
-        return {
-          aweme_id: String(item.aweme_id),
-          desc,
-          author: String(item.author?.nickname ?? ''),
-          score: Math.round(sim * 100) - index
-        }
-      })
-      .sort((left, right) => right.score - left.score)
-      .slice(0, Math.max(1, Math.min(20, limit)))
-  } catch (error: any) {
-    logger.warn('[卡片解析] 抖音搜索异常: ' + String(error?.message ?? error))
     return []
   }
 }
@@ -410,6 +427,7 @@ export const searchDouyinWorks = async (keyword: string, limit = 8): Promise<Arr
  * 任何一步失败都返回 null（调用方据此走原来的「未找到链接」逻辑，不影响已有功能）。
  */
 export type CardCandidate = {
+  /** 卡片解析只可能落在 B站上（抖音没有卡片消息） */
   platform: 'bilibili' | 'douyin'
   id: string
   title: string
@@ -443,52 +461,49 @@ export const resolveCardToUrl = async (
 
   // ② OCR 封面拿文字线索
   const ocrText = await ocrImageText(card.cover)
-  const upName = card.author || extractUpName(ocrText)
+  /**
+   * UP 主名可以有好几个来源：卡片摘要里的 author、OCR 里「UP主」前后行、OCR 首行。
+   *
+   * 实测踩过的坑：卡片摘要给的是「半身像」（封面上的字），OCR 首行才是真昵称
+   * 「雾小霜暗区突围」—— 只认一个来源时，作者永远匹配不上，六个候选一个都不敢选。
+   * 这里全部当候选，谁匹配上算谁的。
+   */
+  const upNames = [card.author, ...extractUpNames(ocrText)]
+    .map((item) => String(item ?? '').trim())
+    .filter((item, index, list) => item.length >= 2 && list.indexOf(item) === index)
+  const upName = upNames[0] ?? ''
   const keyword = card.title || upName || ocrText.replace(/\s+/g, ' ').slice(0, 40)
   if (!keyword) {
     logger.mark('[卡片解析] OCR 没有给出可用关键词')
     return null
   }
 
-  /** 卡片自带的 source 字段最准（实测 `source: 哔哩哔哩`），其次是 OCR 文本 */
-  const hint = String(card.source ?? '') + ' ' + card.title + ' ' + card.desc + ' ' + upName + ' ' + ocrText
-  const looksDouyin = /抖音|douyin|快手|ks\./i.test(hint)
-  const looksBili = /bilibili|哔哩|B站|UP主/i.test(hint)
-
-  // ③ 先按最可能的平台搜，命中就返回
-  const tryBili = async (): Promise<{ url?: string; candidates: CardCandidate[] }> => {
-    const hits = await searchBiliVideos(keyword, card.title, upName, 8)
+  // ③ B站搜一把：标题 + 作者都对上才自动继续，否则把候选交给用户挑
+  const tryBili = async (): Promise<{ url?: string; candidates: CardCandidate[]; matchedAuthor?: string }> => {
+    const hits = await searchBiliVideos(keyword, card.title, upNames, 8)
     const candidates = hits.slice(0, 6).map((item) => ({
       platform: 'bilibili' as const, id: item.bvid, title: item.title, author: item.author, score: item.score
     }))
     const strict = hits.filter((item) => item.authorMatch || item.titleMatch)
     // 只有「标题和作者都命中」才敢自动继续，否则交给用户挑
     const best = (strict.length ? strict : hits)[0]
-    if (best && best.titleMatch && best.authorMatch) return { url: 'https://www.bilibili.com/video/' + best.bvid, candidates }
-    return { candidates }
-  }
-  const tryDouyin = async (): Promise<{ url?: string; candidates: CardCandidate[] }> => {
-    const hits = await searchDouyinWorks(keyword || card.title, 8)
-    const candidates = hits.slice(0, 6).map((item) => ({
-      platform: 'douyin' as const, id: item.aweme_id, title: item.desc, author: item.author, score: item.score
-    }))
-    const best = hits[0]
-    // 抖音搜索噪声大，要求分数足够高才自动继续，否则交给用户挑
-    if (best && best.score > 40) return { url: 'https://www.douyin.com/video/' + best.aweme_id, candidates }
-    return { candidates }
-  }
-
-  const order = looksDouyin && !looksBili ? [tryDouyin, tryBili] : [tryBili, tryDouyin]
-  const candidates: CardCandidate[] = []
-  for (const attempt of order) {
-    const hit = await attempt()
-    if (hit) {
-      candidates.push(...hit.candidates)
-      if (hit.url) {
-        logger.mark('[卡片解析] 定位成功: ' + hit.url)
-        return { url: hit.url, platform: hit.url.includes('bilibili') ? 'bilibili' : 'douyin', card, candidates, ocrText, upName }
-      }
+    if (best && best.titleMatch && best.authorMatch) {
+      logger.mark('[卡片解析] 作者命中「' + (best.matchedAuthor || '') + '」：' + best.author + '，标题: ' + best.title)
+      return { url: 'https://www.bilibili.com/video/' + best.bvid, candidates, matchedAuthor: best.author }
     }
+    return { candidates }
+  }
+  /**
+   * **只搜 B站**：抖音没有卡片消息这种玩法（那条「当前接口库没有抖音搜索能力」的日志就是
+   * 以前多此一举地搜抖音留下的）。卡片解析这条链路只处理 B站卡片（入口处已经按 source 过滤过），
+   * 少搜一个平台就少一次风控风险、也少几秒等待。
+   */
+  const hit = await tryBili()
+  const candidates: CardCandidate[] = hit.candidates
+  if (hit.url) {
+    logger.mark('[卡片解析] 定位成功: ' + hit.url)
+    // 提示语里报「真正匹配上的那个 UP 名」，而不是卡片摘要里那个不准的
+    return { url: hit.url, platform: 'bilibili', card, candidates, ocrText, upName: hit.matchedAuthor || upName }
   }
 
   logger.mark('[卡片解析] 没能唯一定位（标题: ' + card.title + '，UP: ' + upName + '），候选 ' + candidates.length + ' 条')

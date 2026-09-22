@@ -1007,7 +1007,9 @@ export const handlerError: React.FC<PosterProps<ApiErrorData>> = (props) => {
                   Need Help? / 需要帮助？
                 </p>
                 <p className="text-2xl" style={{ color: secondaryColor }}>
-                  提交问题时请附上完整报错截图、复现步骤和环境版本信息。
+                  {data.report
+                    ? '错误信息已上传，进群发送下面的上报编号或这张图片即可。'
+                    : '提交问题时请附上完整报错截图、复现步骤和环境版本信息。'}
                 </p>
               </div>
               <span
@@ -1048,7 +1050,10 @@ export const handlerError: React.FC<PosterProps<ApiErrorData>> = (props) => {
                   QQ 群
                 </p>
                 <p className="text-xl" style={{ color: secondaryColor }}>
-                  1050229473
+                  {data.report?.group ?? '1050229473'}
+                </p>
+                <p className="text-lg break-all opacity-80" style={{ color: secondaryColor }}>
+                  {data.report?.groupUrl ?? 'https://qm.qq.com/q/1050229473'}
                 </p>
               </div>
               <div>
@@ -1059,6 +1064,19 @@ export const handlerError: React.FC<PosterProps<ApiErrorData>> = (props) => {
                   此图片 + 触发命令 + 对应配置（自行脱敏处理）
                 </p>
               </div>
+              {data.report && (
+                <div>
+                  <p className="font-semibold mb-1" style={{ color: accentColor }}>
+                    错误上报编号
+                  </p>
+                  <p className="text-xl break-all font-mono" style={{ color: secondaryColor }}>
+                    {data.report.id}
+                  </p>
+                  <p className="text-lg break-all opacity-80" style={{ color: secondaryColor }}>
+                    {data.report.url}
+                  </p>
+                </div>
+              )}
             </div>
             <div className="flex items-center gap-4 mt-6 text-xl" style={{ color: mutedColor }}>
               <span className="font-mono">Tips:</span>

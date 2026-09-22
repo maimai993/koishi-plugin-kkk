@@ -14,10 +14,13 @@ import fields from './qqFields.json'
 export interface QqField {
   key: string
   group: string
-  type: 'boolean' | 'number' | 'string'
+  /** checkboxGroup = 多选（取值来自 options） */
+  type: 'boolean' | 'number' | 'string' | 'checkboxGroup'
   default: any
   label: string
   description: string
+  /** checkboxGroup 的候选（面板/控制台都从这份生成） */
+  options?: Array<{ value: string; label: string }>
   min?: number
   max?: number
   secret?: boolean
@@ -60,6 +63,13 @@ export function readQqOptions (config: any): Record<string, any> {
 export function buildQqSchema (Schema: Schema): Schema<any> {
   const shape: Record<string, any> = {}
   for (const field of QQ_FIELDS) {
+    if (field.type === 'checkboxGroup') {
+      const values = (field.options ?? []).map((option) => option.value)
+      shape[field.key] = Schema.array(Schema.union(values.length ? values : [Schema.string()]))
+        .default(field.default ?? [])
+        .description(field.description)
+      continue
+    }
     const base = field.type === 'boolean'
       ? Schema.boolean()
       : field.type === 'number'

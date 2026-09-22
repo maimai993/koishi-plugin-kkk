@@ -247,6 +247,9 @@ const PLAYER_STYLE = [
   'background:var(--pink);color:#fff;font-size:14px;font-weight:600;cursor:pointer;}',
   '.dlbtn svg{font-size:20px}',
   '.dlbtn:hover{background:#ff8aac}',
+  /** 「合成后下载」是主按钮（另外两个只是分别下载原始流），稍微区分一下 */
+  '.dlbtn.main{background:#fb7299;color:#fff}',
+  '.dlbtn.main:hover{background:#ff8aac}',
   '.dlbtn:focus-visible{outline:2px solid #fff;outline-offset:2px}',
   '.dlhint{color:var(--muted);font-size:12px;}',
   /* 没配公网地址时的提示条：用户打不开得知道是「没配域名」，不是「插件坏了」 */
@@ -309,6 +312,8 @@ export function renderPlayerPage (info: PlayerPageInfo): string {
   const platform = escapeHtml(platformLabel(info.platform))
   const expire = formatExpire(info.expireAt)
   const danmakuCount = Number(info.danmakuCount) || 0
+  /** 有没有**单独的音轨**（B站这类音视频分离的）：有就 <video muted> + <audio> 同时播 */
+  const hasAudio = typeof info.audioPath === 'string' && info.audioPath.length > 0
   const duration = formatDuration(info.durationSeconds)
   const script = PLAYER_SCRIPT.split('__KKK_TOKEN__').join(token)
 
@@ -365,7 +370,12 @@ export function renderPlayerPage (info: PlayerPageInfo): string {
     + '  </div>\n'
     + '  <div class="player">\n'
     + '    <div class="video-wrap" id="videoWrap">\n'
-    + '      <video id="video" src="/kkk/player/' + token + '/video" preload="metadata" playsinline webkit-playsinline></video>\n'
+    /**
+     * 音视频分离时：视频**静音**播画面，声音交给下面这个 <audio> 一起播
+     * （用户要求：默认不在服务器合成，浏览器端同时播放即可）。
+     */
+    + '      <video id="video" src="/kkk/player/' + token + '/video" preload="metadata" playsinline webkit-playsinline' + (hasAudio ? ' muted' : '') + '></video>\n'
+    + (hasAudio ? '      <audio id="audioTrack" src="/kkk/player/' + token + '/audio" preload="auto"></audio>\n' : '')
     + '      <canvas id="danmaku"></canvas>\n'
     + '      <div id="notice" class="notice" hidden></div>\n'
     + '      <button type="button" class="bigplay" id="bigPlay" aria-label="播放">' + ICON.play + '</button>\n'
@@ -411,9 +421,23 @@ export function renderPlayerPage (info: PlayerPageInfo): string {
      * 放在播放器下面单独一条 —— 作品信息可能缺（那时不会渲染操作按钮排），下载入口不能跟着一起消失。
      */
     + '  <div class="downbar">'
-    + '<a class="dlbtn" id="downloadBtn" href="/kkk/player/' + token + '/video?download=1" download>'
-    + ICON.download + '<span>下载视频</span></a>'
-    + '<span class="dlhint">保存到本机（原画质，不重新编码）</span></div>\n'
+    + (hasAudio
+      /**
+       * 音视频分离：给两个「分别下载」+ 一个「服务器合成后下载」。
+       * 分别是秒下（就是两个原文件），合成那条第一次点要等一两秒（服务器跑一次 ffmpeg -c copy）。
+       */
+      ? '<a class="dlbtn" href="/kkk/player/' + token + '/video?download=1" download>'
+        + ICON.download + '<span>下载画面</span></a>'
+        + '<a class="dlbtn" href="/kkk/player/' + token + '/audio?download=1" download>'
+        + ICON.download + '<span>下载声音</span></a>'
+        + '<a class="dlbtn main" href="/kkk/player/' + token + '/merged?download=1" download>'
+        + ICON.download + '<span>合成后下载</span></a>'
+        + '<span class="dlhint">画面与声音是分开的两条流：前两个直接下载，最后一个由服务器合成成一个视频（第一次要等一两秒）；'
+        + '想在播放器里看就直接播放，声音会自动跟上</span>'
+      : '<a class="dlbtn" id="downloadBtn" href="/kkk/player/' + token + '/video?download=1" download>'
+        + ICON.download + '<span>下载视频</span></a>'
+        + '<span class="dlhint">保存到本机（原画质，不重新编码）</span>')
+    + '</div>\n'
     + linkRow + '\n'
     + (actions ? '  <div class="actions">' + actions + '</div>\n' : '')
     + (info.localOnly
@@ -610,6 +634,14 @@ const PLAYER_SCRIPT = [
   "  var notice = document.getElementById('notice')",
   "  var video = document.getElementById('video')",
   "  var canvas = document.getElementById('danmaku')",
+  "  /**",
+  "   * 单独的音轨（B站这类音视频分离的）。有它的时候：",
+  "   *   - 视频元素是 muted 的（只出画面），声音由这个 <audio> 出；",
+  "   *   - 播放 / 暂停 / 拖动进度都要**带着它一起**，否则声音会跟画面错开。",
+  "   */",
+  "  var audioTrack = document.getElementById('audioTrack')",
+  "  /** 音量控制作用在谁身上：有独立音轨就是音轨，否则是视频自己 */",
+  "  var soundEl = audioTrack || video",
   "  var toggle = document.getElementById('dmOn')",
   "  var countEl = document.getElementById('dmCount')",
   "  var settingsBtn = document.getElementById('dmSettingsBtn')",
@@ -794,6 +826,8 @@ const PLAYER_SCRIPT = [
   "      cursor++",
   "      guard++",
   "    }",
+  "    // 音画同步：偏差超过 0.25 秒就拉回来（长时间播放 / 卡顿后必须对一次）",
+  "    if (audioTrack && !video.paused && !video.ended && !video.seeking) alignAudio()",
   "    draw(dt, now)",
   "  }",
   "",
@@ -875,6 +909,30 @@ const PLAYER_SCRIPT = [
   "    })",
   "    sizeInput.addEventListener('change', function () {",
   "      applySize(PURE.clampInt(sizeInput.value, 50, 200, 100))",
+  "    })",
+  "  }",
+  "  /**",
+  "   * 弹幕总开关（用户实测反馈：「在线播放的弹幕开关没有用」）。",
+  "   *",
+  "   * 以前这里**根本没有绑定事件**：`dmOn` 这个复选框只是个摆设 ——",
+  "   * `enabled` 一直是 true、谁也改不了它，点开关当然没反应。",
+  "   * 现在关掉会立刻清屏，重新打开会从头排一遍弹幕（不然要等下一波才看得到）。",
+  "   */",
+  "  if (toggle) {",
+  "    toggle.addEventListener('change', function () {",
+  "      enabled = !!toggle.checked",
+  "      if (!enabled) {",
+  "        active = []",
+  "        ctx.clearRect(0, 0, viewWidth, viewHeight)",
+  "      } else {",
+  "        reset(video.currentTime * 1000)",
+  "      }",
+  "    })",
+  "  }",
+  "  /** 彩色弹幕开关：同样是漏了绑定（`colored` 一直锁在 true） */",
+  "  if (coloredBox) {",
+  "    coloredBox.addEventListener('change', function () {",
+  "      colored = !!coloredBox.checked",
   "    })",
   "  }",
   "  // 弹幕类型：滚动 / 顶部 / 底部 三类各自开关",
@@ -974,12 +1032,34 @@ const PLAYER_SCRIPT = [
   "    })",
   "  }",
   "",
+  "  /** 把音轨拉到和画面同一个位置（拖动 / 卡顿时对表） */",
+  "  function alignAudio () {",
+  "    if (!audioTrack) return",
+  "    try {",
+  "      if (Math.abs((audioTrack.currentTime || 0) - video.currentTime) > 0.25) audioTrack.currentTime = video.currentTime",
+  "    } catch (error) { /* 还没加载好就等下一帧 */ }",
+  "  }",
+  "",
+  "  function playAudio () {",
+  "    if (!audioTrack) return",
+  "    alignAudio()",
+  "    var started = audioTrack.play()",
+  "    if (started && started.catch) started.catch(function () { /* 画面已经在放，声音起不来就先算了 */ })",
+  "  }",
+  "",
+  "  function pauseAudio () {",
+  "    if (!audioTrack) return",
+  "    try { audioTrack.pause() } catch (error) { /* 忽略 */ }",
+  "  }",
+  "",
   "  function togglePlay () {",
   "    if (video.paused || video.ended) {",
   "      var started = video.play()",
   "      if (started && started.catch) started.catch(function () { showNotice('浏览器拦住了自动播放，点一下画面中间的播放按钮就行') })",
+  "      playAudio()",
   "    } else {",
   "      video.pause()",
+  "      pauseAudio()",
   "    }",
   "  }",
   "",
@@ -991,22 +1071,34 @@ const PLAYER_SCRIPT = [
   "  }",
   "",
   "  function syncMute () {",
-  "    if (muteBtn) muteBtn.classList.toggle('is-muted', video.muted || video.volume === 0)",
+  "    if (muteBtn) muteBtn.classList.toggle('is-muted', soundEl.muted || soundEl.volume === 0)",
   "  }",
   "",
-  "  video.addEventListener('play', syncPlayState)",
-  "  video.addEventListener('pause', syncPlayState)",
-  "  video.addEventListener('ended', syncPlayState)",
+  "  video.addEventListener('play', function () { syncPlayState(); playAudio() })",
+  "  video.addEventListener('pause', function () { syncPlayState(); pauseAudio() })",
+  "  video.addEventListener('ended', function () { syncPlayState(); pauseAudio() })",
   "  video.addEventListener('timeupdate', drawProgress)",
   "  video.addEventListener('progress', drawProgress)",
   "  video.addEventListener('durationchange', drawProgress)",
   "  video.addEventListener('loadedmetadata', drawProgress)",
   "  video.addEventListener('volumechange', syncMute)",
+  "  // 拖动进度（含键盘 / 快进）：画面跳完马上把音轨对齐，不然会差出好几秒",
+  "  video.addEventListener('seeked', alignAudio)",
+  "  if (audioTrack) {",
+  "    audioTrack.addEventListener('volumechange', syncMute)",
+  "    // 音轨自己卡住 / 被系统暂停时，跟着画面走",
+  "    audioTrack.addEventListener('pause', function () { if (!video.paused && !video.ended) playAudio() })",
+  "    audioTrack.addEventListener('error', function () { showNotice('声音加载失败，画面继续播放（可以在下面单独下载声音）') })",
+  "  }",
   "  if (playBtn) playBtn.addEventListener('click', togglePlay)",
   "  if (bigPlay) bigPlay.addEventListener('click', togglePlay)",
   "  // 点画面中间也能播放 / 暂停（弹幕 canvas 是 pointer-events:none，点它等于点在 video 上）",
   "  video.addEventListener('click', togglePlay)",
-  "  if (muteBtn) muteBtn.addEventListener('click', function () { video.muted = !video.muted; syncMute() })",
+  "  if (muteBtn) {",
+  "    // 有独立音轨时，静音 / 取消静音作用在音轨上（视频一直是 muted 的）",
+  "    if (audioTrack) soundEl.muted = true",
+  "    muteBtn.addEventListener('click', function () { soundEl.muted = !soundEl.muted; syncMute() })",
+  "  }",
   "",
   "  function isFullscreen () { return !!(document.fullscreenElement || document.webkitFullscreenElement) }",
   "",

@@ -397,7 +397,12 @@ setTimeout(async () => {
       if (matched) {
         fs.writeFileSync(scriptFile, matched[1])
         try {
-          require('node:child_process').execFileSync(process.execPath, ['--check', scriptFile], { stdio: 'pipe' })
+          /**
+           * `stdio: 'ignore'` 而不是 'pipe'：受限环境（沙箱）里**管道是禁的**，
+           * `stdio: 'pipe'` 会直接 EPERM，把一条好脚本误判成语法错误；
+           * 这里只需要退出码，不需要子进程输出。
+           */
+          require('node:child_process').execFileSync(process.execPath, ['--check', scriptFile], { stdio: 'ignore' })
           syntaxOk = true
         } catch (error) {
           console.log('     ' + String(error?.stderr ?? error?.message ?? error).slice(0, 200))
@@ -898,11 +903,16 @@ setTimeout(async () => {
      * 门控表达式是 patch-webui 生成到前端包里的，这里直接数产物里的出现次数。
      */
     const playerOffMarker = 'Q(e,[' + BT + 'qq' + BT + ',' + BT + 'playerEnabled' + BT + '],!0)===!1'
-    check('WebUI 里「在线播放器总开关」关掉时组内 6 个字段全部变灰（开关 2 个 + 输入框 4 个）',
-      !!bundleText && bundleText.split(playerOffMarker).length - 1 === 6,
+    /**
+     * 组内字段数：**7 个**（开关 2 个 + 文本框 5 个）。
+     * 2026-09 加了「强制在线播放的适配器」（文本框，也在这一组里）之后，
+     * 这里从 6/4 变成 7/5 —— 断言跟着更新，别把新增的合法字段当成漏门控。
+     */
+    check('WebUI 里「在线播放器总开关」关掉时组内 7 个字段全部变灰（开关 2 个 + 输入框 5 个）',
+      !!bundleText && bundleText.split(playerOffMarker).length - 1 === 7,
       '门控表达式 ' + (bundleText.split(playerOffMarker).length - 1) + ' 处')
-    check('其中文本框/数字框用的是 options.disabled（4 个）',
-      !!bundleText && bundleText.split('disabled:' + playerOffMarker).length - 1 === 4,
+    check('其中文本框/数字框用的是 options.disabled（5 个）',
+      !!bundleText && bundleText.split('disabled:' + playerOffMarker).length - 1 === 5,
       'disabled: 形式 ' + (bundleText.split('disabled:' + playerOffMarker).length - 1) + ' 处')
     check('总开关自己不带这条门控（它只受「强制不烧录弹幕」锁）',
       !!bundleText && bundleText.split(BT + 'playerEnabled' + BT + '],!0)===!1,').length - 1 === 0)

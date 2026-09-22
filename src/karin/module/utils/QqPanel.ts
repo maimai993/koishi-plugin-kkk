@@ -29,6 +29,7 @@ import { isBurnDanmakuSupported } from './DanmakuPolicy'
 import { resolvePlayerSizeLimitMB } from '../../../player'
 import { Config } from './Config'
 import { getDouyinQualityLevel } from '@/platform/douyin/videoQuality'
+import { platformOf } from '@/module/utils/ImageSlice'
 import { getImageMetadata, Render } from '@/module/utils/Render'
 import { getHotDanmaku } from '@/platform/bilibili/danmaku'
 // 头像框 / 昵称颜色要从 UP 主页接口拿，和解析结果保持一致
@@ -1052,11 +1053,76 @@ export const toMarkdownImage = async (url: string, maxWidth = 420): Promise<stri
 }
 
 /**
- * 一组图片合成**一条** markdown 消息（图集解析用）：
- * 一张图一条消息、或者走合并转发都会刷屏，这里统一成单条 md，图片按 maxWidth 等比缩放。
+ * **OneBot 系（NapCat / Lagrange / go-cqhttp…）不渲染 markdown**（用户实测反馈）：
+ * markdown 是 QQ **官方机器人**才有的能力，个人号客户端收到 \`markdown\` 段只会显示成一串文字、
+ * 图片一张都出不来。所以这条链路上要改发**普通图片段**。
  */
-export const buildMarkdownImageMessage = async (urls: string[], maxWidth = 420): Promise<any | null> => {
-  const parts = (await Promise.all(urls.map((url) => toMarkdownImage(url, maxWidth)))).filter(Boolean) as string[]
+const ONEBOT_LIKE = /onebot|napcat|lagrange|go-?cqhttp|chronocat|mirai/i
+
+/** 把一张图读成 Buffer（data URI / base64:// / 本地路径 / 远程 URL 都认） */
+async function loadImageBuffer (url: string): Promise<{ buffer: Buffer; mime: string } | null> {
+  try {
+    const localPath = url.startsWith('file://') ? decodeURIComponent(url.replace(/^file:\/\//, '')) : url
+    if (url.startsWith('base64://')) {
+      return { buffer: Buffer.from(url.slice('base64://'.length), 'base64'), mime: 'image/jpeg' }
+    }
+    if (url.startsWith('data:')) {
+      const comma = url.indexOf(',')
+      const mime = url.slice(5, url.indexOf(';')) || 'image/jpeg'
+      return { buffer: Buffer.from(url.slice(comma + 1), 'base64'), mime }
+    }
+    if (!/^https?:\/\//i.test(url) && fs.existsSync(localPath)) {
+      return { buffer: fs.readFileSync(localPath), mime: localPath.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg' }
+    }
+    const res = await fetch(url)
+    if (!res.ok) {
+      logger.mark('[图片消息] 下载失败 HTTP ' + res.status + ': ' + url.slice(0, 60))
+      return null
+    }
+    return {
+      buffer: Buffer.from(await res.arrayBuffer()),
+      mime: String(res.headers.get('content-type') ?? 'image/jpeg').split(';')[0]
+    }
+  } catch (error: any) {
+    logger.mark('[图片消息] 读取图片失败: ' + String(error?.message ?? error).slice(0, 120))
+    return null
+  }
+}
+
+/**
+ * 一组图片合成**一条**消息（图集 / 评论图片用）：
+ * 一张图一条消息、或者走合并转发都会刷屏，这里统一成单条。
+ *
+ * **按平台分流**（markdown 只有 QQ 官方机器人认得）：
+ *   - 官方 QQ：一条 markdown（图片先传 assets 拿 https 地址，连续图片紧贴渲染，视觉上是一整段）；
+ *   - OneBot：若干 **image 段**（直接给 base64，既不用上传、也不怕 CDN 防盗链）。
+ *
+ * @param urls 图片地址（data URI / base64:// / 本地路径 / https 都行）
+ * @param maxWidth markdown 模式下的显示宽度
+ * @param platform 适配器平台名（缺省按官方 QQ 处理）
+ */
+export const buildMarkdownImageMessage = async (urls: string[], maxWidth = 420, platform = ''): Promise<any | null> => {
+  const list = urls.filter(Boolean).map(String)
+  if (!list.length) return null
+
+  if (ONEBOT_LIKE.test(platform)) {
+    const images: any[] = []
+    for (const url of list) {
+      const loaded = await loadImageBuffer(url)
+      if (!loaded) continue
+      // 用带 mime 的 data URI：兼容层把 base64:// 一律当 png，标错会让客户端把 jpg 当 png
+      images.push(segment.image('data:' + loaded.mime + ';base64,' + loaded.buffer.toString('base64')))
+    }
+    if (!images.length) return null
+    logger.debug('[图片消息] ' + platform + ' 不渲染 markdown，改为 ' + images.length + ' 张图片段')
+    return images
+  }
+
+  const parts = (await Promise.all(list.map((url) => toMarkdownImage(url, maxWidth)))).filter(Boolean) as string[]
   if (!parts.length) return null
   return segment.markdown(parts.join('\n'))
 }
+
+/** 便捷版：直接传事件，自动取平台 */
+export const buildImageMessageFor = async (e: any, urls: string[], maxWidth = 420): Promise<any | null> =>
+  buildMarkdownImageMessage(urls, maxWidth, platformOf(e))

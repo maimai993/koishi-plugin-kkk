@@ -2,6 +2,7 @@ import karin, { config, logger, segment } from 'node-karin'
 
 import { getReachableMasterBots } from '../bot'
 import { Config } from '../Config'
+import { errorHelpSegments } from '../ErrorReport'
 import type { renderErrorImage } from './render'
 import type { ErrorContext } from './types'
 import { isPushTask } from './utils'
@@ -23,7 +24,8 @@ export const sendErrorToTrigger = async (ctx: ErrorContext, img: Awaited<ReturnT
   if (!Config.app.errorLogSendTo.some((item) => item === 'trigger')) return
 
   try {
-    await event.reply(img)
+    // 卡片 + 「错误信息已上传，ID：xxx / 可以前往 QQ 群内寻找帮助」——群号在 QQ 官方那边是可点链接
+    await event.reply([...img, ...errorHelpSegments(ctx.report ?? null, platformOfEvent(event))])
   } catch (err) {
     logger.error(`[ErrorHandler] 发送错误消息给触发者失败: ${err}`)
   }
@@ -102,7 +104,7 @@ export const sendErrorToAllMasters = async (
     if (notifiedSet.has(key)) continue
 
     try {
-      await karin.sendMaster(target.botId, target.master, [segment.text(prefix), ...img])
+      await karin.sendMaster(target.botId, target.master, [segment.text(prefix), ...img, ...errorHelpSegments(ctx.report ?? null, platformOfEvent(event))])
       notifiedSet.add(key)
       logger.debug(`[ErrorHandler] 已发送错误消息给主人: ${target.master} (via ${target.botId})`)
     } catch (err) {
@@ -177,6 +179,10 @@ const resolveAllMasterTargets = async (
   return masters.map((master) => ({ master, botId }))
 }
 
+/** 出错时所在平台（决定提示语用 markdown 还是纯文本） */
+const platformOfEvent = (event: any): string =>
+  String(event?.bot?.platform ?? event?.platform ?? event?.bot?.adapter?.platform ?? '')
+
 const buildErrorPrefix = async (ctx: ErrorContext, isPush: boolean, botId: string): Promise<string> => {
   const { options, event } = ctx
 
@@ -212,7 +218,7 @@ export const sendErrorToConfiguredIds = async (
   const prefix = customPrefix || (await buildErrorPrefix(ctx, isPush, botId))
   for (const id of new Set(ids)) {
     try {
-      await karin.sendMaster(botId, String(id), [segment.text(prefix), ...img])
+      await karin.sendMaster(botId, String(id), [segment.text(prefix), ...img, ...errorHelpSegments(ctx.report ?? null, platformOfEvent(event))])
       logger.debug(`[ErrorHandler] 已发送错误消息给 ${id}`)
     } catch (err) {
       logger.error(`[ErrorHandler] 发送错误消息给 ${id} 失败: ${err}`)

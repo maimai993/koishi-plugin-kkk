@@ -1,9 +1,11 @@
 import fs from 'node:fs'
+import { platformOf } from '@/module/utils/ImageSlice'
 import { buildMarkdownImageMessage } from '@/module/utils/QqPanel'
 // 弹幕策略（通用里的「强制不烧录弹幕」优先；「在线播放器」开着时是在线播放，不烧录）
 import { shouldBurnDanmaku, shouldFetchDanmaku } from '@/module/utils/DanmakuPolicy'
 // 在线播放：下载完之后登记播放会话并把链接回给用户（路径不能写 @/，那指向 karin/）
 import {
+  applyForceOnlinePlayer,
   effectivePlayerSizeLimitMB,
   isOnlinePlayerRequest,
   markOnlinePlayerOverride,
@@ -11,7 +13,7 @@ import {
   shouldRedirectOversizeToPlayer,
   type PlayerWorkInfo
 } from '../../../player'
-import { ParseSteps } from '@/module/utils/ParseSteps'
+import { ParseSteps, SendTasks } from '@/module/utils/ParseSteps'
 import { sendSlicedImage } from '@/module/utils/ImageSlice'
 
 import {
@@ -31,7 +33,7 @@ import type { BilibiliForwardOriginalContentProps } from '@template/template/bil
 import { DecorationCardData } from '@template/template/bilibili/dynamic/types'
 import { format, formatDistanceToNow, fromUnixTime } from 'date-fns'
 import { zhCN } from 'date-fns/locale'
-import karin, { common, ElementTypes, logger, Message, segment, SendMessage } from 'node-karin'
+import karin, { common, ElementTypes, logger, Message, segment, SendMessage, withoutForwardCollect } from 'node-karin'
 
 // 番剧在 QQ 上用「卡片 + 分集表格」面板（见 sendBangumiPanel 的说明）
 import { buildDownloadTip, recallLastPanel, replyReplacing, sendBangumiPanel } from '../../module/utils/QqPanel'
@@ -62,7 +64,7 @@ import { Config } from '@/module/utils/Config'
 import { getParseOverride } from '@/module/utils/ParseOverride'
 // 解析阶段（「下载进度」指令读的就是这里登记的状态）
 import { DOWNLOAD_STAGES, withDownloadStage } from '@/module/utils/Network/Downloader'
-import { beginParseStage } from '@/module/utils/parseTip'
+import { beginParseStage, shouldSendTip } from '@/module/utils/parseTip'
 import { bilibiliComments, BilibiliId, checkCk, genParams } from '@/platform/bilibili'
 import { type BiliDanmakuElem, burnBiliDanmaku, getHotDanmaku, mergeAndBurnBili } from '@/platform/bilibili/danmaku'
 import {
@@ -152,13 +154,28 @@ export class Bilibili extends Base {
       // replyReplacing 会先撤掉上一条（也就是刚点的画质面板），群里只留这句提示
       await replyReplacing(this.e, buildDownloadTip(String(iddata.bvid ?? ''), '收到请求，开始下载'))
     } else if (Config.app.parseTip) {
-      // 同样：发这句话时把上一条机器人消息撤掉
-      await replyReplacing(this.e, '检测到B站链接，开始解析')
+      /**
+       * 同样：发这句话时把上一条机器人消息撤掉。
+       * 另外过一道「同一句提示 5 秒内只发一次」—— 同一条消息被投递多遍时
+       * 用户会看到三条「检测到B站链接，开始解析」（实测反馈），这里挡住。
+       */
+      if (shouldSendTip(this.e, '检测到B站链接，开始解析')) {
+        await replyReplacing(this.e, '检测到B站链接，开始解析')
+      }
     }
     switch (this.Type) {
       case 'one_video': {
         /** 本次解析的步骤容器：单步失败只跳过、不中断，最后统一渲染一张错误卡片（见 ParseSteps） */
         const steps = new ParseSteps()
+        /** 发送任务组：内容（信息卡 / 评论区）与视频各走一条线，谁先就绪谁先发 */
+        const sends = new SendTasks(steps)
+        /**
+         * **强制在线播放**（通用 → 在线播放器设置 → 强制在线播放的平台）：
+         * 平台在名单里时，本次解析一开始就标记成在线播放 —— 后面取弹幕、体积判定、发送
+         * 全部按在线播放走，用户拿到的是播放链接而不是视频文件（用户要求：无论如何都是链接）。
+         */
+        // 适配器在「强制在线播放的适配器」名单里（例如 B站私聊机器人 platform === 'bilibili'）
+        applyForceOnlinePlayer(this.e)
         const infoData = await this.amagi.bilibili.fetcher.fetchVideoInfo({ bvid: iddata.bvid })
         /**
          * 顺手把作品信息收好：在线播放页要按B站那样展示标题 / UP 主 / 播放量 / 发布时间。
@@ -338,7 +355,7 @@ export class Bilibili extends Base {
           videoSize = await getvideosize(correctList.videoList[0].base_url, audioUrl, infoData.data.data.bvid)
         } else {
           /**
-           * 免登录直链分支：体积取自 html5 播放接口的 \`durl[0].size\`。
+           * 免登录直链分支：体积取自 html5 播放接口的 `durl[0].size`。
            * 这个接口会偶发拿不到 durl（风控、字段变化、超时），原来这里直接下标取值，
            * 一旦为空就抛 TypeError，**整条解析直接失败**（用户侧表现就是「提示开始解析，然后没下文」）。
            * 体积只是展示信息，取不到就按 0 处理，不要拖垮解析。
@@ -378,6 +395,19 @@ export class Bilibili extends Base {
           markOnlinePlayerOverride()
           logger.mark('[在线播放] 视频 ' + Number(videoSize) + 'MB 超过全局上限 ' + Config.app.filelimit
             + 'MB，按「超限转在线播放」改为在线播放')
+          /**
+           * 和 Base.ts 那条一样：**必须给用户一句话**，否则他只会拿到一个播放链接、
+           * 不知道视频为什么没发到群里（用户实测反馈：「没有超过上限大小的提示」）。
+           * 过程提示不进合并转发。
+           */
+          try {
+            await withoutForwardCollect(() => this.e.reply(
+              '视频 ' + Number(videoSize) + 'MB 超过设定的最大上传大小 ' + Config.app.filelimit + 'MB，' +
+              '已按「超限转在线播放」改为在线播放：视频不发到群里，稍后给你播放链接'
+            ))
+          } catch (error: any) {
+            logger.debug('[在线播放] 超限提示发送失败: ' + String(error?.message ?? error))
+          }
         } else if (redirectBlocked) {
           logger.info('[在线播放] 视频 ' + Number(videoSize) + 'MB 超过在线播放上限 ' + Math.round(playerLimitMB)
             + 'MB，不转播，按原来的方式处理（免得把机器磁盘塞满）')
@@ -421,11 +451,11 @@ export class Bilibili extends Base {
           )
         }
 
-        // 视频下好了才渲染信息卡（渲染失败只跳过卡片，视频照发）
-        await steps.run('渲染作品信息卡', renderInfoCard)
+        // 渲染失败只跳过卡片，视频照发；**不再阻塞视频那条线**
+        sends.add('渲染作品信息卡', renderInfoCard)
 
         // 评论区同样只跳过自身
-        await steps.run('渲染评论区', async () => {
+        sends.add('渲染评论区', async () => {
         if (!Config.bilibili.sendContent.some((content) => content === 'comment')) return
           const commentsData = await softFetch(
             () =>
@@ -467,7 +497,8 @@ export class Bilibili extends Base {
                  * md 里连续图片紧贴渲染，一条消息装完整套图；失败再退回转发。
                  */
                 const mdMessage = await buildMarkdownImageMessage(
-                  messageElements.map((item: any) => String(item?.attrs?.src ?? '')).filter(Boolean)
+                  messageElements.map((item: any) => String(item?.attrs?.src ?? '')).filter(Boolean),
+                  420, platformOf(this.e)
                 )
                 if (mdMessage) {
                   await this.e.reply(mdMessage)
@@ -524,16 +555,22 @@ export class Bilibili extends Base {
               { reply: true }
             )
           } else {
-            // 视频下载（含合成 / 烧录）一直在后台跑，到这里才等它 —— 卡片、评论区早就发出去了
-            await downloadTask
-            await steps.run('发送视频', () => this.sendPreparedVideo())
+            /**
+             * **视频单独一条线**：下载（含合成 / 烧录）一完成就发，
+             * 不等信息卡与评论区渲完（用户要求：「所有东西的发送不需要等待全部完成」）。
+             */
+            sends.add('发送视频', async () => {
+              await downloadTask
+              await this.sendPreparedVideo()
+            })
           }
         }
 
         /**
-         * 整个流程跑完再统一报错：中间失败过的步骤合成一个错误抛出去，
+         * 等两条线都跑完，再统一报错：中间失败过的步骤合成一个错误抛出去，
          * 由 ErrorHandler 渲染**一张**错误卡片 —— 此时能发的卡片/评论/视频都已经发出去了。
          */
+        await sends.settle()
         steps.throwIfFailed()
         break
       }
@@ -1321,7 +1358,8 @@ export class Bilibili extends Base {
                  * md 里连续图片紧贴渲染，一条消息装完整套图；失败再退回转发。
                  */
                 const mdMessage = await buildMarkdownImageMessage(
-                  messageElements.map((item: any) => String(item?.attrs?.src ?? '')).filter(Boolean)
+                  messageElements.map((item: any) => String(item?.attrs?.src ?? '')).filter(Boolean),
+                  420, platformOf(this.e)
                 )
                 if (mdMessage) {
                   await this.e.reply(mdMessage)
@@ -1432,7 +1470,13 @@ export class Bilibili extends Base {
    *   - 本地文件（登录态合成/烧录的产物、免登录时提前下好的直链）；
    *   - 没有下载产物时保持 null（例如体积超限根本没下）。
    */
-  protected preparedVideo: { filepath: string; totalBytes: number; originTitle: string; videoUrl?: string } | null = null
+  /**
+   * 已经准备好的视频（见 prepareVideo）。
+   *
+   * `audioPath` 只有**在线播放 + 音视频分离（B站）**时才有：表示音轨单独存了一份，
+   * 播放页会同时播这两个文件（默认不合成，用户要求）。
+   */
+  protected preparedVideo: { filepath: string; totalBytes: number; originTitle: string; videoUrl?: string; audioPath?: string } | null = null
 
   /**
    * 下载视频（含合成音轨、烧录弹幕），**不发送**。
@@ -1563,23 +1607,50 @@ export class Bilibili extends Base {
               })
             )
             sourcePath = resultPath
+          } else if (isOnlinePlayerRequest()) {
+            /**
+             * **在线播放：默认不合成**（用户要求）。
+             *
+             * B站的音视频是分离的，以前这里必定调一次 ffmpeg 合成（几分钟的视频也要几秒到几十秒，
+             * 低配机器更久）。改成：画面和声音**各自留一份**，播放页用 `<video muted>` + `<audio>`
+             * 同时播；只有用户在播放页点「服务器合并后下载」时才按需合成（见 player/server.ts）。
+             */
+            success = true
+            sourcePath = bmp4.filepath
+            logger.mark('[在线播放] 跳过音视频合成：画面与声音分开存，浏览器端同时播放')
           } else {
             success = await mergeVideoAudio(bmp4.filepath, bmp3.filepath, resultPath)
             sourcePath = resultPath
           }
 
           if (success) {
-            const filePath = Common.tempDri.video + `${Config.app.removeCache ? 'tmp_' + Date.now() : this.downloadfilename}.mp4`
-            fs.renameSync(sourcePath, filePath)
-            logger.mark(`视频文件重命名完成: ${sourcePath.split('/').pop()} -> ${filePath.split('/').pop()}`)
-            logger.mark('正在尝试删除缓存文件')
-            if (fs.existsSync(bmp4.filepath)) await Common.removeFile(bmp4.filepath, true)
-            if (bmp3 && fs.existsSync(bmp3.filepath)) await Common.removeFile(bmp3.filepath, true)
+            /**
+             * 在线播放（音视频分离）时**不要重命名** —— 画面那个文件原样留着，
+             * 「audioPath」指向单独的音轨文件，两个都由 publishOnlinePlayer 搬进会话目录。
+             */
+            const separateAudio = isOnlinePlayerRequest() && !!bmp3 && sourcePath === bmp4.filepath
+            if (separateAudio) {
+              const videoStats = fs.statSync(bmp4.filepath)
+              this.preparedVideo = {
+                filepath: bmp4.filepath,
+                totalBytes: Number((videoStats.size / (1024 * 1024)).toFixed(2)),
+                originTitle: this.downloadfilename,
+                audioPath: bmp3!.filepath
+              }
+              logger.mark('[在线播放] 已就绪：画面 + 声音分开，交给播放页同时播放')
+            } else {
+              const filePath = Common.tempDri.video + `${Config.app.removeCache ? 'tmp_' + Date.now() : this.downloadfilename}.mp4`
+              fs.renameSync(sourcePath, filePath)
+              logger.mark(`视频文件重命名完成: ${sourcePath.split('/').pop()} -> ${filePath.split('/').pop()}`)
+              logger.mark('正在尝试删除缓存文件')
+              if (fs.existsSync(bmp4.filepath)) await Common.removeFile(bmp4.filepath, true)
+              if (bmp3 && fs.existsSync(bmp3.filepath)) await Common.removeFile(bmp3.filepath, true)
 
-            const stats = fs.statSync(filePath)
-            const fileSizeInMB = Number((stats.size / (1024 * 1024)).toFixed(2))
-            // 本地合成的没有视频直链，交给 sendPreparedVideo 上传
-            this.preparedVideo = { filepath: filePath, totalBytes: fileSizeInMB, originTitle: this.downloadfilename }
+              const stats = fs.statSync(filePath)
+              const fileSizeInMB = Number((stats.size / (1024 * 1024)).toFixed(2))
+              // 本地合成的没有视频直链，交给 sendPreparedVideo 上传
+              this.preparedVideo = { filepath: filePath, totalBytes: fileSizeInMB, originTitle: this.downloadfilename }
+            }
           } else {
             await Common.removeFile(bmp4.filepath, true)
             if (bmp3) await Common.removeFile(bmp3.filepath, true)
@@ -1669,7 +1740,7 @@ export class Bilibili extends Base {
     const prepared = this.preparedVideo
     this.preparedVideo = null
     if (!prepared) return false
-    const { filepath, totalBytes, originTitle, videoUrl } = prepared
+    const { filepath, totalBytes, originTitle, videoUrl, audioPath } = prepared
     /**
      * 在线播放模式：不烧录、也不上传，直接把下好的视频登记成播放会话，
      * 回一条公网链接（弹幕存下来给播放页用）。
@@ -1679,6 +1750,8 @@ export class Bilibili extends Base {
     if (isOnlinePlayerRequest()) {
       const published = await publishOnlinePlayer(this.e, {
         videoPath: filepath,
+        // 分离音轨：一起交给播放页（默认不合成，浏览器里同时播）
+        audioPath,
         title: originTitle || this.downloadfilename || this.workInfo?.title,
         platform: 'bilibili',
         danmaku: this.danmakuList,

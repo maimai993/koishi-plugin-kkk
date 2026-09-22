@@ -1,10 +1,12 @@
 import fs from 'node:fs'
 import { sendSlicedImage } from '@/module/utils/ImageSlice'
+import { platformOf } from '@/module/utils/ImageSlice'
 import { buildMarkdownImageMessage } from '@/module/utils/QqPanel'
 // 弹幕策略（通用里的「强制不烧录弹幕」优先；「在线播放器」开着时是在线播放，不烧录）
 import { shouldBurnDanmaku, shouldFetchDanmaku } from '@/module/utils/DanmakuPolicy'
 // 在线播放：下载完之后登记播放会话并把链接回给用户（路径不能写 @/，那指向 karin/）
-import { isOnlinePlayerRequest, publishOnlinePlayer, type PlayerWorkInfo } from '../../../player'
+import {
+  applyForceOnlinePlayer, isOnlinePlayerRequest, publishOnlinePlayer, type PlayerWorkInfo } from '../../../player'
 // 解析阶段（「下载进度」指令读的就是这里登记的状态）
 import { DOWNLOAD_STAGES, withDownloadStage } from '@/module/utils/Network/Downloader'
 import { sendParseTip } from '@/module/utils/parseTip'
@@ -38,7 +40,7 @@ import {
 import { Config } from '@/module/utils/Config'
 import { EmojiReactionManager, getEmojiId } from '@/module/utils/EmojiReaction'
 import { getParseOverride } from '@/module/utils/ParseOverride'
-import { ParseSteps } from '@/module/utils/ParseSteps'
+import { ParseSteps, SendTasks } from '@/module/utils/ParseSteps'
 import { douyinComments } from '@/platform/douyin'
 import { burnDouyinDanmaku, type DouyinDanmakuElem } from '@/platform/douyin/danmaku'
 import { renderWorkImage } from '@/platform/douyin/push/render'
@@ -104,6 +106,11 @@ export class DouYin extends Base {
          * 本次解析的步骤容器：单步失败只跳过、不中断，最后统一渲染一张错误卡片（见 ParseSteps）。
          */
         const steps = new ParseSteps()
+        /** 发送任务组：内容（卡片 / 评论 / 图集）与视频各走一条线，谁先就绪谁先发 */
+    /** 强制在线播放名单里的平台：本次一律走在线播放（见 player/index.ts） */
+    // 适配器在「强制在线播放的适配器」名单里（例如 B站私聊机器人 platform === 'bilibili'）
+    applyForceOnlinePlayer(this.e)
+        const sends = new SendTasks(steps)
         const VideoData = await this.amagi.douyin.fetcher.parseWork({
           aweme_id: data.aweme_id
         })
@@ -312,7 +319,8 @@ export class DouYin extends Base {
                     const otherSegments = processedImages.filter((item: any) => !((item?.type === 'img' || item?.type === 'image') && !String(item?.attrs?.src ?? '').startsWith('base64://video')))
                     // 静态图：一条 md 合并（图片地址从元素里取）
                     const mdMessage = await buildMarkdownImageMessage(
-                      imageSegments.map((item: any) => String(item?.attrs?.src ?? '')).filter(Boolean)
+                      imageSegments.map((item: any) => String(item?.attrs?.src ?? '')).filter(Boolean),
+                      420, platformOf(this.e)
                     )
                     if (mdMessage) {
                       // 存起来，等信息卡和评论区发完再发（用户指定顺序）
@@ -368,7 +376,8 @@ export class DouYin extends Base {
                  * 图片按 420px 等比缩放（`![#宽px #高px](url)`），一条消息装下整套图集。
                  */
                 const mdMessage = await buildMarkdownImageMessage(
-                  images.map((item: any) => item.url_list[2] || item.url_list[1]).filter(Boolean)
+                  images.map((item: any) => item.url_list[2] || item.url_list[1]).filter(Boolean),
+                  420, platformOf(this.e)
                 )
                 if (mdMessage) {
                   // 存起来，等信息卡和评论区发完再发（用户指定顺序）
@@ -552,7 +561,7 @@ export class DouYin extends Base {
                     }
                   }
                   if (mergeSources.length) {
-                    const mdMessage = await buildMarkdownImageMessage(mergeSources)
+                    const mdMessage = await buildMarkdownImageMessage(mergeSources, 420, platformOf(this.e))
                     if (mdMessage) {
                       this.pendingGalleryMd = mdMessage
                     } else {
@@ -699,8 +708,8 @@ export class DouYin extends Base {
          */
         const fromPanelDouyin = getParseOverride()?.fromPanel === true
         if (!fromPanelDouyin && Config.douyin.sendContent.includes('info')) {
-          // 卡片渲染失败只跳过卡片，视频照发（最后统一报错）
-          await steps.run('渲染作品信息卡', async () => {
+          // 卡片渲染失败只跳过卡片，视频照发（最后统一报错）；不再阻塞视频那条线
+          sends.add('渲染作品信息卡', async () => {
           if (Config.douyin.videoInfoMode === 'text') {
             // 构建回复内容数组
             const replyContent: SendMessage = []
@@ -755,7 +764,7 @@ export class DouYin extends Base {
 
         if (Config.douyin.sendContent.includes('comment')) {
           // 评论拉取/渲染失败只跳过评论区，视频照发
-          await steps.run('渲染评论区', async () => {
+          sends.add('渲染评论区', async () => {
           const EmojiData = await this.amagi.douyin.fetcher.fetchEmojiList()
           const list = Emoji(EmojiData.data)
           const douyinCommentsRes = await douyinComments(CommentsData.data, list)
@@ -810,7 +819,8 @@ export class DouYin extends Base {
                * md 里连续图片是紧贴渲染的，一条消息就能装完整套图。
                */
               const mdMessage = await buildMarkdownImageMessage(
-                messageElements.map((item: any) => String(item?.attrs?.src ?? '')).filter(Boolean)
+                messageElements.map((item: any) => String(item?.attrs?.src ?? '')).filter(Boolean),
+                420, platformOf(this.e)
               )
               if (mdMessage) {
                 await this.e.reply(mdMessage)
@@ -836,8 +846,11 @@ export class DouYin extends Base {
 
         /**
          * 图集图片（+保存提示）→ **一条 markdown**，实况视频紧随其后。
-         * 放在这里是因为：信息卡、评论区都已经发完了（用户指定顺序）。
+         *
+         * 和卡片、评论区同在**内容线**上（相对顺序：信息卡 → 评论区 → 图集 → BGM），
+         * 但不再和视频那条线互相等待。
          */
+        sends.add('发送图集与BGM', async () => {
         logger.mark('[抖音] 准备发送图集: md=' + (this.pendingGalleryMd ? '有' : '无') + ' 视频=' + this.pendingGalleryVideos.length + ' 段')
         if (this.pendingGalleryMd) {
           try {
@@ -865,13 +878,16 @@ export class DouYin extends Base {
             this.pendingBgmPath = null
           }
         }
+        })
 
-        /** 发送视频（视频在后台下载，这里才等它收尾，然后烧录/上传） */
+        /**
+         * **视频单独一条线**：下载一好就发，不等信息卡 / 评论区 / 图集渲完
+         * （用户要求：「所有东西的发送不需要等待全部完成」）。
+         */
         if (willSendVideo) {
-          // 等到这里才取下载结果：卡片、评论、BGM 都已经发出去了，用户不会盯着空白等
+          sends.add('发送视频', async () => {
+          // 下载在后台跑，这里才等它收尾；下载失败没有东西可发 —— 失败已经记在 steps 里，最后一起报
           const downloadedVideo = (await downloadTask) ?? null
-          await steps.run('发送视频', async () => {
-          // 下载失败了就没有东西可发 —— 失败已经记在 steps 里，最后一起报
           if (!downloadedVideo) {
             logger.warn('[抖音] 视频还没下载成功，跳过发送')
             return
@@ -976,9 +992,10 @@ export class DouYin extends Base {
         }
 
         /**
-         * 所有步骤跑完再统一报错：中间有失败就把它们合成一个错误抛出去，
+         * 等两条线都跑完，再统一报错：中间有失败就把它们合成一个错误抛出去，
          * 由 ErrorHandler 渲染**一张**错误卡片（此时能发的视频/卡片都已经发出去了）。
          */
+        await sends.settle()
         steps.throwIfFailed()
         return true
       }

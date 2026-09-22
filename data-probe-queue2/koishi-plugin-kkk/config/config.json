@@ -26,13 +26,7 @@
     "videoTool": true,
     "priority": 800,
     "removeCache": true,
-    "renderer": "shotkit",
     "renderScale": 100,
-    "noiseOverlay": "off",
-    "forwardContent": [
-      "text",
-      "image"
-    ],
     "Theme": 0,
     "ambientCover": {
       "coverOpacity": 0.7,
@@ -42,7 +36,7 @@
     "RenderWaitTime": 120,
     "EmojiReply": true,
     "parseTip": true,
-    "fakeForward": false,
+    "fakeForward": true,
     "errorLogSendTo": [
       "trigger"
     ],
@@ -72,8 +66,6 @@
   },
   "douyin": {
     "switch": true,
-    "forward": false,
-    "forwardContent": [],
     "sendContent": [
       "info",
       "comment",
@@ -109,8 +101,6 @@
   },
   "bilibili": {
     "switch": true,
-    "forward": false,
-    "forwardContent": [],
     "sendContent": [
       "info",
       "video",
@@ -144,15 +134,11 @@
   },
   "kuaishou": {
     "switch": true,
-    "forward": false,
-    "forwardContent": [],
     "comment": true,
     "numcomment": 10
   },
   "xiaohongshu": {
     "switch": true,
-    "forward": false,
-    "forwardContent": [],
     "watermark": false,
     "sendContent": [
       "info",

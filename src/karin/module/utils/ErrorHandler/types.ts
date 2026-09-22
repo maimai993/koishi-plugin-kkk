@@ -3,6 +3,8 @@ import type { Message } from 'node-karin'
 
 import type { getBuildMetadata } from '@/module'
 
+import type { ErrorReportResult } from '../ErrorReport'
+
 /**
  * 错误处理选项
  */
@@ -47,6 +49,14 @@ export interface ErrorContext {
    * 适配器信息（可选）
    */
   adapterInfo?: ApiErrorData['adapterInfo']
+  /**
+   * 错误上报结果（可选）。
+   *
+   * 上报在渲染错误卡片**之前**完成，编号会印在卡片上、也会拼进错误消息里 ——
+   * 用户拿着这个编号进群提问，站长一眼就能在收集站上查到这次报错的全部细节。
+   * 上报被关掉或上传失败时是 `null`（错误卡片照常发）。
+   */
+  report?: ErrorReportResult | null
 }
 
 /**

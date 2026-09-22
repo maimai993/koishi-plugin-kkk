@@ -55,6 +55,7 @@ const SUPPLEMENT: DescriptionMap = {
   'amagi.cookies.kuaishou': '快手 Cookie',
   'amagi.cookies.xiaohongshu': '小红书 Cookie',
   app: '全局通用设置：解析总开关、渲染、缓存、错误上报等',
+  'app.forwardContent': '合并转发里包含哪些内容（fakeForward 打开时生效）：text 文字 / image 图片 / video 视频 / audio 语音 / file 文件 / markdown 卡片。没列出来的一律单独直发 —— OneBot 的转发节点装不下大体积视频，默认不含 video',
   'app.ambientCover': '封面氛围背景参数：控制封面图对模板背景氛围的贡献度，取值 0~1',
   'app.ambientCover.coverOpacity': '模糊封面层不透明度：封面色强度总闸，越大整体越浓',
   'app.ambientCover.overlayEdgeOpacity': '主题色压色罩两端（顶/底）不透明度',

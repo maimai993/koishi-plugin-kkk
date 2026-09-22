@@ -14,8 +14,12 @@ import path from 'node:path'
 import { h } from 'koishi'
 import type { Bot, Context, Session } from 'koishi'
 
+// 版本比较复用注入器那边的实现（它处理了 -beta.1 这类预发布号的先后）
+import { isSemverGreater } from '../karin/module/utils/semver'
+
 import { logger } from './logger'
 import { COLLECTED_MESSAGE_ID, collectForward } from './forward-collect'
+import { UnconfirmedSendError, classifySendFailure, describeSendFailure, isPassiveLimitFailure } from './sendError'
 import { commandQueue, eventQueue, getRuntime, karinPathBase, taskQueue, tryGetRuntime } from './runtime'
 import { segment } from './segment'
 import { syncUpstreamToKoishi } from './syncConfig'
@@ -106,6 +110,22 @@ export class KkkBot {
 
   get ctx () {
     return this.bot.ctx
+  }
+
+  /**
+   * 真实适配器名（`onebot` / `qq` …）。
+   *
+   * 能力探测（合并转发、平台分支）读的是这个字段，而兼容层里 `e.bot` 是 KkkBot 包装、
+   * 真实 Bot 在 `.bot` 上 —— 不转发出去的话，`supportsForward(e.bot)` 永远拿到空平台名，
+   * 判定成「不支持合并转发」，于是**收集好的内容最后被当成普通消息直发**。
+   */
+  get platform (): string {
+    return String((this.bot as any)?.platform ?? '')
+  }
+
+  /** 适配器自带的 internal API（合并转发、上传等）就挂在真实 Bot 上 */
+  get internal (): any {
+    return (this.bot as any)?.internal
   }
 
   /** 好友列表 */
@@ -200,7 +220,31 @@ export class KkkBot {
         const author = (payload.botId || payload.botName)
           ? [h('author', { id: payload.botId, name: payload.botName })]
           : []
-        const ids = await this.bot.sendMessage(channelId, [h('message', { forward: true }, ...author, ...payload.elements)] as any)
+        /**
+         * **每条内容一个节点（node），不能全塞进同一个节点里。**
+         *
+         * 用户实测反馈：「合并转发不要把评论区卡片、信息卡片、视频弄成一条信息啊，
+         * 不然只有视频可以加载」—— 一个 node 里塞 卡片图 + 评论图 + 视频 时，
+         * QQ 的聊天记录只把视频渲染出来了，图片全都不显示。
+         *
+         * 适配器（koishi-plugin-adapter-onebot lib/index.js:918-932）对**嵌套的普通 \`<message>\`**
+         * 就是「一个聊天记录条目」：每遇到一个就 \`flush()\` 一次，把当前 children 收成一个 node
+         * （flush 的 forward 分支把 node 推进上一层，见 :763-781）。所以这里给每个元素包一层
+         * \`<message>\`，一条转发里就有 N 个条目，各自独立加载。
+         */
+        /**
+         * **一次发送 = 一个聊天记录条目**：
+         *   - 信息卡、评论区、视频 各自是独立的一次 \`reply()\` → 各自一个条目
+         *     （不再挤在同一个节点里，那会导致 QQ 只加载视频）；
+         *   - 卡片切片是**一次** \`reply([...])\` → 留在**同一个**条目里（用户要求：切片还是一条信息内）。
+         *
+         * 分组来自收集器（\`drainForwardGroups\`）；没有分组信息时退化成「一个元素一个条目」。
+         */
+        const groups = (payload.groups?.length ? payload.groups : payload.elements.map((element) => [element]))
+          .filter((group) => Array.isArray(group) && group.length)
+        const nodes = groups.map((group) => h('message', {}, ...group))
+        const ids = await this.bot.sendMessage(channelId, [h('message', { forward: true }, ...author, ...nodes)] as any)
+        logger.debug('[合并转发] 已提交 ' + nodes.length + ' 个聊天记录条目')
         return { messageId: ids[ids.length - 1] ?? '' }
       } catch (error) {
         logger.warn('合并转发发送失败，改为直接发送内容: ' + String((error as any)?.message ?? error))
@@ -246,7 +290,20 @@ export class KkkBot {
     }
     /** 解析结果合并转发：文件（视频/群文件）也要进转发 */
     if (collectForward(channelId, [element])) return { messageId: COLLECTED_MESSAGE_ID, rawData: undefined }
-    return this.bot.sendMessage(channelId, [element] as any)
+    const ids = await this.bot.sendMessage(channelId, [element] as any)
+    /**
+     * 和 {@link reply} 同一个判据：**没拿到消息 ID 就是没发出去**。
+     *
+     * 文件/视频走的是「上传媒体 + 发一条带 media 的消息」，最后那条消息同样会返回 id；
+     * 没有 id 说明它没发成功（qq-chat 也是这么判的）。以前这里把空 ID 当成功返回，
+     * 结果「视频没发出去」被静默吞掉 —— Base.ts 那边看到没有异常就当发送成功了。
+     */
+    const id = ids?.[ids.length - 1] ?? ''
+    if (!id) {
+      logger.mark('[compat] 文件上传后没有拿到消息 ID：适配器没抛异常，但这个文件没有发出去')
+      throw new UnconfirmedSendError()
+    }
+    return { messageId: id, rawData: ids }
   }
 
   /** 群成员信息，karin 侧字段：userId/nick/card/role */
@@ -302,7 +359,13 @@ export class KkkBot {
     if (collectForward(peerOf(contact), content)) return { messageId: COLLECTED_MESSAGE_ID }
     const channelId = typeof contact === 'string' ? contact : contact.peer
     const ids = await this.bot.sendMessage(channelId, normalizeContent(content) as any)
-    return { messageId: ids[ids.length - 1] ?? '' }
+    // 同 reply/uploadFile：**没拿到消息 ID 就是没发出去**，别当成功返回
+    const id = ids?.[ids.length - 1] ?? ''
+    if (!id) {
+      logger.mark('[compat] 主动发送后没有拿到消息 ID：适配器没抛异常，但这条消息没有发出去')
+      throw new UnconfirmedSendError()
+    }
+    return { messageId: id }
   }
 
   /**
@@ -430,35 +493,81 @@ export class Message {
     if (collectForward(this.contact?.peer ?? '', elements)) return { messageId: COLLECTED_MESSAGE_ID }
 
     /**
-     * 主动消息兜底（重点）。
+     * 没拿到消息 ID 就是**没发出去**（对齐 qq-chat 的判法）。
      *
-     * QQ 适配器在「被动回复超限」时**不一定抛异常**：它只是发不出去、返回空数组，
-     * 于是 await send() 看起来是成功的 —— 视频就静默丢了。所以这里除了 catch，
-     * 还要看**有没有拿到消息 ID**：没拿到就换主动消息（不带引用）重发一次。
+     * QQ 适配器只有在拿到 `resp.id` 时才会把消息塞进 satori 的 `results`；
+     * 没拿到 ID 又没有异常，说明这条消息没有被确认发出 —— qq-chat 的注释写得很直白：
+     * 「适配器没抛异常但也没给消息 id：QQ 那边其实没发出去」。
+     * 以前这里把「没 ID」当成成功，等于把发失败的消息静默吞掉，调用方还以为已经送达。
+     */
+    const requireId = (ids: string[] | undefined): string => {
+      const id = ids?.[ids.length - 1] ?? ''
+      if (!id) {
+        /**
+         * 走到这里说明**适配器没有报错、但也没有返回消息 ID** —— 消息没有被确认发出。
+         * （真正发失败会带错误码抛上来，见下面为什么要绕开 `session.send`。）
+         */
+        logger.mark('[compat] 发送后没有拿到消息 ID：这条消息没有发出去（适配器没报错，多半是被 before-send 拦下或进了审核）')
+        throw new UnconfirmedSendError()
+      }
+      return id
+    }
+
+    /**
+     * **不要用 `session.send()`** —— 它会吞掉异常，我们就拿不到错误码了。
+     *
+     * Koishi 自己的 `Session.send`（`@koishijs/core/lib/index.cjs:1841`）是这么写的：
+     *
+     *     return this.bot.sendMessage(...).catch((error) => {
+     *       logger3.warn(error)      // 日志里那行「[W] session Error: QQ 消息发送失败 [40093011] …」
+     *       return []                // 然后**吞掉异常**，返回空数组
+     *     })
+     *
+     * 于是适配器抛出的错误码（例如 `[40093011] 上传文件大小超过限制`）到不了调用方，
+     * 我们只能看到一个空数组 —— 这正是之前「只知道没发出去、不知道为什么」的原因。
+     * qq-chat 也是直接调 `bot.sendMessage(...)`（见它的 `api-handlers.ts`），错误才看得见。
+     *
+     * 这里自己拼一次同样的调用：带上 `referrer` 和 `options.session`（适配器要靠 session
+     * 取被动回复的 `msg_id` / `event_id`），但**不 catch** —— 让错误原样抛给判错逻辑。
+     */
+    const sendThroughSession = async (): Promise<string[] | undefined> => {
+      const session: any = this.session
+      if (!session) return undefined
+      if (!elements.length) return []
+      return await session.bot.sendMessage(
+        session.channelId,
+        elements as any,
+        session.event?.referrer,
+        { session }
+      )
+    }
+
+    /**
+     * 主动消息兜底（只在**拿到错误码**时触发）。
+     *
+     * `[40034128] 回复消息失败，被动回复时间或者次数超过限制` 时，换主动消息通道（不带引用）
+     * 再发一次。判据是**错误码**，不是「有没有消息 ID」—— 「没 ID」只说明没发出去，
+     * 说不出原因；被禁言、无主动消息权限这类换通道也一样发不出去（见 compat/sendError 的码表）。
      */
     const sendActive = async (): Promise<{ messageId: string; rawData?: any }> => {
       const activeIds = await this.bot.bot.sendMessage(this.contact.peer, elements as any)
-      return { messageId: activeIds?.[activeIds.length - 1] ?? '' }
+      return { messageId: requireId(activeIds) }
     }
 
     try {
       if (this.session) {
-        const ids = await this.session.send(elements as any)
-        const id = ids?.[ids.length - 1] ?? ''
-        if (!id) {
-          logger.mark('[compat] 回复没有返回消息 ID（多为被动回复超限），改用主动消息重发')
-          return await sendActive()
-        }
-        return { messageId: id }
+        // 空内容不算失败：没有东西要发
+        if (!elements.length) return { messageId: '' }
+        return { messageId: requireId(await sendThroughSession()) }
       }
-      const ids = await this.bot.bot.sendMessage(this.contact.peer, elements as any)
-      return { messageId: ids?.[ids.length - 1] ?? '' }
+      return { messageId: requireId(await this.bot.bot.sendMessage(this.contact.peer, elements as any)) }
     } catch (error: any) {
-      const text = String(error?.message ?? error)
-      // 被动回复额度/时间窗超了：换成主动消息再试一次
-      if (!/被动回复|40034128|timeout|次数超过/.test(text)) throw error
+      const failure = classifySendFailure(error)
+      // 只有「被动回复额度/时间窗超了」才值得换通道重发；体积超限、被禁言、无权限这类
+      // 换通道也一样失败，直接抛给调用方（它拿到错误码会去切片 / 降级 / 报错）
+      if (!isPassiveLimitFailure(failure)) throw error
       // 用 mark 级别：这是「视频明明下好了却发不出去」的关键兜底，日志里要看得见
-      logger.mark('[compat] 被动回复受限，改用主动消息发送: ' + text)
+      logger.mark('[compat] 被动回复受限，改用主动消息发送: ' + describeSendFailure(failure))
       return await sendActive()
     }
   }
@@ -489,13 +598,18 @@ export class ForwardPayload {
   constructor (
     public elements: any[],
     public botId?: string,
-    public botName?: string
+    public botName?: string,
+    /**
+     * 可选：按「每次发送」分好组的元素（一次 \`reply()\` 一组）。
+     * 给了就**一组一个聊天记录条目**（切片留在同一条里），没给就一个元素一个条目。
+     */
+    public groups?: any[][]
   ) {}
 }
 
-/** karin 的 common.makeForward */
-export function makeForward (elements: any, botId?: string, botName?: string): ForwardPayload {
-  return new ForwardPayload(normalizeContent(elements), botId, botName)
+/** karin 的 common.makeForward（第 4 个参数是扩展：按发送分组，见 ForwardPayload.groups） */
+export function makeForward (elements: any, botId?: string, botName?: string, groups?: any[][]): ForwardPayload {
+  return new ForwardPayload(normalizeContent(elements), botId, botName, groups)
 }
 
 /**
@@ -514,16 +628,21 @@ export function isForwardSupported (bot: any): boolean {
 
 function supportsForward (bot: any): boolean {
   /**
+   * 兼容层里有两种 bot：**KkkBot 包装**（真实 Bot 在 `.bot` 上）和**裸 Bot**。
+   * 这里统一解包，免得调用方传错一层就静默退化成「逐条直发」。
+   */
+  const target: any = bot?.bot ?? bot
+  /**
    * ① 适配器自己就带合并转发 API 的：直接认（OneBot 系的 internal.*ForwardMsg）。
    *    这条优先，因为不依赖平台名怎么写。
    */
-  const internal: any = bot?.internal
+  const internal: any = target?.internal ?? bot?.internal
   if (internal && (typeof internal.sendGroupForwardMsg === 'function' || typeof internal.sendPrivateForwardMsg === 'function')) return true
   /**
    * ② 其余按平台判断：OneBot / red / chronocat 这些 Satori 适配器认识 `h('message')`；
    *    QQ 官方适配器（qqguild / qqbot / qq / official）没有任何 forward 能力，必须退化。
    */
-  const platform = String(bot?.platform ?? '')
+  const platform = String(target?.platform ?? bot?.platform ?? '')
   if (!platform) return false
   return !/qqguild|qqbot|^qq$|official/i.test(platform)
 }
@@ -847,9 +966,18 @@ export const checkPkgUpdate = async (name: string, _options?: { compare?: string
     const response = await fetch('https://registry.npmmirror.com/' + name, { signal: AbortSignal.timeout(10000) })
     if (!response.ok) return { status: 'error' as const, error: new Error('HTTP ' + response.status) }
     const meta: any = await response.json()
-    const remote = meta?.['dist-tags']?.latest
+    const tags: Record<string, string> = meta?.['dist-tags'] ?? {}
+    /**
+     * 预览版（3.3.0-beta.1 这种）**不能拿 latest 比**：本地跑 beta 时 latest 还在 3.2.2，
+     * 按老逻辑会报「有新版本 3.2.2」—— 那其实是**降级**。
+     * 所以带 - 的本地版本改看 beta 通道；beta 没有（说明预览已经并进正式版）才回退到 latest，
+     * 并且只在远端确实比本地新时才说「有更新」。
+     */
+    const isPreview = local.includes('-')
+    const remote = (isPreview ? (tags.beta || tags.latest) : tags.latest) || ''
     if (!remote) return { status: 'error' as const, error: new Error('响应缺少 dist-tags.latest') }
     if (remote === local) return { status: 'no' as const, local }
+    if (isPreview && !isSemverGreater(remote, local)) return { status: 'no' as const, local }
     return { status: 'yes' as const, local, remote }
   } catch (error) {
     return { status: 'error' as const, error: error as Error }
@@ -1512,7 +1640,7 @@ export const karin = {
  * 业务侧一般只用得到 `withoutForwardCollect`：把「过程提示」那次发送包起来，
  * 让它不要被收进最终那条转发里。
  */
-export { COLLECTED_MESSAGE_ID, collectForward, currentForwardBag, drainForward, runWithForwardBag, withoutForwardCollect } from './forward-collect'
+export { COLLECTED_MESSAGE_ID, collectForward, currentForwardBag, drainForward, drainForwardGroups, isForwardCollecting, runWithForwardBag, withoutForwardCollect } from './forward-collect'
 
 export { logger, segment, syncUpstreamToKoishi }
 export default karin

@@ -129,13 +129,32 @@ export interface Config {
 /** 摊平后由「Koishi 原生设置」分组提供的字段 */
 const NATIVE_KEYS = ['masters', 'dataPath', 'debug', 'autoParse', 'webUiAuth']
 
+/**
+ * 控制台里**唯一可见**的一段文字：把用户指到 WebUI 面板去。
+ *
+ * 为什么把设置全藏了：同一份配置在控制台改一半、在面板改一半，两边都会把整份配置写回
+ * koishi.yml，很容易互相覆盖（用户实际遇到过「面板里关了、控制台一保存又回来了」）。
+ * 现在控制台不再提供编辑入口，只留这块说明。
+ *
+ * 注意：**隐藏不等于删除** —— 字段仍然在 schema 里声明着，所以在控制台里点保存
+ * 一样会把已有值带上，面板里的设置不会被清空。
+ */
+const WEBUI_GUIDE = [
+  '**所有设置都在 WebUI 配置面板里改**，地址：/kkk（打开 Koishi 控制台后，左侧边栏也有一个「**kkk 配置**」入口）。',
+  '',
+  '面板里包含：接口库 / 通用（含**错误上报**、在线播放器、合并转发）/ 抖音 / 哔哩哔哩 / 快手 / 小红书 / **QQ 适配器** / 推送列表。' +
+  '改完点右下角保存即可 —— 会写回 koishi.yml 并热重载，**不用重启**。',
+  '',
+  '**Koishi 控制台里的设置项已经全部隐藏**（值仍然保留，在这里点保存也不会把它们弄丢），免得两边各改一半、互相覆盖。',
+  '',
+  '面板里还有一组「**Koishi 设置**」（数据目录、调试日志、自动解析、面板是否要求先登录控制台）。' +
+  '只有 masters（主人账号）没有面板入口 —— 它属于 Koishi 的权限体系，而面板是免登录页面，' +
+  '需要直接改 koishi.yml 里本插件的配置段（改完重启 Koishi）。'
+].join('\n')
+
 export const Config: Schema<Config> = Schema.intersect([
   Schema.object({
-    webuiGuide: Schema.const('').description(
-      '**本插件的配置都在配置面板里改**：Koishi 控制台左侧边栏 →「**kkk 配置**」。\n\n' +
-      '（原版配置面板：接口库 / 通用 / 抖音 / 哔哩哔哩 / 快手 / 小红书 / **QQ 适配器** / 推送列表，' +
-      '改完点右下角保存即可，写回 koishi.yml 并热重载，不用重启。）'
-    ),
+    webuiGuide: Schema.const('').description(WEBUI_GUIDE),
     // 全部隐藏：控制台表单里不显示，配置统一在控制台侧边栏的「kkk 配置」面板里改
     qq: buildQqSchema(Schema).hidden().description('QQ 适配器（只对 QQ 平台生效）'),
     advanced: Schema.object({
@@ -145,8 +164,44 @@ export const Config: Schema<Config> = Schema.intersect([
     autoParse: Schema.boolean().default(true).description('群里有人发链接（或回复一条带链接的消息）就自动解析，不用打指令'),
     webUiAuth: Schema.boolean().default(true).description('配置面板 /kkk 是否要求先登录 Koishi 控制台（默认开）。装了 auth 插件的部署只有登录后才能打开面板；没装 auth 插件时本来就没有登录这一说，这里不生效'),
     }).collapse().hidden().description('Koishi 原生设置（一般不用改，已折叠）'),
-  }),
+  }).description('配置入口：请在 WebUI 面板（/kkk）里修改'),
   Schema.object({
+    /**
+     * 合并转发（两级开关）。
+     *
+     * 面板（/kkk 的 SPA）是上游打包好的产物，加不了新字段，所以这里单独给一组能在
+     * **控制台**里改的表单：全局开关 + 每个平台各自的开关与「合并哪些内容」。
+     * 值写回 config.json 的对应位置（app.fakeForward / app.forwardContent / <平台>.forward …）。
+     */
+    forward: Schema.object({
+      guide: Schema.const('').description(
+        '**合并转发**：打开后，一次解析产生的所有内容会等解析全部结束、合并成一条转发发出；' +
+        '关掉就是一边解析一边逐条发。\n\n' +
+        '**全局优先**：上面的「全局」打开 → 所有平台都合并，下面的平台开关不再起作用；' +
+        '全局关着时，才轮到各平台自己的开关。\n\n' +
+        '**默认全部关闭**。\n\n' +
+        '⚠️ 合并转发开着时，视频这类大文件如果塞进转发节点，某些适配器（如 NapCat）会整条拒绝 —— ' +
+        '这时它会自动改成单独发送，不会丢内容。\n\n' +
+        '另外：**markdown 只有 QQ 官方 bot 支持**，OneBot（NapCat / Lagrange 等个人号）不渲染，' +
+        '所以那边图片一律按普通图片段发（切片、图集都是），配置里的 markdown 选项对它没有意义。'
+      ),
+      global: Schema.boolean().default(false)
+        .description('全局合并转发：打开后所有平台都合并（优先级高于下面的平台开关）'),
+      globalContent: Schema.array(Schema.union(['text', 'image', 'video', 'file'])).default([])
+        .description('全局转发里合并哪些内容：text 文字 / image 图片 / video 视频 / file 文件。留空 = 用默认（text、image）。**语音和 markdown 不在候选里**：QQ 的聊天记录不支持语音气泡，markdown 只有官方 bot 认而官方适配器没有合并转发能力；没列出来的内容单独直发'),
+      douyin: Schema.boolean().default(false).description('抖音：单独打开合并转发（全局关着时生效）'),
+      douyinContent: Schema.array(Schema.union(['text', 'image', 'video', 'file'])).default([])
+        .description('抖音转发合并哪些内容（留空 = 用全局那份）'),
+      bilibili: Schema.boolean().default(false).description('B站：单独打开合并转发（全局关着时生效）'),
+      bilibiliContent: Schema.array(Schema.union(['text', 'image', 'video', 'file'])).default([])
+        .description('B站转发合并哪些内容（留空 = 用全局那份）'),
+      kuaishou: Schema.boolean().default(false).description('快手：单独打开合并转发（全局关着时生效）'),
+      kuaishouContent: Schema.array(Schema.union(['text', 'image', 'video', 'file'])).default([])
+        .description('快手转发合并哪些内容（留空 = 用全局那份）'),
+      xiaohongshu: Schema.boolean().default(false).description('小红书：单独打开合并转发（全局关着时生效）'),
+      xiaohongshuContent: Schema.array(Schema.union(['text', 'image', 'video', 'file'])).default([])
+        .description('小红书转发合并哪些内容（留空 = 用全局那份）')
+    }).collapse().hidden().description('合并转发（全局 + 各平台）'),
     upstream: buildUpstreamSchema(pluginRootDir).hidden().description(
       '插件自身的配置（与 Karin 版 config.json 一致）。每项都带着上游默认值，枚举型字段是下拉框；' +
       '**与默认值不同**的项会在启动时写回 config.json，保持默认值的项不写（这样你直接改文件的内容不会被覆盖）'
@@ -162,7 +217,8 @@ export const usage = `
 面板里按平台分好类：接口库 / 通用 / 抖音 / 哔哩哔哩 / 快手 / 小红书 / **QQ 适配器** / 推送列表，
 改完点右下角保存即可，立即生效、不用重启。
 
-> 这个插件配置页里的设置项已经全部隐藏 —— 那是为了防止两处各改一半，配置统一在面板里维护。
+> 面板里能改的都在面板里改；**面板没有的项**（例如「合并转发」的全局 / 各平台开关与合并内容）
+> 在本配置页的「**合并转发**」分组里改，改完写回 config.json。其余上游项仍隐藏在文件里维护。
 
 ## 指令
 
@@ -668,18 +724,40 @@ function registerCommands (
           if (await runTextCommand(session, '#解析 ' + resolved.url)) return
         }
         if (resolved && resolved.candidates && resolved.candidates.length) {
-          const { cmdInput } = await import('./karin/module/utils/QqPanel')
-          const table = ['| # | 标题 | UP / 作者 | 操作 |', '| :---: | :--- | :--- | :---: |']
-          resolved.candidates.slice(0, 6).forEach((item: any, index: number) => {
-            const link = item.platform === 'bilibili'
-              ? 'https://www.bilibili.com/video/' + item.id
-              : 'https://www.douyin.com/video/' + item.id
-            const title = String(item.title || '（无标题）').replace(/[|\n]/g, ' ').slice(0, 26)
-            const author = String(item.author || '-').replace(/[|\n]/g, ' ').slice(0, 12)
-            table.push('| ' + (index + 1) + ' | ' + title + ' | ' + author + ' | ' + cmdInput('解析 ' + link, '解析') + ' |')
+          const top = resolved.candidates.slice(0, 6)
+          const tip = '没能唯一确定这个作品（识别到：' + ((resolved.upName) || '未知') + '），下面是候选：'
+          const linkOf = (item: any) => item.platform === 'bilibili'
+            ? 'https://www.bilibili.com/video/' + item.id
+            : 'https://www.douyin.com/video/' + item.id
+          /**
+           * **按平台分成两种发法**。
+           *
+           * QQ 官方机器人认 markdown，候选直接排成表格、操作列是按钮，点一下就走解析（最省事）。
+           * 个人号（OneBot / NapCat）**不渲染 markdown**：实测这条候选消息发过去整条都发不出来 ——
+           * 用户只看到「正在提取卡片信息…」然后再无音讯，六个候选白搜。那边改成纯文本 + 完整链接，
+           * QQ 客户端会把裸链接变成可点的蓝色链接，复制粘贴也方便。
+           */
+          const officialQq = /^qq/i.test(String((session as any).platform ?? ''))
+          if (officialQq) {
+            const { cmdInput } = await import('./karin/module/utils/QqPanel')
+            const table = ['| # | 标题 | UP / 作者 | 操作 |', '| :---: | :--- | :--- | :---: |']
+            top.forEach((item: any, index: number) => {
+              const title = String(item.title || '（无标题）').replace(/[|\n]/g, ' ').slice(0, 26)
+              const author = String(item.author || '-').replace(/[|\n]/g, ' ').slice(0, 12)
+              table.push('| ' + (index + 1) + ' | ' + title + ' | ' + author + ' | ' + cmdInput('解析 ' + linkOf(item), '解析') + ' |')
+            })
+            await send([{ type: 'markdown', attrs: { content: tip + '点按钮直接解析' + String.fromCharCode(10) + table.join(String.fromCharCode(10)) } }])
+            return
+          }
+          const lines = [tip]
+          top.forEach((item: any, index: number) => {
+            const title = String(item.title || '（无标题）').replace(/\s+/g, ' ').slice(0, 40)
+            const author = String(item.author || '-').replace(/\s+/g, ' ').slice(0, 16)
+            lines.push((index + 1) + '. ' + title + ' —— ' + author)
+            lines.push(linkOf(item))
           })
-          const tip = '没能唯一确定这个作品（识别到：' + ((resolved.upName) || '未知') + '），下面是候选，点按钮直接解析：'
-          await send([{ type: 'markdown', attrs: { content: tip + String.fromCharCode(10) + table.join(String.fromCharCode(10)) } }])
+          lines.push('把想看的那个链接发给我就能解析。')
+          await send(lines.join(String.fromCharCode(10)))
           return
         }
         await send('没能从这张卡片里认出作品，直接发链接给我吧')
@@ -742,6 +820,44 @@ function registerCommands (
   })
 }
 
+/** 合并转发内容可选项（与 ParseForward 里的 FORWARD_KINDS 保持一致） */
+const FORWARD_KIND_VALUES = ['text', 'image', 'video', 'audio', 'file', 'markdown']
+/** 平台名 → 上游配置段名 */
+const FORWARD_PLATFORMS = ['douyin', 'bilibili', 'kuaishou', 'xiaohongshu']
+
+/**
+ * 把控制台「合并转发」分组翻译成上游 config.json 的补丁。
+ *
+ * 只翻译**显式填过**的项：布尔值必须真的是 boolean（表单没碰时是默认 false，
+ * 与上游默认值相同，configBridge 会当作「没填」跳过），数组为空则跳过。
+ * @param group 控制台里的 \`forward\` 分组
+ * @returns 可以直接交给 applyUpstreamOverrides 的补丁；没有内容时返回 undefined
+ */
+function buildForwardPatch (group: any): Record<string, any> | undefined {
+  if (!group || typeof group !== 'object') return undefined
+  const patch: Record<string, any> = {}
+  const pickKinds = (value: any): string[] | undefined => {
+    if (!Array.isArray(value)) return undefined
+    const list = value.map((item) => String(item).toLowerCase()).filter((item) => FORWARD_KIND_VALUES.includes(item))
+    return list.length ? list : undefined
+  }
+
+  const app: Record<string, any> = {}
+  if (typeof group.global === 'boolean') app.fakeForward = group.global
+  const globalKinds = pickKinds(group.globalContent)
+  if (globalKinds) app.forwardContent = globalKinds
+  if (Object.keys(app).length) patch.app = app
+
+  for (const platform of FORWARD_PLATFORMS) {
+    const section: Record<string, any> = {}
+    if (typeof group[platform] === 'boolean') section.forward = group[platform]
+    const kinds = pickKinds(group[platform + 'Content'])
+    if (kinds) section.forwardContent = kinds
+    if (Object.keys(section).length) patch[platform] = section
+  }
+  return Object.keys(patch).length ? patch : undefined
+}
+
 export async function apply (ctx: Context, rawConfig: Config) {
   const logger = ctx.logger('kkk')
   setLogger(logger)
@@ -757,7 +873,7 @@ export async function apply (ctx: Context, rawConfig: Config) {
    * qq 组放最后：它优先于早期直接写在顶层的同名字段。
    */
   const raw = (rawConfig ?? {}) as any
-  const { webuiGuide: _guide, advanced, qq, upstream, ...rest } = raw
+  const { webuiGuide: _guide, advanced, qq, forward, upstream, ...rest } = raw
 
   /**
    * 早期的版本把这些开关直接写在配置顶层（`masters` / `qqPanel` …），
@@ -769,7 +885,16 @@ export async function apply (ctx: Context, rawConfig: Config) {
   for (const key of [...NATIVE_KEYS, ...QQ_KEYS]) {
     if (raw[key] !== undefined) legacy[key] = raw[key]
   }
-  const groupQq: any = { ...(qq ?? {}) }
+  /**
+   * **每个 qq 字段都要有值**：不能指望 Koishi 的 schema 默认值一定被填上 ——
+   * 线上实测踩过（用户报「B站私聊还是发视频、没给在线播放链接」）：
+   * 配置里没写过的字段，运行时读到的是 `undefined`，
+   * 于是「强制在线播放的适配器」（默认 bilibili）整个失效、面板列按钮的开关也失效。
+   *
+   * 所以这里用 `readQqOptions` 先铺一层**字段表里的默认值**（qqFields.json 是唯一出处），
+   * 再用用户显式配的值覆盖 —— 显式配置永远优先，缺的字段一律有默认。
+   */
+  const groupQq: any = { ...readQqOptions(raw as any), ...(qq ?? {}) }
   const groupNative: any = { ...(advanced ?? {}) }
   for (const key of QQ_KEYS) if (legacy[key] !== undefined) groupQq[key] = legacy[key]
   for (const key of NATIVE_KEYS) if (legacy[key] !== undefined) groupNative[key] = legacy[key]
@@ -824,7 +949,18 @@ export async function apply (ctx: Context, rawConfig: Config) {
 
   bindRuntime({
     ctx,
+    /**
+     * ⚠️ 这份 config **不是**原封不动转发，而是运行时真正读的那一份（`tryGetRuntime().config`）。
+     *
+     * 以前它是一个**手写白名单** —— 于是每加一个新开关（例如「强制在线播放的适配器」
+     * `forceOnlinePlayer`），忘了往这里补一行，运行时就读到 undefined，功能整个静默失效：
+     * 线上真实故障就是「B站私聊该给在线播放链接，结果还是去发视频文件」。
+     *
+     * 现在改成 `...readQqOptions(config)` 打底（qqFields.json 里的字段一个不落，缺的用默认值），
+     * 下面那些需要**归一化**的字段（端口取整数、分钟数夹范围、布尔用 !== false 这种）再覆盖上去。
+     */
     config: {
+      ...readQqOptions(config),
       masters: config.masters ?? [],
       debug: config.debug,
       dataPath: config.dataPath,
@@ -874,6 +1010,25 @@ export async function apply (ctx: Context, rawConfig: Config) {
   })
 
   fs.mkdirSync(dataRoot, { recursive: true })
+
+  /**
+   * 「合并转发」分组（控制台可见）→ config.json。
+   *
+   * 面板是上游打包好的 SPA，加不了字段，所以这组开关在**控制台**里改；
+   * 只有用户**显式填过**的项才会写（空数组 = 没填，见 configBridge 的 isEmptyContainer），
+   * 这样不会把面板/文件里已经配好的值盖掉。
+   */
+  const forwardPatch = buildForwardPatch(forward)
+  if (forwardPatch) {
+    try {
+      const { changed, file } = applyUpstreamOverrides(forwardPatch)
+      if (changed.length) {
+        logger.info('已把控制台里的合并转发设置写入 %s（%s）', file, changed.join(', '))
+      }
+    } catch (error: any) {
+      logger.error('写入合并转发设置失败: %s', error?.stack ?? error)
+    }
+  }
 
   // 控制台里填过的上游配置写回 config.json —— 必须赶在加载上游 apps 之前，
   // 因为部分模块会在 import 时就把配置读进闭包（例如 apps/tools.ts 里的优先级判断）。

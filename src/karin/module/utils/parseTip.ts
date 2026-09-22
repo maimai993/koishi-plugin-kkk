@@ -6,11 +6,41 @@
  * 调用时直接报 `(0 , module_1.sendParseTip) is not a function`（快手整个解析挂掉就是这个原因）。
  * 这里只依赖 Config / ParseOverride / 基础段，彻底断开环。
  */
-import { segment, type Message } from 'node-karin'
+import { segment, withoutForwardCollect, type Message } from 'node-karin'
 
+import { isParseDedupeEnabled } from './ParseLock'
 import { getParseOverride } from './ParseOverride'
 
 import { Config } from './Config'
+
+/** 同一句提示的最小间隔（毫秒）：只用来压住「同一条消息被投递多遍」这种秒级重复 */
+const TIP_WINDOW = 5000
+
+/** 最近发过的提示：`会话|提示内容` → 时间戳 */
+const recentTips = new Map<string, number>()
+
+/**
+ * 这句提示**现在该不该发**。
+ *
+ * 用户实测「发一遍提示三次」：一次发送被投递多遍时，每个副本都会走到提示这一行。
+ * 解析本身有作品级去重（ParseLock）挡着，但提示在那之前就发出去了 ——
+ * 所以这里再收一道口子：同一会话、同一句提示，5 秒内只发一次。
+ * 开关「短时间不重复解析」关掉时不拦截（行为与以前一致）。
+ * @param e 消息事件
+ * @param content 提示内容
+ */
+export const shouldSendTip = (e: Message, content: any): boolean => {
+  if (!isParseDedupeEnabled()) return true
+  const key = String((e as any)?.contact?.peer ?? (e as any)?.channelId ?? '') + '|' + String(content)
+  const now = Date.now()
+  for (const [item, at] of recentTips) {
+    if (now - at > TIP_WINDOW) recentTips.delete(item)
+  }
+  const last = recentTips.get(key)
+  if (last !== undefined && now - last < TIP_WINDOW) return false
+  recentTips.set(key, now)
+  return true
+}
 
 /**
  * 登记「正在获取下载链接」阶段。
@@ -27,7 +57,13 @@ export const beginParseStage = async (platformName: string): Promise<void> => {
   } catch { /* 观测失败不影响解析 */ }
 }
 
-/** 撤回上一条机器人消息（拿不到就忽略） */
+/**
+ * 撤回上一条机器人消息（拿不到就忽略）。
+ *
+ * **发送走 `withoutForwardCollect`**：过程提示不该被合并转发收进去
+ * （用户实测反馈：「解析提示在合并转发里面」）—— 「检测到 xx 链接，开始解析」
+ * 这种一句话是提示，不是解析结果。
+ */
 const recallPrevious = async (e: Message, content: any): Promise<void> => {
   try {
     const target: any = e as any
@@ -38,7 +74,7 @@ const recallPrevious = async (e: Message, content: any): Promise<void> => {
       await bot.recallMsg(last, String(target?.contact?.peer ?? target?.channelId ?? ''))
     }
   } catch { /* 撤回失败无所谓 */ }
-  await e.reply(content)
+  await withoutForwardCollect(() => e.reply(content))
 }
 
 /**
@@ -52,11 +88,12 @@ export const sendParseTip = async (e: Message, platformName: string): Promise<vo
 
   const fromPanel = getParseOverride()?.fromPanel === true
   if (fromPanel) {
-    await recallPrevious(e, '收到请求，开始下载')
+    if (shouldSendTip(e, '收到请求，开始下载')) await recallPrevious(e, '收到请求，开始下载')
     return
   }
   if (Config.app.parseTip) {
-    await recallPrevious(e, '检测到' + platformName + '链接，开始解析')
+    const tip = '检测到' + platformName + '链接，开始解析'
+    if (shouldSendTip(e, tip)) await recallPrevious(e, tip)
   }
 }
 

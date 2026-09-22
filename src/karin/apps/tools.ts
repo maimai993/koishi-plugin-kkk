@@ -7,6 +7,26 @@ import { Common, downloadVideo } from '@/module'
 import { getStatisticsDB, type ParsePlatform, type ParseWorkType } from '@/module/db'
 import { Config } from '@/module/utils/Config'
 import { acquireParseLock } from '@/module/utils/ParseLock'
+
+/**
+ * 「同一条消息」级别的去重：一次发送被投递多遍时，**在提示和网络请求之前**就挡住。
+ *
+ * 用户实测「发一遍提示三次」：QQ 会把同一次发送投递多遍（指令按钮是「消息 + 交互事件」两条，
+ * 客户端重发、群里的连点也一样），每个副本都会走到平台 handler。
+ * 原来的作品级去重（biliKey / douyinKey 这些）**只挡得住解析本身**，挡不住「检测到 X 链接，开始解析」
+ * 这句提示 —— 于是群里看到三条提示、实际只解析一次。这里用「会话 + 用户 + 消息原文」当键，
+ * 在最前面就把它拦下（开关仍是通用里的「短时间不重复解析」，关掉即恢复原样）。
+ * @param e 消息事件
+ * @param platform 平台名（只用于日志）
+ * @returns true = 这条消息可以处理；false = 短时间内已经处理过同一条，忽略
+ */
+const acquireMessageLock = (e: any, platform: string): boolean => {
+  const content = String(e?.msg ?? '').replace(/\s+/g, ' ').trim()
+  const key = ['msg', platform, e?.contact?.peer ?? e?.channelId ?? '', e?.userId ?? '', content].join(':')
+  if (acquireParseLock(key)) return true
+  logger.debug('短时间内重复的同一条消息（%s），已忽略: %s', platform, key)
+  return false
+}
 // 注意路径必须用相对写法：@/ 别名在这个仓库里指向 karin/，写 @/compat/... 会解析成 karin/compat/...
 // 那个目录不存在，会让整个 tools 应用加载失败（解析指令全部消失）。
 import { parseParseFlags, runWithParseOverride } from '@/module/utils/ParseOverride'
@@ -147,6 +167,8 @@ const handleDouyin = withParseForward(wrapWithErrorHandler(
       logger.debug('[抖音] 平台解析已关闭，忽略这条消息')
       return next()
     }
+    /** 同一条消息被投递多遍时只处理一次（详见 acquireMessageLock 的说明） */
+    if (!acquireMessageLock(e, 'douyin')) return next()
     // 面板指令里的参数先摘掉，避免污染后面的链接匹配
     const flags = parseParseFlags(e.msg)
     e.msg = flags.cleaned
@@ -223,7 +245,7 @@ const handleDouyin = withParseForward(wrapWithErrorHandler(
   {
     businessName: '抖音视频解析'
   }
-))
+), 'douyin')
 
 // 包装B站处理函数
 const handleBilibili = withParseForward(wrapWithErrorHandler(
@@ -233,6 +255,8 @@ const handleBilibili = withParseForward(wrapWithErrorHandler(
       logger.debug('[B站] 平台解析已关闭，忽略这条消息')
       return next()
     }
+    /** 同一条消息被投递多遍时只处理一次（必须放在提示和取数据之前，否则群里会看到三条提示） */
+    if (!acquireMessageLock(e, 'bilibili')) return next()
     // 面板指令里的参数先摘掉，避免污染后面的链接匹配（BV 号是整串匹配，多一个参数就匹配不上）
     const flags = parseParseFlags(e.msg)
     e.msg = flags.cleaned
@@ -335,7 +359,7 @@ const handleBilibili = withParseForward(wrapWithErrorHandler(
   {
     businessName: 'B站视频解析'
   }
-))
+), 'bilibili')
 
 // 包装快手处理函数
 const handleKuaishou = withParseForward(wrapWithErrorHandler(
@@ -346,6 +370,8 @@ const handleKuaishou = withParseForward(wrapWithErrorHandler(
       logger.debug('[快手] 平台解析已关闭，忽略这条消息')
       return
     }
+    /** 同一条消息被投递多遍时只处理一次（详见 acquireMessageLock 的说明） */
+    if (!acquireMessageLock(e, 'kuaishou')) return
     const kuaishouUrl = e.msg.replaceAll('\\', '').match(/(https:\/\/v\.kuaishou\.com\/\w+|https:\/\/www\.kuaishou\.com\/f\/[a-zA-Z0-9]+)/g)
     const startedAt = Date.now()
     // 解析参数（--q= 画质等）：之前这个分支没解析参数，面板选的画质从来没生效过
@@ -378,7 +404,7 @@ const handleKuaishou = withParseForward(wrapWithErrorHandler(
   {
     businessName: '快手视频解析'
   }
-))
+), 'kuaishou')
 
 // 包装小红书处理函数
 const handleXiaohongshu = withParseForward(wrapWithErrorHandler(
@@ -392,6 +418,8 @@ const handleXiaohongshu = withParseForward(wrapWithErrorHandler(
       logger.debug('[小红书] 平台解析已关闭，忽略这条消息')
       return next()
     }
+    /** 同一条消息被投递多遍时只处理一次（详见 acquireMessageLock 的说明） */
+    if (!acquireMessageLock(e, 'xiaohongshu')) return next()
     const cleaned = e.msg.replaceAll('\\', '')
     const m = cleaned.match(/https?:\/\/[^\s"'<>]+/)
     const url = m?.[0]
@@ -426,7 +454,7 @@ const handleXiaohongshu = withParseForward(wrapWithErrorHandler(
   {
     businessName: '小红书视频解析'
   }
-))
+), 'xiaohongshu')
 
 // 包装引用解析函数（支持 #解析 和 #弹幕解析）
 const handlePrefix = wrapWithErrorHandler(

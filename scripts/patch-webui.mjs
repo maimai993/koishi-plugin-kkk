@@ -101,6 +101,14 @@ const appFieldCall = (field) => {
   if (field.type === 'boolean') {
     return 's(' + path + ',' + q(field.label) + ',' + description + (disabled ? ',' + disabled : '') + ')'
   }
+  /** 多选（checkboxGroup）：面板用 renderCheckboxGroup，选项来自字段的 options */
+  if (field.type === 'checkboxGroup') {
+    const options = '[' + (field.options ?? [])
+      .map((option) => '{value:' + q(option.value) + ',label:' + q(option.label) + '}')
+      .join(',') + ']'
+    return 'n(' + path + ',' + q(field.label) + ',' + description + ',' + options
+      + (disabled ? ',' + disabled : '') + ')'
+  }
   const opts = ["type:" + q(field.type === 'number' ? 'number' : 'text')]
   if (field.type === 'number') {
     opts.push('fallback:' + Number(field.default))
@@ -235,6 +243,73 @@ const SWITCH = ';case' + q('qq') + ':return(0,U.jsx)(' + COMPONENT + ',{...e})'
 const CATEGORY_ANCHOR = ',{key:' + q('pushlist') + ',label:' + q('推送列表') + ',description:' + q('订阅 JSON') + '}'
 const SWITCH_ANCHOR = 'case' + q('pushlist') + ':return(0,U.jsx)(MR,{...e})'
 const COMPONENT_ANCHOR = ',PR=e=>{switch(e.activeFile){'
+
+/* ------------------------------------------------------------------ *
+ * 「Koishi 设置」分类：插件在 Koishi 里的运行参数
+ * ------------------------------------------------------------------ */
+
+const KOISHI_START = '/*KKK-KOISHI-START*/'
+const KOISHI_END = '/*KKK-KOISHI-END*/'
+const KOISHI_COMPONENT = 'KKKNativeConfig'
+const KOISHI_CATEGORY = '{key:' + q('koishi') + ',label:' + q('Koishi 设置') + ',description:' + q('插件本体设置') + '}'
+const KOISHI_SWITCH = ';case' + q('koishi') + ':return(0,U.jsx)(' + KOISHI_COMPONENT + ',{...e})'
+
+/**
+ * 这一分类里的字段渲染器调用。
+ *
+ * 存的位置是 koishi.yml 里本插件的**顶层键**（dataPath / debug / autoParse / webUiAuth），
+ * 所以路径写 ['koishi', 字段名]，服务端（src/webui.ts 的 NATIVE_PANEL_KEYS）拆出来写回顶层。
+ *
+ * **masters 不在这里**：主人账号属于 Koishi 的权限体系，而面板是免登录页面，
+ * 不该给它开口子 —— 仍然只在 koishi.yml 里改（控制台那边也全部隐藏了）。
+ */
+const koishiFieldCode = [
+  'n(' + q('Koishi 设置') + ',' + q('插件在 Koishi 里的运行参数。改完点右下角保存即可 —— 会写回 koishi.yml 并热重载，不用重启。') + ')',
+  'r(' + q('基础') + ',(0,U.jsxs)(U.Fragment,{children:[' + [
+    'i(' + arr(['koishi', 'autoParse']) + ',' + q('自动解析') + ',' + q('群里有人发链接（或回复一条带链接的消息）就自动解析，不用打指令。') + ')',
+    'i(' + arr(['koishi', 'debug']) + ',' + q('调试日志') + ',' + q('在日志里输出调试信息，排查问题时才需要打开 —— 打开后日志会很吵。') + ')',
+    'a(' + arr(['koishi', 'dataPath']) + ',' + q('数据目录') + ',' + q('配置、数据库、临时文件都放在这里（一般是绝对路径，例如 D:/devkoishi/data）。改完需要重启 Koishi 才生效。') + ',{type:' + q('text') + '})',
+    'i(' + arr(['koishi', 'webUiAuth']) + ',' + q('面板需要登录控制台') + ',' + q('打开时 /kkk 面板要求先登录 Koishi 控制台（装了 auth 插件的部署）。没装 auth 插件时本来就没有登录这一说，这里不生效。') + ')'
+  ].join(',') + ']}))'
+].join(',')
+
+const koishiComponentCode = KOISHI_COMPONENT
+  + '=({config:e,renderers:t})=>{let{renderPageHeader:n,renderSubSection:r,renderSwitch:i,renderTextField:a}=t;return(0,U.jsxs)(U.Fragment,{children:[' + koishiFieldCode + ']})}'
+
+/** 去掉上次插入的 Koishi 分类片段（可反复执行） */
+function stripKoishiCategory (text) {
+  let out = text
+  for (;;) {
+    const start = out.indexOf(KOISHI_START)
+    if (start < 0) break
+    const end = out.indexOf(KOISHI_END, start)
+    if (end < 0) break
+    const from = out[start - 1] === ',' ? start - 1 : start
+    out = out.slice(0, from) + out.slice(end + KOISHI_END.length)
+  }
+  out = out.split(',' + KOISHI_CATEGORY).join('')
+  out = out.split(KOISHI_SWITCH).join('')
+  return out
+}
+
+function patchKoishiCategory (text, name) {
+  if (!text.includes(KOISHI_COMPONENT) && !text.includes(',' + CATEGORY)) return text
+  let out = stripKoishiCategory(text)
+  // 分类入口：插在「QQ 适配器」之后
+  const categoryAnchor = ',' + CATEGORY
+  if (out.includes(categoryAnchor)) {
+    out = out.replace(categoryAnchor, categoryAnchor + ',' + KOISHI_CATEGORY)
+  } else {
+    console.warn('[kkk] ' + name + '：没找到「QQ 适配器」分类入口，跳过 Koishi 分类')
+    return text
+  }
+  // 分发 switch：插在 QQ 的 case 之后
+  if (out.includes(SWITCH)) out = out.replace(SWITCH, SWITCH + KOISHI_SWITCH)
+  // 组件定义：和 QQ 组件一样塞在 PR 前面
+  if (out.includes(COMPONENT_ANCHOR)) out = out.replace(COMPONENT_ANCHOR, ',' + KOISHI_START + koishiComponentCode + KOISHI_END + COMPONENT_ANCHOR)
+  console.log('[kkk] 「Koishi 设置」分类已注入: ' + name)
+  return out
+}
 
 /** 去掉上次插入的组件（按标记切掉） */
 function stripComponent (text) {
@@ -381,7 +456,7 @@ const TEXT_SWAPS = [
  * 用户实测反馈「关闭合并转发 还是合并的」—— 之前这个开关只管「用谁的身份展示」，
  * 关掉照样合并；现在它同时管「要不要合并」：打开才合并（触发者身份），关掉就逐条发。
  */
-const FAKE_FORWARD_DESC = '打开时，一次解析产生的所有内容（卡片、图片、视频、评论…）合并成一条转发消息发出，'
+const FAKE_FORWARD_DESC = '**全局合并转发（优先级最高）**：打开时所有平台的解析结果都合并成一条转发消息发出，'
   + '转发用触发者身份展示；过程提示（开始解析 / 下载中 / 发送中…）不会进转发。**关掉就不合并**，'
   + '内容像以前一样一条一条发。只有支持合并转发的适配器有效果（QQ 官方适配器没有这个能力，会自动退化成逐条发送）。'
 
@@ -691,6 +766,79 @@ function applyTextReplacements (text, name) {
   return out
 }
 
+/* ---------------- 合并转发：全局内容 + 各平台开关与内容 ---------------- */
+
+/**
+ * 「合并转发」相关字段。
+ *
+ * 语义（见 src/karin/module/utils/ParseForward.ts）：
+ *   - **全局优先**：通用页的「解析结果合并转发」（app.fakeForward）打开 → 所有平台都合并；
+ *   - 全局关着时，才看各平台页里的「合并转发（本平台）」开关（`<平台>.forward`）；
+ *   - 合并内容也是两级：全局 app.forwardContent，平台 `<平台>.forwardContent`（留空 = 用全局那份）；
+ *   - 没列出来的内容单独直发（例如 OneBot 的转发节点装不下大视频）。
+ *
+ * 注入点：通用页的 app.fakeForward 那一项**后面**（内容多选），
+ * 以及每个平台页「解析开关」那一项**后面**（本平台开关 + 内容多选）。
+ * 直接用渲染器工厂上的 t.renderSwitch / t.renderCheckboxGroup，不依赖各页自己的局部别名。
+ */
+const FORWARD_START = '/*KKK-FORWARD-START*/'
+const FORWARD_END = '/*KKK-FORWARD-END*/'
+
+const FORWARD_OPTIONS = '[' + [['text', '文字'], ['image', '图片'], ['video', '视频'], ['file', '文件']]
+  .map(([value, label]) => '{value:' + q(value) + ',label:' + q(label) + '}').join(',') + ']'
+
+const FORWARD_SWITCH_DESC = '本平台单独打开合并转发。**全局优先**：通用里的「解析结果合并转发」打开时，所有平台都会合并（这里开不开都一样）；只有全局关着时这个开关才起作用。默认关闭。'
+const FORWARD_CONTENT_DESC = '合并转发里包含哪些内容：没勾选的内容会**单独直发**，不进转发节点。留空 = 用通用里那份全局设置。提示：视频体积大时有些适配器（如 NapCat）会拒绝整个转发节点，这时会自动改成单独发送，不会丢内容。'
+const FORWARD_GLOBAL_CONTENT_DESC = '全局合并转发里包含哪些内容（通用页这个开关打开时生效，所有平台共用）：没勾选的内容单独直发。视频类内容建议先不勾——转发节点太大的话适配器会整条拒绝。语音和 markdown 不在候选里：QQ 的聊天记录不支持语音气泡，markdown 只有官方 bot 认、而官方适配器没有合并转发能力。'
+
+/** 平台页的锚点：紧跟在「解析开关」那一项之后插入 */
+const FORWARD_TABS = [
+  ['douyin', '抖音', 'c(' + arr(['douyin', 'switch']) + ',' + q('解析开关')],
+  ['bilibili', '哔哩哔哩', 'c(' + arr(['bilibili', 'switch']) + ',' + q('解析开关')],
+  ['kuaishou', '快手', 'a(' + arr(['kuaishou', 'switch']) + ',' + q('解析开关')],
+  ['xiaohongshu', '小红书', 's(' + arr(['xiaohongshu', 'switch']) + ',' + q('解析开关')]
+]
+
+/** 在「某个字段渲染调用」后面插一段代码：按调用里的路径字面量定位，再做括号配对 */
+function insertAfterCall (text, needle, code) {
+  const at = text.indexOf(needle)
+  if (at < 0) return text
+  const open = text.lastIndexOf('(', at)
+  if (open < 0) return text
+  const close = matchParen(text, open)
+  if (close < 0) return text
+  return text.slice(0, close + 1) + ',' + code + text.slice(close + 1)
+}
+
+/** 平台页里那一段：小标题 + 本平台开关 + 本平台内容多选 */
+function forwardSectionCode (platform, label) {
+  return 't.renderSubSection(' + q('合并转发') + ',(0,U.jsxs)(U.Fragment,{children:['
+    + 't.renderSwitch(' + arr([platform, 'forward']) + ',' + q('合并转发（' + label + '）') + ',' + q(FORWARD_SWITCH_DESC) + ')'
+    + ',t.renderCheckboxGroup(' + arr([platform, 'forwardContent']) + ',' + q('合并转发内容') + ',' + q(FORWARD_CONTENT_DESC) + ',' + FORWARD_OPTIONS + ')'
+    + ']}))'
+}
+
+function patchForwardFields (text, name) {
+  // 先清掉上次注入的（脚本可反复执行）
+  let out = stripMarked(text, FORWARD_START, FORWARD_END)
+  const before = out
+
+  // ① 通用页：全局合并内容（开关本身是原版就有的 app.fakeForward）
+  out = insertAfterCall(out, arr(['app', 'fakeForward']) + ',' + q('解析结果合并转发'),
+    FORWARD_START + 't.renderCheckboxGroup(' + arr(['app', 'forwardContent']) + ',' + q('合并转发内容（全局）')
+    + ',' + q(FORWARD_GLOBAL_CONTENT_DESC) + ',' + FORWARD_OPTIONS + ')' + FORWARD_END)
+
+  // ② 平台页：本平台开关 + 本平台内容
+  for (const [platform, label, anchor] of FORWARD_TABS) {
+    out = insertAfterCall(out, anchor, FORWARD_START + forwardSectionCode(platform, label) + FORWARD_END)
+  }
+
+  const hits = (out.match(/KKK-FORWARD-START/g) || []).length
+  if (hits) console.log('[kkk] 合并转发字段共 ' + hits + ' 处: ' + name)
+  void before
+  return out
+}
+
 // 主包和布局在 assets/ 下，index.html 在上一级
 const files = [
   ...fs.readdirSync(webAssets).filter((name) => /\.js$/.test(name)).map((name) => path.join(webAssets, name)),
@@ -721,6 +869,9 @@ for (const file of files) {
 
     // 3. 组件定义（塞在 PR 前面，同一个模块作用域，能用 U / Q 这些打包期变量）
     if (text.includes(COMPONENT_ANCHOR)) text = text.replace(COMPONENT_ANCHOR, ',' + START + componentCode + END + COMPONENT_ANCHOR)
+
+    // 4. 「Koishi 设置」分类（必须在 QQ 分类注入之后：它锚定的是 QQ 那一块）
+    text = patchKoishiCategory(text, name)
   }
 
   if (/DesktopLayout|MobileLayout/.test(name)) {
@@ -737,6 +888,7 @@ for (const file of files) {
   text = patchAppSections(text, name)
   // 同样必须晚于 patchPermFields / patchAppSections：它锚定的是「渲染设置」的收尾括号
   text = patchRendererSetting(text, name)
+  text = patchForwardFields(text, name)
   text = patchDescriptions(text, name)
   text = applyTextReplacements(text, name)
 

@@ -30,6 +30,33 @@ import { QQ_KEYS, readQqOptions } from './qqOptions'
 const COOKIE_NAME = 'kkk_config_token'
 const TOKEN_TTL = 7 * 24 * 60 * 60 * 1000
 
+/**
+ * 面板「Koishi 设置」分类里能改的项 —— 也就是 Koishi 侧的原生选项（koishi.yml 里本插件的顶层键）。
+ *
+ * **masters 不在这里**：主人账号是 Koishi 的权限体系（谁能执行主人指令、谁收报错），
+ * 面板是免登录页面，不该给它开这个口子 —— 仍然只在 koishi.yml 里改。
+ * 控制台那边也已经全部隐藏，所以这 4 项是唯一还有图形入口的地方。
+ */
+const NATIVE_PANEL_KEYS = ['dataPath', 'debug', 'autoParse', 'webUiAuth'] as const
+type NativePanelKey = typeof NATIVE_PANEL_KEYS[number]
+
+/** 面板要显示的原生设置（只取白名单，缺的用默认值兜底） */
+const NATIVE_PANEL_DEFAULTS: Record<NativePanelKey, any> = {
+  dataPath: 'data',
+  debug: false,
+  autoParse: true,
+  webUiAuth: true
+}
+
+const readNativePanelOptions = (source: any): Record<string, any> => {
+  const out: Record<string, any> = {}
+  for (const key of NATIVE_PANEL_KEYS) {
+    const value = source?.[key]
+    out[key] = value === undefined || value === null ? NATIVE_PANEL_DEFAULTS[key] : value
+  }
+  return out
+}
+
 export interface WebUiDeps {
   ctx: Context
   config: any
@@ -345,7 +372,8 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
     // 在 Koishi 这边它就存在 `upstream` 里，启动时同步进 config.json。
     // 另外附一份 `qq`（「QQ 适配器」分类）：面板/切片/番剧选集/卡片识别这些是 Koishi 侧才有的开关，
     // 面板里作为独立分类显示，保存时由下面的 POST 拆出来写回 koishi.yml。
-    ok(response, { ...(config?.upstream ?? {}), qq: readQqOptions(config) }, '')
+    // koishi 这一组是「Koishi 设置」分类：Koishi 侧的原生选项（masters 不在里面，见 NATIVE_PANEL_KEYS）
+    ok(response, { ...(config?.upstream ?? {}), qq: readQqOptions(config), koishi: readNativePanelOptions(config) }, '')
   })
 
   server.post('/kkk/v1/config', async (response: any) => {
@@ -357,10 +385,20 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
       //   - `qq`（面板里的「QQ 适配器」分类）→ 写回插件自己的配置（koishi.yml）
       //   - 其余整份 → upstream（Karin 版的 config.json 形状）
       // 保存都走 scope.update → 落盘 koishi.yml → 热重载 → 启动时同步回 config.json
-      const { qq, ...upstream } = normalizeLists(body)
+      const { qq, koishi: nativeGroup, ...upstream } = normalizeLists(body)
+      // 「Koishi 设置」分类：只认白名单里的键（前端传什么都写不进来别的东西）
+      const native: Record<string, any> = {}
+      if (nativeGroup && typeof nativeGroup === 'object') {
+        for (const key of NATIVE_PANEL_KEYS) {
+          if (nativeGroup[key] === undefined) continue
+          native[key] = typeof NATIVE_PANEL_DEFAULTS[key] === 'boolean' ? !!nativeGroup[key] : String(nativeGroup[key])
+        }
+      }
       await (ctx as any).scope.update(normalize({
         ...(rawConfig ?? config),
         ...(qq && typeof qq === 'object' ? { qq: { ...readQqOptions(config), ...qq } } : {}),
+        // 注意：原生这几项是**顶层键**（dataPath / debug / autoParse / webUiAuth），不要塞进分组
+        ...native,
         upstream
       }))
       /**

@@ -340,8 +340,9 @@ export const uploadFile = async (event: Message, file: fileInfo, videoUrl: strin
       } else {
         // 不是群文件
         logger.mark(`${logger.blue('主动消息:')} 视频大小: ${newFileSize.toFixed(1)}MB 正在通过${logger.yellow('karin.sendMsg')}回复...`)
-        const status = await karin.sendMsg(selfId, contact, [segment.video(File)], { retryCount: 0 })
-        sendStatus = status.messageId ? true : false
+        // 兼容层已经把「没拿到消息 ID」当成失败抛出（见 compat/sendError），所以这里没有异常就是发出去了
+        await karin.sendMsg(selfId, contact, [segment.video(File)], { retryCount: 0 })
+        sendStatus = true
       }
     } else {
       // 不是主动消息
@@ -352,8 +353,9 @@ export const uploadFile = async (event: Message, file: fileInfo, videoUrl: strin
       } else {
         // 不是文件
         logger.mark(`${logger.blue('被动消息:')} 视频大小: ${newFileSize.toFixed(1)}MB 正在通过${logger.yellow('e.reply')}回复...`)
-        const status = await event.reply(segment.video(File) || videoUrl)
-        sendStatus = status.messageId ? true : false
+        // 同上：异常才是失败（没拿到消息 ID 已经由兼容层抛出来了）
+        await event.reply(segment.video(File) || videoUrl)
+        sendStatus = true
       }
     }
     // 发成功了就把「发送中…」收掉，群里只留下真正的视频
@@ -456,6 +458,21 @@ export const downloadVideoFile = async (event: Message, downloadOpt: downloadFil
        */
       markOnlinePlayerOverride()
       logger.mark(`[在线播放] 视频 ${fileSizeInMB}MB 超过全局上限 ${Config.app.filelimit}MB，按「超限转在线播放」继续下载`)
+      /**
+       * **一定要给用户一句话**（用户实测反馈：「为什么用在线地址？没有超过上限大小的提示」）。
+       *
+       * 这条路径以前是**完全静默**的：视频照样下载，然后 handler 那边看到「在线播放」标记就登记
+       * 播放会话、回一条链接 —— 用户只拿到一个播放地址，完全不知道为什么视频没发到群里。
+       * 提示属于「过程提示」，用 withoutForwardCollect 包住，别进合并转发。
+       */
+      try {
+        await withoutForwardCollect(() => event.reply(
+          `视频 ${fileSizeInMB}MB 超过设定的最大上传大小 ${Config.app.filelimit}MB，` +
+          '已按「超限转在线播放」改为在线播放：视频不发到群里，稍后给你播放链接'
+        ))
+      } catch (error: any) {
+        logger.debug('[在线播放] 超限提示发送失败: ' + String(error?.message ?? error))
+      }
     } else {
       // 转播开着但这一档连在线播放上限都超了：明确说一句「按原来的方式处理」，别让人以为是坏了
       if (redirectOn && !playerAccepts) {

@@ -22,7 +22,7 @@ import { PLUGIN_DIR_NAME, tryGetRuntime } from '../compat/runtime'
 // 解析阶段（「下载进度」指令读的就是这里登记的状态）
 import { DOWNLOAD_STAGES, clearParseStage, updateDownloadStage } from '../karin/module/utils/Network/Downloader'
 import { getParseOverride } from '../karin/module/utils/ParseOverride'
-import { registerPlayerRoutes } from './server'
+import { isStandalonePlayerReady, registerPlayerRoutes } from './server'
 import {
   normalizeExpireMinutes,
   registerPlayerSession,
@@ -127,6 +127,61 @@ export function isPlayerOversizeRedirectOn (): boolean {
  */
 export function shouldRedirectOversizeToPlayer (): boolean {
   return isOnlinePlayerEnabled() && isPlayerOversizeRedirectOn()
+}
+
+/**
+ * **「强制在线播放的适配器」名单**（通用 → 在线播放器设置，用户要求）。
+ *
+ * ⚠️ 填的是**适配器平台名**，不是解析平台名 —— 用户要的场景是：
+ * **B站私聊机器人**（\`koishi-plugin-adapter-bilibili-dm\`，它的 \`platform\` 就是 \`bilibili\`）
+ * 没法发视频文件，所以**从这个适配器进来的消息，解析完一律只给在线播放链接**。
+ * 写成逗号分隔的一串（\`bilibili\` / \`bilibili,onebot\`），留空 = 不强制。
+ */
+export function forceOnlinePlayerAdapters (): string[] {
+  try {
+    const value = (tryGetRuntime()?.config as any)?.forceOnlinePlayer
+    if (Array.isArray(value)) return value.map((item: any) => String(item).toLowerCase()).filter(Boolean)
+    if (typeof value === 'string') {
+      return value.split(/[,，\s]+/).map((item) => item.trim().toLowerCase()).filter(Boolean)
+    }
+    return []
+  } catch {
+    return []
+  }
+}
+
+/** 这个**适配器**是不是在「强制在线播放」名单里 */
+/** 「本实例独立端口没监听上」这条只提醒一次，不然每条链接都刷一行 */
+let warnedStandaloneMismatch = false
+
+export function isForceOnlinePlayerAdapter (platform?: string): boolean {
+  if (!platform) return false
+  return forceOnlinePlayerAdapters().includes(String(platform).toLowerCase())
+}
+
+/** 取当前会话的适配器平台名（兼容层里真实 Bot 挂在 bot.bot 上） */
+export function adapterPlatformOf (e: any): string {
+  return String(e?.bot?.bot?.platform ?? e?.bot?.platform ?? e?.platform ?? '')
+}
+
+/**
+ * 适配器在名单里：**在解析一开始就把这次标记成在线播放**。
+ *
+ * 平台 handler 进来第一件事调它，后面的取弹幕、体积判定、发送就都自动按「在线播放」走
+ * （见各平台里的 \`isOnlinePlayerRequest()\` 分支）。播放器总开关关着时不动 —— 没有播放页可去。
+ * @param e 本次解析的消息事件（用它取**适配器平台名**）
+ * @returns 是否已经标记成在线播放
+ */
+export function applyForceOnlinePlayer (e: any): boolean {
+  if (!isOnlinePlayerEnabled()) return false
+  const platform = adapterPlatformOf(e)
+  if (!isForceOnlinePlayerAdapter(platform)) return false
+  markOnlinePlayerOverride()
+  // 日志没绑定（例如单测/独立脚本里）不能影响功能本身
+  try {
+    logger.mark('[在线播放] 适配器 ' + platform + ' 在「强制在线播放的适配器」名单里，本次一律走在线播放')
+  } catch { /* 忽略 */ }
+  return true
 }
 
 /**
@@ -266,7 +321,20 @@ let warnedLocalBase = false
 export function buildPlayerLink (token: string): string {
   const config: any = tryGetRuntime()?.config ?? {}
   const base = String(config.playerBaseUrl ?? '').replace(/\/+$/, '')
-  if (base) return base + '/kkk/player/' + token
+  if (base) {
+    /**
+     * 本实例**没监听上独立端口**，但链接指向公网域名 —— 那个域名反代的是独立端口，
+     * 于是用户点开访问的其实是**抢到端口的另一台实例**（它的会话表里没有这个 token），
+     * 页面就会显示「链接已过期」。线上真实故障，这里至少要说清楚一次。
+     */
+    if (!isStandalonePlayerReady() && !warnedStandaloneMismatch) {
+      warnedStandaloneMismatch = true
+      logger.warn('[在线播放] 本实例没有监听上独立端口（被别的进程占了），但链接指向 ' + base
+        + ' —— 如果那个域名反代到同一个端口，用户点开会看到「链接已过期」（其实连的是抢到端口的那台实例）。'
+        + '请换一个「播放器端口」，或者停掉同机另一台占着该端口的 Koishi 实例')
+    }
+    return base + '/kkk/player/' + token
+  }
   const port = Number(config.playerPort) > 0 ? Number(config.playerPort) : koishiPort()
   const link = 'http://' + localAddress() + ':' + port + '/kkk/player/' + token
   if (!warnedLocalBase) {
@@ -397,6 +465,11 @@ const TIP_PREPARING = '下载完成，正在准备在线播放…'
  */
 export async function publishOnlinePlayer (e: any, input: {
   videoPath: string
+  /**
+   * 单独的音轨文件（可选）：B站这类音视频分离的流，**默认不再用 ffmpeg 合成**，
+   * 两份一起交给播放页，浏览器里同时播（用户要求）。点「服务器合并后下载」时才按需合成。
+   */
+  audioPath?: string
   title?: string
   platform?: string
   danmaku?: any
@@ -426,7 +499,11 @@ export async function publishOnlinePlayer (e: any, input: {
      * 体积上限：超过就不做在线播放，回一句说明并返回 false ——
      * 调用方拿到 false 会退回「直接发送视频文件」，用户不会什么都没有。
      */
-    const sizeMB = Number(fs.statSync(input.videoPath).size) / 1024 / 1024
+    /** 有独立音轨时按「画面 + 声音」的总和算，免得两条加起来把磁盘塞爆 */
+    const audioBytes = input.audioPath && fs.existsSync(input.audioPath)
+      ? Number(fs.statSync(input.audioPath).size) || 0
+      : 0
+    const sizeMB = (Number(fs.statSync(input.videoPath).size) + audioBytes) / 1024 / 1024
     const limitMB = await resolvePlayerSizeLimitMB()
     if (limitMB > 0 && sizeMB > limitMB) {
       /**
@@ -447,6 +524,7 @@ export async function publishOnlinePlayer (e: any, input: {
     const localOnly = !hasPublicBaseUrl()
     const session = registerPlayerSession({
       videoPath: input.videoPath,
+      audioPath: input.audioPath,
       title: input.title,
       platform: input.platform,
       danmaku,

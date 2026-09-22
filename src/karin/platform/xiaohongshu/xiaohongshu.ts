@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import { platformOf } from '@/module/utils/ImageSlice'
 import { buildMarkdownImageMessage } from '@/module/utils/QqPanel'
 import { sendParseTip } from '@/module/utils/parseTip'
 
@@ -24,7 +25,9 @@ import {
   Render,
   uploadFile
 } from '@/module'
-import { ParseSteps } from '@/module/utils/ParseSteps'
+// 注意用相对写法：@/ 别名在仓库里指向 karin/，@/player 会被解析成不存在的 karin/player
+import { applyForceOnlinePlayer } from '../../../player'
+import { ParseSteps, SendTasks } from '@/module/utils/ParseSteps'
 import type { ParseWorkType } from '@/module/db'
 import { Config } from '@/module/utils/Config'
 
@@ -90,6 +93,11 @@ export class Xiaohongshu extends Base {
   async XiaohongshuHandler(data: XiaohongshuIdData) {
     /** 本次解析的步骤容器：单步失败只跳过、不中断，最后统一渲染一张错误卡片（见 ParseSteps） */
     const steps = new ParseSteps()
+    /** 发送任务组：内容（详情卡片 / 图片）与视频各走一条线，谁先就绪谁先发 */
+    /** 强制在线播放名单里的平台：本次一律走在线播放（见 player/index.ts） */
+    // 适配器在「强制在线播放的适配器」名单里（例如 B站私聊机器人 platform === 'bilibili'）
+    applyForceOnlinePlayer(this.e)
+    const sends = new SendTasks(steps)
     // 诊断：把入参和每一步的结果打出来，定位「只提示不解析」卡在哪
     logger.mark('[小红书] 开始解析: note_id=' + String(data?.note_id ?? '（空）') + ' xsec_token=' + (data?.xsec_token ? '有' : '（空）') + ' type=' + String(this.type))
     if (Config.amagi.cookies.xiaohongshu === '') {
@@ -262,7 +270,7 @@ export class Xiaohongshu extends Base {
       .filter(Boolean)
     if (!noteCard.video && noteImages.length) {
       try {
-        const mdMessage = await buildMarkdownImageMessage(noteImages)
+        const mdMessage = await buildMarkdownImageMessage(noteImages, 420, platformOf(this.e))
         if (mdMessage) {
           await this.e.reply(mdMessage)
           logger.mark('[小红书] 图文图片已用一条 markdown 发送，共 ' + noteImages.length + ' 张')
@@ -532,15 +540,18 @@ export class Xiaohongshu extends Base {
     }
 
     /**
-     * 视频笔记：下载在前面就启动了（后台跑），这里才等它收尾然后发送。
+     * 视频笔记：下载在前面就启动了（后台跑）。
+     *
+     * **视频单独一条线**：下载一好就发，不等详情卡片与图片发完
+     * （用户要求：「所有东西的发送不需要等待全部完成」）。
      *
      * - 下载成功 → 上传本地文件；
      * - 下载失败/被跳过 → 退回直链发送（原来选流失败时的兜底行为），
      *   失败本身已经记在 steps 里，最后统一报错。
      */
-    const downloadedVideo = (await downloadTask) ?? null
     if (willSendVideo) {
-      await steps.run('发送视频', async () => {
+      sends.add('发送视频', async () => {
+        const downloadedVideo = (await downloadTask) ?? null
         if (downloadedVideo) {
           await uploadFile(this.e, downloadedVideo, xhsVideoUrl, { message_id: this.e.messageId })
         } else if (xhsVideoUrl) {
@@ -554,9 +565,10 @@ export class Xiaohongshu extends Base {
     }
 
     /**
-     * 整个流程跑完再统一报错：中间失败过的步骤合成一个错误抛出去，
+     * 等两条线都跑完，再统一报错：中间失败过的步骤合成一个错误抛出去，
      * 由 ErrorHandler 渲染**一张**错误卡片（此时能发的卡片/图片/视频都已经发出去了）。
      */
+    await sends.settle()
     steps.throwIfFailed()
     return true
   }

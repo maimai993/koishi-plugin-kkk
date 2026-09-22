@@ -24,8 +24,17 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 interface ForwardBag {
   /** 本次解析要发到哪个频道（只有发往这里的才收） */
   peer: string
-  /** 已经攒下来的元素 */
+  /** 已经攒下来的元素（拍平，给「哪些内容进转发」的判断用） */
   elements: any[]
+  /**
+   * **按「每次发送」分组的元素**（一次 `reply()` = 一组）。
+   *
+   * 合并转发里**一组 = 一个聊天记录条目**：用户实测「一个条目里塞卡片 + 评论 + 视频时，
+   * QQ 只加载了视频」，所以每条消息要各自成条目；但**切片是同一张卡片的若干片，
+   * 必须留在同一个条目里**（用户要求：「切片还是一条信息内」）——
+   * 靠 `e.reply([...])` 的调用边界天然分组，正好两边都满足。
+   */
+  groups: any[][]
   /** >0 表示当前这一段是「过程提示」，不进转发 */
   bypass: number
 }
@@ -37,12 +46,26 @@ export const COLLECTED_MESSAGE_ID = 'forward-collected'
 
 /** 在收集上下文里执行（peer 为空则不收任何东西） */
 export function runWithForwardBag<T> (peer: string, fn: () => Promise<T>): Promise<T> {
-  return storage.run({ peer: String(peer ?? ''), elements: [], bypass: 0 }, fn)
+  return storage.run({ peer: String(peer ?? ''), elements: [], groups: [], bypass: 0 }, fn)
 }
 
 /** 当前收集袋（不在解析链路里时是 undefined） */
 export function currentForwardBag (): ForwardBag | undefined {
   return storage.getStore()
+}
+
+/**
+ * 当前是不是「合并转发收集模式」（发出去的东西只会被攒起来，不会真的发）。
+ *
+ * 为什么需要它：收集模式下 `reply()` 会直接回一个**假的**消息 ID（`forward-collected`），
+ * 调用方（尤其是 `ImageSlice` 的「先普通发一次、失败再切片」）看到非空 ID 就会以为发成功了 ——
+ * 于是那张 2880×35862 的评论卡**根本没被切**、整张塞进了转发节点，
+ * `send_group_forward_msg` 因为节点内容过大整条失败（用户实测就是这个现象）。
+ * 收集模式下拿不到任何真实反馈，所以调用方要改成**按尺寸自己判断**。
+ */
+export function isForwardCollecting (): boolean {
+  const bag = storage.getStore()
+  return !!bag && bag.bypass === 0
 }
 
 /**
@@ -72,20 +95,37 @@ export function collectForward (peer: string, content: any): boolean {
   const target = String(peer ?? '')
   if (!bag.peer || !target || target !== bag.peer) return false
   const list = Array.isArray(content) ? content : [content]
-  let added = 0
+  // 一次调用 = 一组（= 合并转发里的一个聊天记录条目）；空元素不进组
+  const group: any[] = []
   for (const element of list) {
     if (element === undefined || element === null || element === '') continue
     bag.elements.push(element)
-    added += 1
+    group.push(element)
   }
-  return added > 0
+  if (group.length) bag.groups.push(group)
+  return group.length > 0
 }
 
-/** 取出并清空收集到的内容 */
+/** 取出并清空收集到的内容（拍平） */
 export function drainForward (): any[] {
   const bag = storage.getStore()
   if (!bag || !bag.elements.length) return []
   const elements = bag.elements
   bag.elements = []
+  bag.groups = []
   return elements
+}
+
+/**
+ * 取出并清空收集到的内容，**按「每次发送」分组**（一次 `reply()` 一组）。
+ *
+ * 合并转发用它建节点：一组 = 一个聊天记录条目。
+ */
+export function drainForwardGroups (): any[][] {
+  const bag = storage.getStore()
+  if (!bag || !bag.groups.length) return []
+  const groups = bag.groups
+  bag.groups = []
+  bag.elements = []
+  return groups
 }

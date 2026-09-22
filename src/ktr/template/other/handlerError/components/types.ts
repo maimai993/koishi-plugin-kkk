@@ -115,6 +115,22 @@ export interface ApiErrorData {
   commitHash?: string
   /** 适配器信息 */
   adapterInfo?: AdapterInfo
+  /**
+   * 错误上报信息（面板「通用 → 错误上报」开着、且上传成功时才有）。
+   *
+   * 卡片上印出**编号**和反馈群，用户截图或照着念编号进群提问，
+   * 站长在收集站上按编号就能查到这次报错的完整日志与环境。
+   */
+  report?: {
+    /** 收集站上的编号 */
+    id: string
+    /** 详情页地址 */
+    url: string
+    /** 反馈群号 */
+    group: string
+    /** 反馈群加群链接（https://qm.qq.com/q/群号） */
+    groupUrl: string
+  }
   /** 是否为验证流程 */
   isVerification?: boolean
   /** 验证链接 */

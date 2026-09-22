@@ -4,7 +4,8 @@ import { logger, type Message } from 'node-karin'
 import { getBuildMetadata } from '@/module'
 import { EmojiReactionManager } from '@/module/utils/EmojiReaction'
 
-import { sliceImageToMarkdown } from '../ImageSlice'
+import { uploadErrorReport, type ErrorReportResult } from '../ErrorReport'
+import { platformOf, sliceImageToElements } from '../ImageSlice'
 import { renderErrorImage } from './render'
 import { sendErrorToAdmins, sendErrorToAllMasters, sendErrorToConfiguredIds, sendErrorToMaster, sendErrorToTrigger } from './sender'
 import { getStrategies } from './strategy'
@@ -23,13 +24,33 @@ export const handleBusinessError = async (
     const buildMetadata = getBuildMetadata()
     const adapterInfo = event.bot?.adapter ? event.bot.adapter : undefined
 
+    /**
+     * **先上报，再渲染卡片**：上报编号要印在卡片上、也要拼进消息里，
+     * 让用户拿着编号进群提问。上传失败/被关掉都只是返回 null，不挡流程。
+     */
+    let report: ErrorReportResult | null = null
+    try {
+      report = await uploadErrorReport({
+        error,
+        business: options.businessName,
+        event,
+        adapterInfo,
+        // 本次请求捕获到的日志行：structuredLogs 里带着原始串（已在 parseLogsToStructured 里逐行折叠 + 截断）
+        logs: (logs ?? []).map((entry: any) => String(entry?.raw ?? entry?.message ?? ''))
+      })
+    } catch (reportError: any) {
+      // 用 warn：这一条以前写成 debug，结果一个 ReferenceError 被静静吞掉，只有「上传失败」四个字能看到
+      logger.warn('[ErrorHandler] 错误上报异常（忽略，不影响报错本身）: ' + String(reportError?.message ?? reportError))
+    }
+
     const ctx: ErrorContext = {
       error,
       options,
       logs,
       event,
       buildMetadata,
-      adapterInfo
+      adapterInfo,
+      report
     }
 
     for (const strategy of getStrategies()) {
@@ -43,11 +64,12 @@ export const handleBusinessError = async (
     let img = await renderErrorImage(ctx)
     /**
      * 错误卡片也会超长（实测 2880×40000 / 45MB），直接发必被 QQ 拒收 ——
-     * 统一切成 markdown（分片拼接），失败就退回原图。
+     * 统一切片：官方 QQ 切成一条 markdown，OneBot 切成若干图片段（它不渲染 markdown），
+     * 失败就退回原图。
      */
     try {
-      const sliced = await sliceImageToMarkdown(img)
-      if (sliced) img = [sliced]
+      const sliced = await sliceImageToElements(img, platformOf(event))
+      if (sliced?.length) img = sliced
     } catch (sliceError: any) {
       logger.debug('[ErrorHandler] 错误卡片切片失败，按原图发送: ' + String(sliceError?.message ?? sliceError))
     }

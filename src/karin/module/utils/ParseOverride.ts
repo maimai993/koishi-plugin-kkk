@@ -55,12 +55,18 @@ const storage = new AsyncLocalStorage<ParseOverride>()
 
 /**
  * 在参数覆盖的上下文里执行解析。
- * @param override 覆盖项（空对象则直接执行）
+ *
+ * **空覆盖项也要进上下文**（以前是 `if (!Object.keys(override).length) return fn()`）：
+ * 解析期间有些地方会**往覆盖项里写**而不是只读 —— 例如 `markOnlinePlayerOverride()`
+ * （「超限转在线播放」和「强制在线播放的平台」都靠它把本次解析标记成在线播放）。
+ * 纯发链接、什么参数都不带的解析如果没进上下文，这个标记就会**静默失效**，
+ * 表现就是「开了强制在线播放却还是发文件」。
+ *
+ * @param override 覆盖项（可以为空对象，调用方照旧用 `?.xxx` 读）
  * @param fn 解析逻辑
  */
 export function runWithParseOverride<T> (override: ParseOverride, fn: () => Promise<T>): Promise<T> {
-  if (!override || !Object.keys(override).length) return fn()
-  return storage.run(override, fn)
+  return storage.run(override ?? {}, fn)
 }
 
 /** 当前上下文里的覆盖项（不在解析链路里时返回 undefined） */

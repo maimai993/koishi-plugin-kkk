@@ -2,6 +2,18 @@
 export interface bilibiliConfig {
   /** B站解析开关，单独开关，受「总开关」影响 */
   switch: boolean
+  /**
+   * **本平台单独打开合并转发**（全局 `app.fakeForward` 关着时才生效；全局打开 → 全局优先）。
+   * 默认 false：装完不配置就是一条一条发。
+   */
+  forward: boolean
+
+  /**
+   * **本平台合并转发里包含哪些内容**（留空 = 用全局 `app.forwardContent` 那份）：
+   * text 文字 / image 图片 / video 视频 / file 文件。
+   * 没列出来的内容单独直发。
+   */
+  forwardContent: Array<'text' | 'image' | 'video' | 'file'>
 
   /** 解析时发送的内容，可选值：'info'(视频信息)、'comment'(评论图片)、'video'(视频文件) */
   sendContent: ['info' | 'comment' | 'video']

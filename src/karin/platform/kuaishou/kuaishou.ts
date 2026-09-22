@@ -2,11 +2,13 @@ import type { KuaishouVideoWorkResponse } from '@ikenxuan/amagi'
 import { logger, type Message } from 'node-karin'
 
 import { Base, downloadVideoFile, extractTotalBytesFromHeaders, Networks, Render, uploadFile } from '@/module'
-import { ParseSteps } from '@/module/utils/ParseSteps'
+import { ParseSteps, SendTasks } from '@/module/utils/ParseSteps'
 // sendParseTip 单独导入：它在一个无依赖的叶子模块里，避免和平台模块形成循环 import
 import { sendParseTip } from '@/module/utils/parseTip'
 import type { ParseWorkType } from '@/module/db'
 import { Config } from '@/module/utils/Config'
+// 注意用相对写法：@/ 别名在仓库里指向 karin/，@/player 会被解析成不存在的 karin/player
+import { applyForceOnlinePlayer } from '../../../player'
 import { kuaishouComments, type KuaishouDataResult, type KuaishouOneWorkPayload } from '@/platform/kuaishou'
 import type { ExtendedKuaishouOptionsType, KuaishouDataTypes } from '@/types'
 
@@ -101,6 +103,11 @@ export class Kuaishou extends Base {
     this.workType = 'video'
     /** 本次解析的步骤容器：单步失败只跳过、不中断，最后统一渲染一张错误卡片（见 ParseSteps） */
     const steps = new ParseSteps()
+    /** 发送任务组：评论区与视频各走一条线，谁先就绪谁先发 */
+    /** 强制在线播放名单里的平台：本次一律走在线播放（见 player/index.ts） */
+    // 适配器在「强制在线播放的适配器」名单里（例如 B站私聊机器人 platform === 'bilibili'）
+    applyForceOnlinePlayer(this.e)
+    const sends = new SendTasks(steps)
     await sendParseTip(this.e, '快手')
     // 表情接口没换，还是 graphql 那条，`data.visionBaseEmoticons` 两层照旧
     const transformedData = Object.entries(payload.EmojiData.data.visionBaseEmoticons.iconUrls).map(([name, path]) => {
@@ -122,7 +129,7 @@ export class Kuaishou extends Base {
       })
     )
 
-    await steps.run('渲染评论区', async () => {
+    sends.add('渲染评论区', async () => {
     const CommentsData = await kuaishouComments(payload.CommentsData, transformedData)
     const fileHeaders = await new Networks({ url: video_url, headers: this.headers }).getHeaders()
     const fileSizeContent = extractTotalBytesFromHeaders(fileHeaders)
@@ -140,14 +147,20 @@ export class Kuaishou extends Base {
     await this.e.reply(img)
     })
 
-    // 到这里才等下载收尾：卡片早就发出去了
-    const downloadedVideo = (await downloadTask) ?? null
-    if (downloadedVideo) {
-      await steps.run('发送视频', () => uploadFile(this.e, downloadedVideo, video_url, { message_id: this.e.messageId }))
-    } else {
-      logger.warn('[快手] 视频没有下载成功，跳过发送')
-    }
+    /**
+     * **视频单独一条线**：下载一好就发，不等评论区渲染
+     * （用户要求：「所有东西的发送不需要等待全部完成」）。
+     */
+    sends.add('发送视频', async () => {
+      const downloadedVideo = (await downloadTask) ?? null
+      if (!downloadedVideo) {
+        logger.warn('[快手] 视频没有下载成功，跳过发送')
+        return
+      }
+      await uploadFile(this.e, downloadedVideo, video_url, { message_id: this.e.messageId })
+    })
 
+    await sends.settle()
     steps.throwIfFailed()
     return true
   }

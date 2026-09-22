@@ -4,7 +4,9 @@
  * 三条路由（都挂在自己拼的 `/kkk/player` 前缀下，和配置面板的 /kkk 互不干扰）：
  *   GET /kkk/player/:token           播放页（HTML）
  *   GET /kkk/player/:token/video     视频本体，支持 Range（拖进度条靠它）；`?download=1` = 下载
- *   GET /kkk/player/:token/download  同上，等价于 `/video?download=1`（带 Content-Disposition）
+ *   GET /kkk/player/:token/audio     单独的音轨（B站这种音视频分离的）；`?download=1` = 下载音频
+ *   GET /kkk/player/:token/merged    **按需**用 ffmpeg 合成音视频后下载/播放（第一次会慢一两秒）
+ *   GET /kkk/player/:token/download  等价于 `/video?download=1`（带 Content-Disposition）
  *   GET /kkk/player/:token/danmaku   弹幕 JSON
  *
  * 两种落地方式：
@@ -17,15 +19,21 @@
  */
 import fs from 'node:fs'
 import http from 'node:http'
+import path from 'node:path'
 
 import { logger } from 'node-karin'
+
+import { tryGetRuntime } from '../../compat/runtime'
 
 import { renderExpiredPage, renderPlayerPage } from './page'
 import {
   getPlayerSession,
   isValidPlayerToken,
+  markPlayerMerged,
   readPlayerDanmaku,
+  resolvePlayerAudio,
   resolvePlayerCover,
+  resolvePlayerMerged,
   resolvePlayerVideo
 } from './store'
 
@@ -51,6 +59,21 @@ export interface PlayerHttpResponse {
 
 /** 路由前缀 */
 export const PLAYER_ROUTE_PREFIX = '/kkk/player/'
+
+/** 独立端口是否真的监听上了：没监听上时链接指向的公网域名很可能打不到本实例 */
+let standaloneReady = false
+
+/** 查询独立端口是否监听上了（给「生成链接」那边做提示用） */
+export const isStandalonePlayerReady = (): boolean => standaloneReady
+
+/** 面板里配的「播放器公网地址」（没配就是空串） */
+function publicBaseUrl (): string {
+  try {
+    return String((tryGetRuntime()?.config as any)?.playerBaseUrl ?? '').trim()
+  } catch {
+    return ''
+  }
+}
 
 const TEXT_TYPE = 'text/plain; charset=utf-8'
 const HTML_TYPE = 'text/html; charset=utf-8'
@@ -118,13 +141,13 @@ export function sanitizeDownloadName (title: unknown): string {
  * 两个文件名都给：`filename=` 用 ASCII 兜底名（老客户端 / 头编码限制），
  * `filename*=` 用 RFC 5987 的 UTF-8 形式放原名（现代浏览器优先用它，中文名不会变成下划线）。
  */
-export function downloadDisposition (title: unknown): string {
-  const full = sanitizeDownloadName(title) + '.mp4'
+export function downloadDisposition (title: unknown, ext = '.mp4'): string {
+  const full = sanitizeDownloadName(title) + ext
   // 纯中文标题会变成一排下划线（对老客户端毫无意义），这种情况直接给个通用名
   const asciiRaw = full.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_')
   // 只在**扩展名之前**数有效字符：纯中文标题会变成「_____.mp4」，那 3 个字母来自 .mp4 不能算数
-  const asciiBase = asciiRaw.replace(/\.(mp4|mkv|webm|mov)$/i, '')
-  const ascii = /[A-Za-z0-9]/.test(asciiBase) ? asciiRaw : 'video.mp4'
+  const asciiBase = asciiRaw.replace(/\.(mp4|mkv|webm|mov|m4a|aac|mp3)$/i, '')
+  const ascii = /[A-Za-z0-9]/.test(asciiBase) ? asciiRaw : 'video' + ext
   const encoded = encodeURIComponent(full).replace(/['()*]/g, (char) => '%' + char.charCodeAt(0).toString(16).toUpperCase())
   return 'attachment; filename="' + ascii + '"; filename*=UTF-8\'\'' + encoded
 }
@@ -133,27 +156,41 @@ export function downloadDisposition (title: unknown): string {
  * 视频响应：支持 Range，未过期时是 video/mp4。
  * @param download 为 true 时带上 `Content-Disposition: attachment`（浏览器直接下载），Range 照旧支持
  */
-function videoResponse (token: string, range?: string, head = false, download = false): PlayerHttpResponse {
-  const video = resolvePlayerVideo(token)
-  if (!video) return notFound(false)
+/**
+ * 通用文件响应：支持 Range。
+ *
+ * @param file 文件路径与大小
+ * @param contentType 响应的 Content-Type（视频 / 音轨 / 合并后的视频各不同）
+ * @param ext 下载时的扩展名（决定 Content-Disposition 里的文件名）
+ * @param download 是否带 \`Content-Disposition: attachment\`
+ */
+function fileResponse (
+  token: string,
+  file: { path: string, size: number },
+  contentType: string,
+  range?: string,
+  head = false,
+  download = false,
+  ext = '.mp4'
+): PlayerHttpResponse {
   const base: Record<string, string> = {
-    'Content-Type': 'video/mp4',
+    'Content-Type': contentType,
     'Accept-Ranges': 'bytes',
     'Cache-Control': 'no-store'
   }
   // 下载：文件名取会话标题（清洗过），Range 行为不变（浏览器正常下载时也不会带 Range）
-  if (download) base['Content-Disposition'] = downloadDisposition(getPlayerSession(token)?.title)
-  const parsed = parseRange(range, video.size)
+  if (download) base['Content-Disposition'] = downloadDisposition(getPlayerSession(token)?.title, ext)
+  const parsed = parseRange(range, file.size)
   if (parsed === 'invalid') {
     return {
       status: 416,
-      headers: { ...base, 'Content-Range': 'bytes */' + video.size },
+      headers: { ...base, 'Content-Range': 'bytes */' + file.size },
       body: Buffer.from('请求的范围无效')
     }
   }
   if (!parsed) {
-    base['Content-Length'] = String(video.size)
-    return { status: 200, headers: base, file: head ? undefined : { path: video.path, start: 0, end: video.size - 1 } }
+    base['Content-Length'] = String(file.size)
+    return { status: 200, headers: base, file: head ? undefined : { path: file.path, start: 0, end: file.size - 1 } }
   }
   const length = parsed.end - parsed.start + 1
   return {
@@ -161,9 +198,70 @@ function videoResponse (token: string, range?: string, head = false, download = 
     headers: {
       ...base,
       'Content-Length': String(length),
-      'Content-Range': 'bytes ' + parsed.start + '-' + parsed.end + '/' + video.size
+      'Content-Range': 'bytes ' + parsed.start + '-' + parsed.end + '/' + file.size
     },
-    file: head ? undefined : { path: video.path, start: parsed.start, end: parsed.end }
+    file: head ? undefined : { path: file.path, start: parsed.start, end: parsed.end }
+  }
+}
+
+/** 视频本体（分离音轨时这里只有画面） */
+function videoResponse (token: string, range?: string, head = false, download = false): PlayerHttpResponse {
+  const video = resolvePlayerVideo(token)
+  if (!video) return notFound(false)
+  return fileResponse(token, video, 'video/mp4', range, head, download, '.mp4')
+}
+
+/** 单独的音轨（B站这类音视频分离的）：\`<audio>\` 直接播它，\`?download=1\` 下载 m4a */
+function audioResponse (token: string, range?: string, head = false, download = false): PlayerHttpResponse {
+  const audio = resolvePlayerAudio(token)
+  if (!audio) return notFound(false)
+  return fileResponse(token, audio, 'audio/mp4', range, head, download, '.m4a')
+}
+
+/**
+ * **按需合成**：把画面和音轨用 ffmpeg 合成一条 mp4（\`-c copy\`，不重新编码，通常一两秒）。
+ *
+ * 为什么要按需：用户要求「默认不合并音频、浏览器里同时播放就行」——
+ * 解析时不再花时间合成，只有点了「服务器合并后下载」才做，而且做完会留在会话目录里，
+ * 同一条链接再点就是秒回（到期随会话一起删）。
+ *
+ * @returns 合成好的文件；没有独立音轨 / ffmpeg 失败时返回 null（路由回 404）
+ */
+async function ensureMerged (token: string): Promise<{ path: string, size: number } | null> {
+  const cached = resolvePlayerMerged(token)
+  if (cached) return cached
+  const video = resolvePlayerVideo(token)
+  const audio = resolvePlayerAudio(token)
+  if (!video || !audio) return null
+  const session = getPlayerSession(token)
+  if (!session) return null
+  const target = path.join(session.dir, 'merged.mp4')
+  const started = Date.now()
+  try {
+    const { spawn } = await import('node:child_process')
+    const { resolveFfmpegBin } = await import('node-karin')
+    const bin = resolveFfmpegBin()
+    await new Promise<void>((resolve, reject) => {
+      const proc = spawn(bin, [
+        '-y',
+        '-i', video.path,
+        '-i', audio.path,
+        '-c', 'copy',
+        '-movflags', '+faststart',
+        target
+      ], { stdio: 'ignore' })
+      proc.on('error', reject)
+      proc.on('close', (code) => (code === 0 ? resolve() : reject(new Error('ffmpeg exit ' + code))))
+    })
+    const stat = fs.statSync(target)
+    markPlayerMerged(token, 'merged.mp4')
+    logger.mark('[在线播放] 已按需合成音视频（' + (stat.size / 1024 / 1024).toFixed(1) + 'MB，'
+      + (Date.now() - started) + 'ms）：' + token)
+    return { path: target, size: stat.size }
+  } catch (error: any) {
+    logger.warn('[在线播放] 合成音视频失败（' + (Date.now() - started) + 'ms）: ' + String(error?.message ?? error))
+    try { fs.rmSync(target, { force: true }) } catch { /* 忽略 */ }
+    return null
   }
 }
 
@@ -228,6 +326,17 @@ export async function handlePlayerRequest (request: PlayerHttpRequest): Promise<
     }
   }
   if (action === 'video') return videoResponse(token, request.range, method === 'HEAD', wantDownload)
+  // 独立音轨（B站音视频分离时才有）：播放页的 <audio> 播它，?download=1 下载 m4a
+  if (action === 'audio') return audioResponse(token, request.range, method === 'HEAD', wantDownload)
+  /**
+   * 按需合成后下载 / 播放：第一次会跑一次 ffmpeg -c copy（一两秒），之后走缓存。
+   * 合成失败（没有独立音轨 / 没有 ffmpeg）回 404，页面上的按钮也就不该点得动。
+   */
+  if (action === 'merged') {
+    const merged = await ensureMerged(token)
+    if (!merged) return notFound(false)
+    return fileResponse(token, merged, 'video/mp4', request.range, method === 'HEAD', wantDownload, '.mp4')
+  }
   // 独立路由：`/kkk/player/<token>/download` 与 `/video?download=1` 完全等价
   if (action === 'download') return videoResponse(token, request.range, method === 'HEAD', true)
   if (action === 'danmaku') return danmakuResponse(token)
@@ -295,13 +404,23 @@ export function registerPlayerRoutes ({ ctx, port }: { ctx: any, port: number })
       })
     })
     server.on('error', (error: any) => {
-      logger.warn('[在线播放] 播放器端口 ' + port + ' 启动失败（' + String(error?.code ?? error?.message ?? error)
-        + '），已退回 Koishi 自己的端口；请在配置里换一个端口或留空')
+      const code = String(error?.code ?? error?.message ?? error)
+      /**
+       * 端口被别的进程占了：**必须说清楚后果** —— 线上真实故障就是「用户点开播放链接看到『链接已过期』」。
+       *
+       * 成因：这台实例退回 Koishi 自己的端口，而另一台实例（比如同机的测试实例）抢到了这个端口；
+       * 域名反代到该端口 → 用户访问的其实是**另一台实例**，它当然没有这个会话。
+       */
+      logger.error('[在线播放] 播放器端口 ' + port + ' 被占用（' + code + '），本次退回 Koishi 自己的端口'
+        + (publicBaseUrl() ? '。注意：域名 ' + publicBaseUrl() + ' 反代的就是 ' + port + ' 的话，用户点开链接会看到「链接已过期」'
+          + ' —— 说明这台实例不是 8888 的占用者（同机另一个 Koishi 实例抢到了），换一个端口或先停掉那台实例' : ''))
+      standaloneReady = false
       // 端口被占用不能把插件带崩：退回 ctx.server 再挂一遍
       registerOnKoishi(ctx, disposers)
     })
     try {
       server.listen(port, () => {
+        standaloneReady = true
         logger.info('[在线播放] 播放器已监听独立端口 ' + port)
       })
       disposers.push(() => { try { server.close() } catch { /* 忽略 */ } })

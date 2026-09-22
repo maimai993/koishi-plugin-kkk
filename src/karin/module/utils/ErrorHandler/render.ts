@@ -1,4 +1,8 @@
 import util from 'node:util'
+
+import { MAX_CARD_LOG_LINES, foldLongRuns, truncateWithNote } from '../../../../compat/fold'
+import { groupLinkOf, reportConfig } from '../ErrorReport'
+
 import { resolveFrameLogo } from '@/module/utils/Render'
 
 import { formatBuildTime, Render, Root } from '@/module'
@@ -107,17 +111,33 @@ const dumpOf = (error: Error): string | undefined => {
  */
 const MAX_STACK_CHARS = 4000
 const MAX_DUMP_CHARS = 4000
+/** 错误标题那一行同样要限长（见 foldBlobs 的说明） */
+const MAX_MESSAGE_CHARS = 1200
 
-const truncateText = (text: string | undefined, limit: number): string => {
-  const value = String(text ?? '')
-  if (value.length <= limit) return value
-  return value.slice(0, limit) + '\n…（已截断，完整内容见日志；原文共 ' + value.length + ' 字符）'
-}
+const truncateText = truncateWithNote
+
+/**
+ * **把错误文本里的超长 base64 / 长串折叠掉**。
+ *
+ * 实测：OneBot 发送失败时，适配器会把**整个请求参数**拼进 message ——
+ *
+ *     Error with request send_group_msg, args: {"group_id":1050229473,"message":[{"type":"image","data":{"file":"base64://<4.6MB>"}}]}, retcode: 1200
+ *
+ * 而错误卡片的「错误信息」一行以前是**不截断**的，于是报错本身渲染成 1440×20000、10.8MB 的图
+ * （光渲染要 28 秒，而且这么大的图 QQ 照样拒收 —— 等于「报错也发不出来」）。
+ *
+ * 卡片只需要让人看出错在哪：base64 折成 `base64://…（省略 N 字符）`，完整内容仍在日志里。
+ * 注意先折叠**再**截断，否则前 4000 个字符全是 base64，调用栈反而被挤没了。
+ */
+const foldBlobs = foldLongRuns
 
 const stackPartsOf = (error: Error, override?: string): { stack: string; dump?: string } => {
-  if (override) return { stack: truncateText(override, MAX_STACK_CHARS) }
-  if (error instanceof AmagiError) return { stack: truncateText(error.stack ?? error.message, MAX_STACK_CHARS) }
-  return { stack: truncateText(error.stack ?? error.message, MAX_STACK_CHARS), dump: truncateText(dumpOf(error), MAX_DUMP_CHARS) }
+  if (override) return { stack: truncateText(foldBlobs(override), MAX_STACK_CHARS) }
+  if (error instanceof AmagiError) return { stack: truncateText(foldBlobs(error.stack ?? error.message), MAX_STACK_CHARS) }
+  return {
+    stack: truncateText(foldBlobs(error.stack ?? error.message), MAX_STACK_CHARS),
+    dump: truncateText(foldBlobs(dumpOf(error)), MAX_DUMP_CHARS)
+  }
 }
 
 /**
@@ -154,7 +174,8 @@ export const renderErrorImage = async (ctx: ErrorContext, opts: RenderErrorOptio
     error: {
       // 这几个字段模板里会直接做字符串处理（例如 version.startsWith），
       // 取不到值时给空串，避免错误卡片自己再崩一次
-      message: String(opts.errorMessage || error?.message || '未知错误'),
+      // 一定要先折叠超长 base64 再截断（OneBot 会把整个请求参数塞进 message）
+      message: truncateText(foldBlobs(opts.errorMessage || error?.message || '未知错误'), MAX_MESSAGE_CHARS),
       name: String(opts.errorName || error?.name || 'Error'),
       stack: stack ?? '',
       dump: dump ?? '',
@@ -163,7 +184,20 @@ export const renderErrorImage = async (ctx: ErrorContext, opts: RenderErrorOptio
     amagi,
     method: options.businessName,
     timestamp: new Date().toISOString(),
-    logs: logs?.slice().reverse(),
+    /**
+     * 卡片上只留最近这些行，**并且逐行折叠 + 截断**。
+     *
+     * compat/logger 在收集阶段已经折过一遍，这里再兜一次底：这条数据还可能来自
+     * 别的调用方（比如自定义错误处理器直接把原始日志数组塞进来），线上那次
+     * 「4.6MB base64 撑出 9MB 卡片」就是从这种没折过的路径进来的。
+     */
+    logs: logs
+      ? logs.slice(-MAX_CARD_LOG_LINES).reverse().map((entry) => ({
+        ...entry,
+        message: truncateWithNote(foldLongRuns(entry.message ?? ''), 4000),
+        raw: truncateWithNote(foldLongRuns(entry.raw ?? ''), 4000)
+      }))
+      : [],
     triggerCommand: event?.msg || '未知命令或处于非消息环境',
     frameworkVersion: Root.karinVersion,
     // 和主布局用同一份 logo（跨模块导入以免又出现「旧头像」）
@@ -173,6 +207,10 @@ export const renderErrorImage = async (ctx: ErrorContext, opts: RenderErrorOptio
     commitHash: buildMetadata?.commitHash,
     // 之前这里可能传 undefined，模板读 adapterInfo.version.startsWith 直接 SSR 崩掉
     adapterInfo: adapterInfo ?? { name: '未知适配器', version: '' },
+    // 上报成功的编号与反馈群：印在卡片上，用户照着进群提问
+    report: ctx.report
+      ? { id: ctx.report.id, url: ctx.report.url, group: reportConfig().group, groupUrl: groupLinkOf(reportConfig().group) }
+      : undefined,
     isVerification: opts.isVerification,
     verificationUrl: opts.verificationUrl,
     share_url: opts.share_url

@@ -3,6 +3,7 @@ import { format } from 'node:util'
 
 import type { Logger } from 'koishi'
 
+import { MAX_CAPTURED_LOG_CHARS, MAX_CAPTURED_LOG_LINES, foldAndTruncate } from './fold'
 import { tryGetRuntime } from './runtime'
 
 let koishiLogger: Logger | null = null
@@ -65,7 +66,15 @@ const emit = (level: 'debug' | 'info' | 'warn' | 'error', args: any[]) => {
   const logger = getLogger()
   const message = safeFormat(args)
   const capture = captureStack[captureStack.length - 1]
-  if (capture) capture.push('[' + stamp() + '][' + (KARIN_LEVEL[level] ?? 'INFO') + '] ' + message)
+  if (capture) {
+    /**
+     * 进缓冲区的每一行都要先折叠 + 截断：这条缓冲区后来会进错误卡片、也会随错误上报上传，
+     * 而 OneBot 那条 send_group_msg 失败会把 4.6MB 的 base64 整个塞进日志（实测卡片 HTML 因此到 9.1MB）。
+     * 行数也要封顶，长解析跑下来几百行就够定位问题了。
+     */
+    capture.push(foldAndTruncate('[' + stamp() + '][' + (KARIN_LEVEL[level] ?? 'INFO') + '] ' + message, MAX_CAPTURED_LOG_CHARS))
+    if (capture.length > MAX_CAPTURED_LOG_LINES) capture.splice(0, capture.length - MAX_CAPTURED_LOG_LINES)
+  }
   if (!logger) {
     // 兼容层未初始化时退化到 stdout，避免丢日志
     // eslint-disable-next-line no-console

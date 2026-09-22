@@ -150,25 +150,25 @@ setTimeout(async () => {
      */
     console.log('\n[6] 面板保存（authoritative）：改回默认值也要能写进 config.json')
     const defaultFake = defaults.app.fakeForward
-    check('前提：app.fakeForward 的默认值就是 true（打开它 = 改回默认值）', defaultFake === true, String(defaultFake))
-    // 1) 先关掉（和默认值不同，两条路都能写回）
-    applyUpstreamOverrides({ app: { fakeForward: false } })
-    const offValue = JSON.parse(fs.readFileSync(cfgFile, 'utf8')).app.fakeForward
-    check('关掉能写回', offValue === false, String(offValue))
+    check('前提：app.fakeForward 的默认值就是 false（合并转发默认全关）', defaultFake === false, String(defaultFake))
+    // 1) 先打开（和默认值不同，两条路都能写回）
+    applyUpstreamOverrides({ app: { fakeForward: true } })
+    const onValue = JSON.parse(fs.readFileSync(cfgFile, 'utf8')).app.fakeForward
+    check('打开能写回', onValue === true, String(onValue))
     // 2) 保守模式下发「默认值」会被当成没动过（老行为，保护手改的文件）
-    const conservative = applyUpstreamOverrides({ app: { fakeForward: true } })
+    const conservative = applyUpstreamOverrides({ app: { fakeForward: false } })
     const afterConservative = JSON.parse(fs.readFileSync(cfgFile, 'utf8')).app.fakeForward
     check('保守模式：正好等于默认值时不写回（保护手改文件的老规则还在）',
-      !conservative.changed.includes('app.fakeForward') && afterConservative === false,
+      !conservative.changed.includes('app.fakeForward') && afterConservative === true,
       'changed=' + conservative.changed.join(', ') + ' / 文件里=' + String(afterConservative))
-    // 3) 面板保存（authoritative）必须写回 —— 这就是用户那条「打开了没用」
-    const panel = applyUpstreamOverrides({ app: { fakeForward: true } }, { authoritative: true })
+    // 3) 面板保存（authoritative）必须写回 —— 这就是用户那条「改了没用」
+    const panel = applyUpstreamOverrides({ app: { fakeForward: false } }, { authoritative: true })
     const afterPanel = JSON.parse(fs.readFileSync(cfgFile, 'utf8')).app.fakeForward
-    check('面板保存：值等于默认值也能写回（打开开关立刻生效）',
-      panel.changed.includes('app.fakeForward') && afterPanel === true,
+    check('面板保存：值等于默认值也能写回（关掉开关立刻生效）',
+      panel.changed.includes('app.fakeForward') && afterPanel === false,
       'changed=' + panel.changed.join(', ') + ' / 文件里=' + String(afterPanel))
     // 4) 面板保存也不会顺手把「没变」的项写坏
-    const panelNoop = applyUpstreamOverrides({ app: { fakeForward: true, renderScale: 120 } }, { authoritative: true })
+    const panelNoop = applyUpstreamOverrides({ app: { fakeForward: false, renderScale: 120 } }, { authoritative: true })
     check('面板保存：值和文件里一样的项不重复写', panelNoop.changed.length === 0, panelNoop.changed.join(', '))
     check('手改过的其它项没被顺手改掉', JSON.parse(fs.readFileSync(cfgFile, 'utf8')).app.renderScale === 120)
     applyUpstreamOverrides({ app: { fakeForward: defaultFake } }, { authoritative: true })

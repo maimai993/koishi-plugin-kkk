@@ -2,6 +2,8 @@ import type { ApiErrorData } from '@template/template/other/handlerError/compone
 import { logger, type AdapterType, type Message } from 'node-karin'
 import karin from 'node-karin'
 
+import { MAX_CAPTURED_LOG_CHARS, foldAndTruncate } from '../../../../compat/fold'
+
 import { resolveUsableBot } from '../bot'
 import { Config } from '../Config'
 
@@ -21,7 +23,10 @@ import { Config } from '../Config'
 export const parseLogsToStructured = (logs: string[]): ApiErrorData['logs'] => {
   const logRegex = /\[(\d{2}:\d{2}:\d{2}\.\d{3})\]\[([A-Z]{4})\]\s(.+)/s
   return logs
-    .map((log) => {
+    .map((raw) => {
+      // 逐行折叠 + 截断：OneBot 那条报错会把 4.6MB 的 base64 塞进日志，
+      // 不折的话错误卡片能撑到 9MB、渲染十几分钟（见 compat/fold 的说明）
+      const log = foldAndTruncate(raw, MAX_CAPTURED_LOG_CHARS)
       const match = log.match(logRegex)
       if (match) {
         return {

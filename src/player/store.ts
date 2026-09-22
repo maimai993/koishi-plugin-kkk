@@ -50,6 +50,20 @@ export interface PlayerSession {
   filePath: string
   /** 视频大小（字节） */
   sizeBytes: number
+  /**
+   * **单独的音轨文件**（可选）。
+   *
+   * 用户要求「默认不要服务器合并音频，浏览器里同时播放就行」：B站是分离的音视频流，
+   * 以前要先用 ffmpeg 合成一条 mp4（慢、吃 CPU），现在**默认不合成** ——
+   * 视频流和音频流各存一份，播放页用 `<video muted>` + `<audio>` 同时播放。
+   * 只有用户点「服务器合并后下载」时才按需合成（见 server.ts 的 merged 路由）。
+   * 抖音那种本身就带音轨的视频没有这个字段。
+   */
+  audioPath?: string
+  /** 音轨大小（字节） */
+  audioSizeBytes?: number
+  /** 已经按需合成好的文件（会话目录里的文件名，例如 merged.mp4），第一次合并后记下来 */
+  merged?: string
   /** 弹幕条数 */
   danmakuCount: number
   /** 创建时间 */
@@ -180,6 +194,9 @@ function normalizeSession (raw: any): PlayerSession | null {
     platform: String(raw.platform ?? ''),
     dir: typeof raw.dir === 'string' && raw.dir ? raw.dir : path.dirname(filePath),
     filePath,
+    audioPath: typeof raw.audioPath === 'string' && raw.audioPath ? raw.audioPath : undefined,
+    audioSizeBytes: Number.isFinite(Number(raw.audioSizeBytes)) ? Number(raw.audioSizeBytes) : undefined,
+    merged: typeof raw.merged === 'string' && raw.merged ? raw.merged : undefined,
     sizeBytes: Number(raw.sizeBytes) || 0,
     danmakuCount: Number(raw.danmakuCount) || 0,
     createdAt: Number(raw.createdAt) || Date.now(),
@@ -263,6 +280,11 @@ function createToken (): string {
  */
 export function registerPlayerSession (input: {
   videoPath: string
+  /**
+   * 单独的音轨文件（可选，见 {@link PlayerSession.audioPath}）。
+   * 给了就一起搬进会话目录，播放页同时播放；没给就是「视频自带音轨」。
+   */
+  audioPath?: string
   title?: string
   platform?: string
   danmaku?: PlayerDanmakuItem[]
@@ -297,6 +319,26 @@ export function registerPlayerSession (input: {
       fs.rmSync(source, { force: true })
     }
 
+    /**
+     * 单独的音轨：也**搬**进会话目录（和视频同一套逻辑：同分区改名、跨分区复制 + 删源）。
+     * 搬不动就当作「没有独立音轨」，不影响视频本身能播。
+     */
+    let audioTarget: string | undefined
+    if (input.audioPath && fs.existsSync(input.audioPath)) {
+      const candidate = path.join(dir, 'audio.m4a')
+      try {
+        try {
+          fs.renameSync(input.audioPath, candidate)
+        } catch {
+          fs.copyFileSync(input.audioPath, candidate)
+          fs.rmSync(input.audioPath, { force: true })
+        }
+        audioTarget = candidate
+      } catch (error: any) {
+        logger.warn('[在线播放] 音轨文件搬进会话目录失败（将只播视频流）: ' + String(error?.message ?? error))
+      }
+    }
+
     const danmaku = Array.isArray(input.danmaku) ? input.danmaku : []
     fs.writeFileSync(path.join(dir, 'danmaku.json'), JSON.stringify({ total: danmaku.length, items: danmaku }))
 
@@ -322,6 +364,8 @@ export function registerPlayerSession (input: {
       dir,
       filePath: target,
       sizeBytes: Number(fs.statSync(target).size) || 0,
+      audioPath: audioTarget,
+      audioSizeBytes: audioTarget ? (Number(fs.statSync(audioTarget).size) || 0) : undefined,
       danmakuCount: danmaku.length,
       createdAt: now,
       expireAt: now + normalizeExpireMinutes(input.expireMinutes) * 60 * 1000,
@@ -408,6 +452,46 @@ export function resolvePlayerVideo (token: unknown): { path: string, size: numbe
     const stat = fs.statSync(session.filePath)
     if (!stat.isFile()) return null
     return { path: session.filePath, size: stat.size }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 取单独的音轨文件（没有独立音轨就返回 null，路由回 404）。
+ *
+ * 独立音轨 = 解析时没让服务器合成，播放页用 `<audio>` 和视频一起播（见 PlayerSession.audioPath）。
+ */
+export function resolvePlayerAudio (token: unknown): { path: string, size: number } | null {
+  const session = getPlayerSession(token)
+  const audioPath = session?.audioPath
+  if (!audioPath) return null
+  try {
+    const stat = fs.statSync(audioPath)
+    if (!stat.isFile()) return null
+    return { path: audioPath, size: stat.size }
+  } catch {
+    return null
+  }
+}
+
+/** 记住「按需合成的文件」文件名（它会留在会话目录里，到期一起清掉） */
+export function markPlayerMerged (token: string, fileName: string): void {
+  const session = sessions.get(String(token))
+  if (!session) return
+  session.merged = fileName
+  persistIndex()
+}
+
+/** 已经合成好的合并文件路径（没有就 null） */
+export function resolvePlayerMerged (token: unknown): { path: string, size: number } | null {
+  const session = getPlayerSession(token)
+  if (!session?.merged) return null
+  try {
+    const file = path.join(session.dir, session.merged)
+    const stat = fs.statSync(file)
+    if (!stat.isFile()) return null
+    return { path: file, size: stat.size }
   } catch {
     return null
   }
