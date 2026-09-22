@@ -1,4 +1,5 @@
 import axios from 'node-karin/axios'
+import { normalizeXiaohongshuLink, pickXiaohongshuToken } from './link'
 
 export interface XiaohongshuIdData {
   type: 'note' | 'unknown'
@@ -11,20 +12,15 @@ export interface XiaohongshuIdData {
  * - 短链: https://xhslink.com/<code>、https://xhslink.cn/o/<code>（会重定向到长链接）
  */
 export const getXiaohongshuID = async (url: string, log = true): Promise<XiaohongshuIdData> => {
-  const resp = await axios.get(url, {
+  const sourceLink = normalizeXiaohongshuLink(url)
+  const resp = await axios.get(sourceLink, {
     headers: {
       'User-Agent': 'Apifox/1.0.0 (https://apifox.com)'
     }
   })
-  const longLink = resp?.request?.res?.responseUrl ?? url
-  // 安全解码：如果最终地址里包含百分号编码的真实链接，解码后才能命中正则
-  const normalizedLink = (() => {
-    try {
-      return decodeURIComponent(longLink)
-    } catch {
-      return longLink
-    }
-  })()
+  const longLink = resp?.request?.res?.responseUrl ?? sourceLink
+  // 最终地址也可能来自 HTML 转义后的卡片链接
+  const normalizedLink = normalizeXiaohongshuLink(longLink)
 
   const effectiveLink = (() => {
     try {
@@ -61,23 +57,7 @@ export const getXiaohongshuID = async (url: string, log = true): Promise<Xiaohon
     }
   })()
 
-  // 同时从 effectiveLink 与 normalizedLink 中获取 token，优先使用有效链接
-  const pickToken = (s: string): string | undefined => {
-    try {
-      const u = new URL(s)
-      const t = u.searchParams.get('xsec_token') || u.searchParams.get('XSEC_TOKEN') || undefined
-      if (t) return t
-      if (u.hash) {
-        const mm = /(?:^|[?&#])(?:xsec_token|XSEC_TOKEN)=([^&#]+)/.exec(u.hash)
-        if (mm?.[1]) return mm[1]
-      }
-      return undefined
-    } catch {
-      const mm = /(?:^|[?&#])(?:xsec_token|XSEC_TOKEN)=([^&#]+)/.exec(s)
-      return mm?.[1]
-    }
-  }
-  const finalToken = pickToken(effectiveLink) ?? pickToken(normalizedLink)
+  const finalToken = pickXiaohongshuToken(effectiveLink, normalizedLink, sourceLink)
 
   let result: XiaohongshuIdData = { type: 'unknown' }
 
@@ -120,8 +100,6 @@ export const getXiaohongshuID = async (url: string, log = true): Promise<Xiaohon
     throw new Error('无法从链接中提取小红书笔记ID')
   }
 
-  if (log) {
-    console.log(result)
-  }
+  if (log) console.log({ type: result.type, note_id: result.note_id, xsec_token: finalToken ? '有' : '（空）' })
   return result
 }

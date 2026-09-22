@@ -43,6 +43,8 @@ export const handleBusinessError = async (
       logger.warn('[ErrorHandler] 错误上报异常（忽略，不影响报错本身）: ' + String(reportError?.message ?? reportError))
     }
 
+    if (options.silentErrorReport) return 'handled'
+
     const ctx: ErrorContext = {
       error,
       options,
@@ -132,7 +134,8 @@ export const wrapWithErrorHandler = <R>(fn: (e: Message, next: () => unknown) =>
         if (emojiManager.has(processingEmojiId)) {
           await emojiManager.remove('PROCESSING')
         }
-        await emojiManager.add('ERROR')
+        if (options.silentErrorReport) await emojiManager.clearAll()
+        else await emojiManager.add('ERROR')
       }
 
       logger.debug('[ErrorHandler] 原始错误: ' + ((error as any)?.stack ?? String(error)))

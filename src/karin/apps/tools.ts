@@ -452,7 +452,8 @@ const handleXiaohongshu = withParseForward(wrapWithErrorHandler(
     return
   },
   {
-    businessName: '小红书视频解析'
+    businessName: '小红书视频解析',
+    silentErrorReport: true
   }
 ), 'xiaohongshu')
 

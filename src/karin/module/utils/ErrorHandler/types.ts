@@ -13,6 +13,8 @@ export interface ErrorHandlerOptions {
    * 业务名称，用于错误报告
    */
   businessName: string
+  /** 只按现有配置上传错误报告；不发送错误卡片或消息。 */
+  silentErrorReport?: boolean
   /**
    * 自定义错误处理函数
    * @param error - 捕获的错误对象

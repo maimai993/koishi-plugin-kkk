@@ -104,6 +104,9 @@ export class Xiaohongshu extends Base {
       throw new Error('我还没有小红书的 Cookies，暂时无法解析呢 ~')
     }
     await sendParseTip(this.e, '小红书')
+    if (!data.xsec_token) {
+      throw new Error('小红书分享链接缺少 xsec_token，无法获取笔记详情')
+    }
     let NoteData: any
     try {
       NoteData = await this.amagi.xiaohongshu.fetcher.fetchNoteDetail({
@@ -565,8 +568,8 @@ export class Xiaohongshu extends Base {
     }
 
     /**
-     * 等两条线都跑完，再统一报错：中间失败过的步骤合成一个错误抛出去，
-     * 由 ErrorHandler 渲染**一张**错误卡片（此时能发的卡片/图片/视频都已经发出去了）。
+     * 等两条线都跑完，再统一上报：中间失败过的步骤合成一个错误抛出去，
+     * 由 ErrorHandler 静默上传（此时能发的卡片/图片/视频都已经发出去了）。
      */
     await sends.settle()
     steps.throwIfFailed()
