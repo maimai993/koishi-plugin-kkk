@@ -23,7 +23,8 @@ import path from 'node:path'
 
 import { logger } from 'node-karin'
 
-import { tryGetRuntime } from '../../compat/runtime'
+// 注意只有一层 .. ：src/player/server.ts → src/compat/runtime（写两层会变成根目录下的 compat，直接 MODULE_NOT_FOUND）
+import { tryGetRuntime } from '../compat/runtime'
 
 import { renderExpiredPage, renderPlayerPage } from './page'
 import {
