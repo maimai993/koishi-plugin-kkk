@@ -708,6 +708,35 @@ function registerCommands (
           logger.debug('卡片来源不是 B站（%s），跳过卡片解析', cardPlatform || '未知')
           return next()
         }
+        /**
+         * **同一条卡片消息被投递多遍时，只处理第一遍**。
+         *
+         * 线上实测：同一条 B站卡片会在几秒内进来两次（平台重投 / 另一个中间件再发一遍），
+         * 于是 OCR + 搜索各跑两遍、面板也可能发两条 —— 用户看到的就是「解析完了又解析一遍」。
+         *
+         * 去重键里的卡片正文要**先去掉 URL 的签名参数**：同一条卡片重投时图片链接会被重新签名，
+         * 直接拿原文哈希会认为是两条不同的消息（踩过这个坑，第二次照样 OCR）。
+         */
+        const cardSignature = raw
+          .replace(/https?:\/\/[^\s"'<>]+/g, (url: string) => url.split("?")[0])
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 2000)
+        /**
+         * 打一条「收到卡片」的日志（debug 级，排查重复投递用）。
+         *
+         * 同一条卡片连着来两次、而 **messageId 也相同** → 这条事件被重复投递/重复处理；
+         * messageId 不同 → 平台那边确实又发了一条。排查「到底谁重复了」就看它。
+         */
+        logger.debug('收到卡片消息（messageId=%s，平台=%s）',
+          String((session as any).messageId ?? '无'),
+          String((session as any).platform ?? '未知'))
+        const { acquireParseLock } = await import("./karin/module/utils/ParseLock")
+        const cardKey = ["card", String((session as any).platform ?? ""), String((session as any).channelId ?? ""), String((session as any).userId ?? ""), cardSignature].join(":")
+        if (!acquireParseLock(cardKey)) {
+          logger.debug("短时间内重复的同一条卡片消息，已忽略（不再重复 OCR/搜索）: %s", cardKey.slice(0, 120))
+          return
+        }
         const send = async (content: any) => {
           try {
             await (session as any).send(content)

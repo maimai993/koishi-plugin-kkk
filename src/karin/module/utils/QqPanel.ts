@@ -396,6 +396,53 @@ export async function recallLastPanel (e: Message): Promise<void> {
 }
 
 /**
+ * ── 「信息卡片」和「markdown 选择表」分开记、分开撤 ───────────────────────
+ *
+ * 用户要求：**卡片不要和「选清晰度 / 选第几集」的 markdown 一起发**，
+ * 分开发并且**只撤回 markdown**（卡片留着给用户看）。
+ *
+ * 所以这里多一份「上一条卡片」的记录：
+ *   - 选清晰度 / 翻页 / 选集时只撤 markdown（原来的 lastPanelMessages）；
+ *   - **只有再发一张新卡片时**才把上一张卡片撤掉（否则番剧翻页几次群里就堆一排卡片）。
+ */
+const lastPanelCards = new Map<string, { id: string; at: number }>()
+
+/** 记住刚刚发出的信息卡片（只在发新卡片时撤回） */
+function rememberPanelCard (e: Message, messageId?: string) {
+  if (!messageId) return
+  try {
+    const key = String(e.contact?.peer ?? e.channelId ?? '')
+    if (!key) return
+    lastPanelCards.set(key, { id: String(messageId), at: Date.now() })
+    if (lastPanelCards.size > 128) lastPanelCards.delete(lastPanelCards.keys().next().value as string)
+  } catch { /* 记不住也不影响功能 */ }
+}
+
+/** 撤回这个频道上一条「信息卡片」（发新卡片前调用；配置关掉撤回时什么都不做） */
+async function recallLastPanelCard (e: Message): Promise<void> {
+  const runtime: any = tryGetRuntime()
+  if (!runtime || runtime.config?.recallPanel === false) return
+  try {
+    const key = String(e.contact?.peer ?? e.channelId ?? '')
+    const entry = key ? lastPanelCards.get(key) : undefined
+    if (!entry) return
+    lastPanelCards.delete(key)
+    if (Date.now() - entry.at > LAST_PANEL_TTL) return
+    await (e.bot as any)?.recallMsg?.(entry.id, key)
+  } catch (error) {
+    logger.debug('[QQ面板] 撤回上一条卡片失败: ' + String(error))
+  }
+}
+
+/** 只撤掉某条消息（例如「加载中…」），不动上面两份记录 */
+async function recallMessageById (e: Message, id?: string): Promise<void> {
+  if (!id) return
+  try {
+    await (e.bot as any)?.recallMsg?.(id, String(e.contact?.peer ?? e.channelId ?? ''))
+  } catch { /* 撤不掉就留着 */ }
+}
+
+/**
  * 面板渲染比较慢（大卡片要十几秒），先回一句「加载中…」再渲染。
  * 返回这条提示的消息 id，渲染完由调用方撤回。
  */
@@ -663,7 +710,20 @@ export async function sendBangumiPanelPage (e: Message, episodes: any[], cardDat
     if (!card) return false
 
     const parseCommand = commandInvocation('解析')
-    const lines: string[] = ['![#' + card.width + 'px #' + card.height + 'px](' + card.url + ')']
+    /**
+     * **卡片单独发一条**（用户要求：不要和「选第几集」的表格挤在一起），
+     * 并且不记进「上一条面板」—— 翻页 / 选集时只撤表格。
+     * 翻页会重新渲染卡片，所以这里先撤掉上一张卡片，免得翻几次堆一排（见 recallLastPanelCard）。
+     */
+    const lines: string[] = []
+    try {
+      const cardLines = ["![#" + card.width + "px #" + card.height + "px](" + card.url + ")"]
+      await recallLastPanelCard(e)
+      const sentCard: any = await sendPanelMarkdown(cardLines, (content) => e.reply(content))
+      rememberPanelCard(e, sentCard?.sent?.messageId)
+    } catch (error: any) {
+      logger.debug("[QQ面板] 番剧卡片单独发送失败（不影响选集表格）: " + String(error?.message ?? error))
+    }
 
     /**
      * 一格：纯数字按钮，点下去就是选这一集。
@@ -777,9 +837,25 @@ export async function sendQqParsePanel (e: Message, request: PanelRequest): Prom
   // 这一段要拉弹幕 + 渲染卡片（十几秒），先给一句「加载中…」，也顺便撤掉上一条面板
   const loadingId = await showLoadingTip(e)
   const card = await uploadPanelCard(e, request, info.detail, info.hotDanmaku ?? [])
+  /**
+   * **卡片单独发一条**（用户要求：不要和「选清晰度」的 markdown 挤在一条消息里）。
+   *
+   * 而且它**不记进「上一条面板」** —— 下一步选清晰度/翻页时只撤 markdown 那张表，
+   * 卡片留在群里；只有再解析一次（发新卡片）时才会把旧的撤掉（见 rememberPanelCard）。
+   */
+  let cardSent = false
   if (card && card.url) {
     // QQ markdown 的图片必须写成 ![#宽px #高px](url)
-    lines.push('![#' + (card.width || 1440) + 'px #' + (card.height || 1080) + 'px](' + card.url + ')')
+    const cardLines = ["![#" + (card.width || 1440) + "px #" + (card.height || 1080) + "px](" + card.url + ")"]
+    try {
+      await recallLastPanelCard(e)
+      await recallMessageById(e, loadingId)
+      const sentCard: any = await sendPanelMarkdown(cardLines, (content) => e.reply(content))
+      rememberPanelCard(e, sentCard?.sent?.messageId)
+      cardSent = true
+    } catch (error: any) {
+      logger.debug("[QQ面板] 信息卡片单独发送失败（不影响选择表）: " + String(error?.message ?? error))
+    }
   }
 
   // 按钮里只放短令牌，链接存在内存里（见 rememberPanelRequest 的说明）；
@@ -936,7 +1012,12 @@ export async function sendQqParsePanel (e: Message, request: PanelRequest): Prom
    */
   if (runtime.config.qqPanelSourceLink !== false && request.url) lines.push(sourceLink('打开原站', request.url))
   // 带链接发不出去时自动去掉链接行重发（不然整条面板、整个解析都会被一个链接拖死）
-  await sendPanelMarkdown(lines, (content) => replaceLoadingTip(e, loadingId, content))
+  const { sent } = await sendPanelMarkdown(lines, async (content) => {
+    // 卡片已经撤过「加载中…」了；卡片没发出去（或渲染失败）时这里补撤一次
+    if (!cardSent) await recallMessageById(e, loadingId)
+    return await e.reply(content)
+  })
+  rememberPanelMessage(e, sent?.messageId)
   logger.debug('[QQ面板] 已发送解析面板: ' + request.platform + ' ' + request.id + '（' + shown.length + '/' + info.options.length + ' 档画质）')
   return true
 }

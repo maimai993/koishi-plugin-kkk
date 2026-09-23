@@ -230,7 +230,25 @@ export const sendSlicedImage = async (e: Message, input: any): Promise<boolean> 
    */
   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
+  /**
+   * 适配器多久没返回算「卡住」。
+   *
+   * 线上踩坑（用户实测）：一条 3MB 的评论卡走 QQ 官方上传经常要 15~40 秒，
+   * 而老代码 **15 秒就判「发送未成功」** → 去切片再发一遍 → 群里出现两张（第一张其实发出去了），
+   * 日志就是那句「普通发送未成功（发送超过 15s 没有返回），大图不重试，改走切片」。
+   *
+   * 现在拆成三段：
+   *   15 秒 —— 只在日志里提示「还在传，继续等」（不判失败）；
+   *   120 秒 —— 到这里才怀疑它卡住；
+   *   再等 30 秒宽限 —— 等那个迟到的结果，成功了就当成功（不再重复发）。
+   */
+  const SEND_NOTICE_MS = 15000
+  const SEND_HARD_TIMEOUT_MS = 120000
+  const SEND_GRACE_MS = 30000
+  const TIMED_OUT = Symbol('send-timeout')
+
   const tryNormalSendOnce = async (): Promise<SendFailure | null> => {
+    const startedAt = Date.now()
     const sendPromise = (async (): Promise<SendFailure | null> => {
       try {
         const result: any = await e.reply(segment.image(source))
@@ -242,13 +260,41 @@ export const sendSlicedImage = async (e: Message, input: any): Promise<boolean> 
         return classifySendFailure(error)
       }
     })()
-    const timeoutPromise = new Promise<SendFailure>((resolve) => {
-      const timer = setTimeout(() => resolve({
-        kind: 'transient', message: '发送超过 15s 没有返回', retryable: true
-      }), 15000)
-      timer.unref?.()
-    })
-    return await Promise.race([sendPromise, timeoutPromise])
+    const notice = setTimeout(() => {
+      logger.mark('[图片切片] 适配器还没返回（已 ' + Math.round(SEND_NOTICE_MS / 1000) + 's），继续等 —— 大图上传本来就要几十秒，超时不代表没发出去')
+    }, SEND_NOTICE_MS)
+    notice.unref?.()
+    const raced = await Promise.race([
+      sendPromise,
+      new Promise<typeof TIMED_OUT>((resolve) => {
+        const timer = setTimeout(() => resolve(TIMED_OUT), SEND_HARD_TIMEOUT_MS)
+        timer.unref?.()
+      })
+    ])
+    clearTimeout(notice)
+    if (raced !== TIMED_OUT) return raced
+    /**
+     * 硬超时后再宽限一会儿：适配器可能只是慢，这一等能把「其实发出去了」的迟到结果等回来，
+     * 避免外层去切片、把同一张图又发一遍。
+     */
+    logger.mark('[图片切片] 适配器 ' + Math.round(SEND_HARD_TIMEOUT_MS / 1000) + 's 没有返回，再等 ' + Math.round(SEND_GRACE_MS / 1000) + 's 看它是卡住还是在上传')
+    const graced = await Promise.race([
+      sendPromise,
+      new Promise<typeof TIMED_OUT>((resolve) => {
+        const timer = setTimeout(() => resolve(TIMED_OUT), SEND_GRACE_MS)
+        timer.unref?.()
+      })
+    ])
+    if (graced !== TIMED_OUT) {
+      logger.mark('[图片切片] 那次「超时」的发送其实成功了（适配器 ' + Math.round((Date.now() - startedAt) / 1000) + 's 才返回），不再切片重发')
+      return graced
+    }
+    // 到这里才真的当作「发不出去」；注意它仍然是**不确定**，不是确定失败，所以不重试
+    return {
+      kind: 'unconfirmed',
+      message: '发送超过 ' + Math.round((SEND_HARD_TIMEOUT_MS + SEND_GRACE_MS) / 1000) + 's 没有返回（适配器可能还卡在上传）',
+      retryable: false
+    }
   }
 
   /**

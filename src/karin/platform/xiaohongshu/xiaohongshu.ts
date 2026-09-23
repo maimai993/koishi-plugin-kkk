@@ -285,19 +285,68 @@ export class Xiaohongshu extends Base {
     }
 
     /**
+     * 带「先提示、再宽限」的超时包装（和图片发送那边同一套口径，见 ImageSlice 的 SEND_* 常量）。
+     *
+     * 老写法是「到点就 Promise.race 出 null」—— 很多请求只是**慢**，不是挂了（小红书接口尤其如此），
+     * 早放弃的代价就是「评论区凭空少了内容」。现在分三段：
+     *   noticeMs 只在日志里提示一句「还在拉，继续等」；
+     *   hardMs 才怀疑它挂住；
+     *   graceMs 再等一会儿那个迟到的结果，回来了就当成功。
+     *
+     * @returns 任务结果；真超时返回 null（调用方按「拿不到数据」处理即可）
+     */
+    const withNoticeTimeout = async <T>(
+      label: string,
+      task: Promise<T>,
+      options: { noticeMs: number; hardMs: number; graceMs: number }
+    ): Promise<T | null> => {
+      const timedOut = Symbol("timeout")
+      const startedAt = Date.now()
+      const seconds = (ms: number) => Math.round(ms / 1000)
+      const notice = setTimeout(() => {
+        logger.mark("[小红书] " + label + "还在进行（已 " + seconds(options.noticeMs) + "s），继续等 —— 接口只是慢，不代表失败")
+      }, options.noticeMs)
+      notice.unref?.()
+      /** 包一层：任务本身抛错时也要能让 Promise.race 正常结束，错由调用方的 try/catch 接住 */
+      const guarded: Promise<T | typeof timedOut> = task.catch((error: any) => { throw error })
+      const raced = await Promise.race([
+        guarded,
+        new Promise<typeof timedOut>((resolve) => {
+          const timer = setTimeout(() => resolve(timedOut), options.hardMs)
+          timer.unref?.()
+        })
+      ])
+      clearTimeout(notice)
+      if (raced !== timedOut) return raced
+      logger.mark("[小红书] " + label + "已 " + seconds(options.hardMs) + "s 没有返回，再等 " + seconds(options.graceMs) + "s 看它是挂住还是只是慢")
+      const graced = await Promise.race([
+        guarded,
+        new Promise<typeof timedOut>((resolve) => {
+          const timer = setTimeout(() => resolve(timedOut), options.graceMs)
+          timer.unref?.()
+        })
+      ])
+      if (graced !== timedOut) {
+        logger.mark("[小红书] " + label + "其实成功了（" + seconds(Date.now() - startedAt) + "s 才返回），这次不算超时")
+        return graced
+      }
+      logger.warn("[小红书] " + label + "超时（共 " + seconds(Date.now() - startedAt) + "s），本次跳过")
+      return null
+    }
+
+    /**
      * 卡片发完后再去拉表情表（给评论区做表情转换用）。
      * 这里挂掉/超时都不影响已经发出去的卡片。
      */
     try {
-      const EmojiList = await Promise.race([
-        this.amagi.xiaohongshu.fetcher.fetchEmojiList(),
-        new Promise((resolve) => setTimeout(() => resolve(null), 8000))
-      ]) as any
+      const EmojiList = await withNoticeTimeout('表情表拉取', this.amagi.xiaohongshu.fetcher.fetchEmojiList(), {
+        noticeMs: 8000, hardMs: 30000, graceMs: 10000
+      }) as any
       if (EmojiList) {
         formattedEmojis = XiaohongshuEmoji(EmojiList.data)
         logger.mark('[小红书] 表情表已获取，共 ' + (Array.isArray(formattedEmojis) ? formattedEmojis.length : 0) + ' 条')
       } else {
-        logger.warn('[小红书] 表情表超时（8s），评论区将不做表情转换')
+        logger.warn('[小红书] 表情表没拿到（超时），评论区将不做表情转换')
       }
     } catch (error: any) {
       logger.warn('[小红书] 表情表拉取失败（不影响卡片）: ' + String(error?.message ?? error).slice(0, 100))
@@ -314,12 +363,12 @@ export class Xiaohongshu extends Base {
       /** 评论是否拉取失败 —— 失败也要把评论卡渲染出来（只是内容为空 + 一句提示） */
       let commentFailed = false
       try {
-        // 评论同样加超时：上游这条链路本来就常挂，别把整条解析拖死
-        CommentData = await Promise.race([
-          this.fetchConfiguredNoteComments(data),
-          new Promise((resolve) => setTimeout(() => resolve(null), 15000))
-        ]) as any
-        if (!CommentData) throw new Error('拉取评论超时（15s）')
+        // 评论同样加超时：上游这条链路本来就常挂，别把整条解析拖死。
+        // 但**「慢」不是「挂」**：15 秒只提示、60 秒才怀疑、再给 15 秒宽限（见 withNoticeTimeout）。
+        CommentData = await withNoticeTimeout('评论拉取', this.fetchConfiguredNoteComments(data), {
+          noticeMs: 15000, hardMs: 60000, graceMs: 15000
+        }) as any
+        if (!CommentData) throw new Error('拉取评论超时（提示 15s / 硬超时 60s + 宽限 15s 都没等到）')
       } catch (error: any) {
         /**
          * **这里绝对不能 return** —— 视频分支在这个代码块之后，

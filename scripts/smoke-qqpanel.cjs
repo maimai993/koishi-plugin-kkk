@@ -85,7 +85,8 @@ amagi.default = function (options) {
 
 const plugin = require(path.join(pluginRoot, 'lib/index.js'))
 const ctx = new Context()
-ctx.plugin(plugin, { dataPath: dataRoot, debug: true, qqPanel: true, qqFileLimitMB: 200 })
+// parseDedupe: false —— 这个冒烟测试会拿同一条链接反复跑不同配置，去重会把后半段全部挡掉（不是被测逻辑出问题）
+ctx.plugin(plugin, { dataPath: dataRoot, debug: true, qqPanel: true, qqFileLimitMB: 200, parseDedupe: false })
 
 /* ------------------------------------------------------------------ *
  * 断言工具
@@ -350,7 +351,8 @@ setTimeout(async () => {
      * 一调用就 `ReferenceError: e is not defined` —— 错误卡片永远切不了片，
      * 8.9MB 的长图直接原样发出去。
      */
-    const { sliceImageToMarkdown } = require(path.join(pluginRoot, 'lib/karin/module/utils/ImageSlice.js'))
+    // 旧的 sliceImageToMarkdown 早就换成 sliceImageToElements（返回元素数组，平台决定 markdown / 图片段）
+    const { sliceImageToElements } = require(path.join(pluginRoot, 'lib/karin/module/utils/ImageSlice.js'))
     // 切片要上传，宿主的 assets 服务这里没有，直接塞一个假的
     ctx.assets = { upload: async (data, name) => ({ url: 'https://example.com/' + name }) }
     const { execFileSync } = require('node:child_process')
@@ -361,26 +363,27 @@ setTimeout(async () => {
     let sliced = null
     let sliceError = null
     try {
-      sliced = await sliceImageToMarkdown(tallDataUri)
+      // 平台传 'qq'：切片只在 QQ 那条链路上生效（其它平台按原图发）
+      sliced = await sliceImageToElements(tallDataUri, 'qq')
     } catch (error) {
       sliceError = error
     }
     check('切片函数不抛错（ReferenceError 已修）', !sliceError, sliceError ? String(sliceError.message) : 'ok')
-    const slicedText = JSON.stringify(sliced?.children?.map((child) => child.attrs?.content ?? '').join('') ?? '')
-    check('长图被切成多片 markdown', /!\[#400px #/i.test(slicedText) && (slicedText.match(/!\[#/g) || []).length >= 2,
+    const slicedText = JSON.stringify(sliced ?? '')
+    check('长图被切成多片 markdown', Array.isArray(sliced) && sliced.length >= 1 && (slicedText.match(/!\[#/g) || []).length >= 2,
       JSON.stringify(slicedText.slice(0, 90)))
     let badThrown = null
     let badResult = 'unset'
     try {
-      badResult = await sliceImageToMarkdown('data:image/jpeg;base64,AAAA')
+      badResult = await sliceImageToElements('data:image/jpeg;base64,AAAA', 'qq')
     } catch (error) {
       badThrown = error
     }
-    check('坏输入不抛错（交给调用方按原图发）', !badThrown && (badResult === null),
+    check('坏输入不抛错（交给调用方按原图发）', !badThrown && (badResult === null || (Array.isArray(badResult) && badResult.length === 0)),
       badThrown ? String(badThrown.message) : String(badResult))
     const handlerSource = fs.readFileSync(path.join(pluginRoot, 'lib/karin/module/utils/ErrorHandler/handler.js'), 'utf-8')
     check('ErrorHandler 里仍有「切片失败按原图发送」的兜底',
-      handlerSource.includes('错误卡片切片失败，按原图发送') && /try\s*\{[\s\S]*sliceImageToMarkdown[\s\S]*?catch/.test(handlerSource))
+      handlerSource.includes('错误卡片切片失败，按原图发送') && /try\s*\{[\s\S]*sliceImageToElements[\s\S]*?catch/.test(handlerSource))
 
     console.log('\n[10] 「弹幕」与「在线看」按钮的合并规则（用户要求）')
     {
