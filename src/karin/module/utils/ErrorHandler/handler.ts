@@ -4,6 +4,8 @@ import { logger, type Message } from 'node-karin'
 import { getBuildMetadata } from '@/module'
 import { EmojiReactionManager } from '@/module/utils/EmojiReaction'
 
+// 注意路径只有四层 ..：ErrorHandler → utils → module → karin → src（多一层就指到仓库根了）
+import { tryGetRuntime } from '../../../../compat/runtime'
 import { uploadErrorReport, type ErrorReportResult } from '../ErrorReport'
 import { platformOf, sliceImageToElements } from '../ImageSlice'
 import { renderErrorImage } from './render'
@@ -61,17 +63,34 @@ export const handleBusinessError = async (
       }
     }
 
-    let img = await renderErrorImage(ctx)
     /**
-     * 错误卡片也会超长（实测 2880×40000 / 45MB），直接发必被 QQ 拒收 ——
-     * 统一切片：官方 QQ 切成一条 markdown，OneBot 切成若干图片段（它不渲染 markdown），
-     * 失败就退回原图。
+     * **「出错只发文字」开关**（面板 通用 → 错误上报 → 出错只发文字，配置项 errorNoCard）。
+     *
+     * 打开后：**不渲染错误卡片**（省掉十几秒渲染 + 一张几 MB 的大图），
+     * 只把「错误报告已上传，ID：xxx / 可以前往 QQ 群内寻找帮助」那几行发出去 —— **上报照旧**。
+     * 传空数组进去就行：下面几个发送函数本来就是「卡片 + 提示文案」拼一起发的（见 sender 的 errorHelpSegments）。
      */
+    let textOnly = false
     try {
-      const sliced = await sliceImageToElements(img, platformOf(event))
-      if (sliced?.length) img = sliced
-    } catch (sliceError: any) {
-      logger.debug('[ErrorHandler] 错误卡片切片失败，按原图发送: ' + String(sliceError?.message ?? sliceError))
+      textOnly = (tryGetRuntime()?.config as any)?.errorNoCard === true
+    } catch { /* 读不到配置就按老的来（渲染卡片） */ }
+
+    let img: any[] = []
+    if (textOnly) {
+      logger.mark('[ErrorHandler] 配置为「出错只发文字」，跳过错误卡片渲染（错误上报与提示文案照旧）')
+    } else {
+      img = await renderErrorImage(ctx)
+      /**
+       * 错误卡片也会超长（实测 2880×40000 / 45MB），直接发必被 QQ 拒收 ——
+       * 统一切片：官方 QQ 切成一条 markdown，OneBot 切成若干图片段（它不渲染 markdown），
+       * 失败就退回原图。
+       */
+      try {
+        const sliced = await sliceImageToElements(img, platformOf(event))
+        if (sliced?.length) img = sliced
+      } catch (sliceError: any) {
+        logger.debug('[ErrorHandler] 错误卡片切片失败，按原图发送: ' + String(sliceError?.message ?? sliceError))
+      }
     }
     await sendErrorToTrigger(ctx, img)
     await sendErrorToMaster(ctx, img)

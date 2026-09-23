@@ -140,71 +140,68 @@ const NATIVE_KEYS = ['masters', 'dataPath', 'debug', 'autoParse', 'webUiAuth']
  * 一样会把已有值带上，面板里的设置不会被清空。
  */
 const WEBUI_GUIDE = [
-  '**所有设置都在 WebUI 配置面板里改**，地址：/kkk（打开 Koishi 控制台后，左侧边栏也有一个「**kkk 配置**」入口）。',
+  '两种改法都行，改哪边都生效，改完记得点保存。',
   '',
-  '面板里包含：接口库 / 通用（含**错误上报**、在线播放器、合并转发）/ 抖音 / 哔哩哔哩 / 快手 / 小红书 / **QQ 适配器** / 推送列表。' +
-  '改完点右下角保存即可 —— 会写回 koishi.yml 并热重载，**不用重启**。',
+  '一、就在这个页面改：下面的设置项都在，常用的有「是否发解析面板」「画质档体积上限」「超长图自动切片」「在线播放器」「错误上报」等。',
   '',
-  '**Koishi 控制台里的设置项已经全部隐藏**（值仍然保留，在这里点保存也不会把它们弄丢），免得两边各改一半、互相覆盖。',
+  '二、用配置面板改：打开 Koishi 控制台后，左侧边栏有一个「kkk 配置」入口，也可以直接访问 /kkk。',
+  '面板界面更直观，接口库、抖音、哔哩哔哩、快手、小红书、推送列表都在里面，改完点右下角保存，不用重启 Koishi。',
   '',
-  '面板里还有一组「**Koishi 设置**」（数据目录、调试日志、自动解析、面板是否要求先登录控制台）。' +
-  '只有 masters（主人账号）没有面板入口 —— 它属于 Koishi 的权限体系，而面板是免登录页面，' +
-  '需要直接改 koishi.yml 里本插件的配置段（改完重启 Koishi）。'
+  '两边的说明和默认值都是同一份，不会出现「面板里有、控制台里没有」。' +
+  '面板是免登录页面，所以「主人账号」只能在控制台或 koishi.yml 里改。'
 ].join('\n')
 
 export const Config: Schema<Config> = Schema.intersect([
   Schema.object({
     webuiGuide: Schema.const('').description(WEBUI_GUIDE),
-    // 全部隐藏：控制台表单里不显示，配置统一在控制台侧边栏的「kkk 配置」面板里改
-    qq: buildQqSchema(Schema).hidden().description('QQ 适配器（只对 QQ 平台生效）'),
+    /**
+     * 常用设置（面板 / 切片 / 在线播放器 / 错误上报）。
+     *
+     * 这里**不做嵌套分组**：Koishi 的插件配置表单是按 schema 的形状渲染的，
+     * 想在里面再分小节就得把值也改成嵌套结构 —— 而面板（/kkk）写回 koishi.yml 用的是扁平结构，
+     * 两边一旦不一致，控制台一保存就会把这些设置丢回默认值。
+     * 所以保持扁平，靠「字段顺序 + 每条说人话的说明」来保证可读性。
+     */
+    qq: buildQqSchema(Schema).description('常用设置：面板、切片、在线播放器、错误上报'),
     advanced: Schema.object({
-    masters: Schema.array(Schema.string()).default([]).description('主人账号（用户 ID，例如 123456789）：接收报错通知，以及执行只有主人能用的指令'),
-    dataPath: Schema.string().default('data').description('数据目录：配置、数据库、临时文件都放在这里'),
-    debug: Schema.boolean().default(false).description('在日志里输出调试信息，排查问题时才需要打开'),
-    autoParse: Schema.boolean().default(true).description('群里有人发链接（或回复一条带链接的消息）就自动解析，不用打指令'),
-    webUiAuth: Schema.boolean().default(true).description('配置面板 /kkk 是否要求先登录 Koishi 控制台（默认开）。装了 auth 插件的部署只有登录后才能打开面板；没装 auth 插件时本来就没有登录这一说，这里不生效'),
-    }).collapse().hidden().description('Koishi 原生设置（一般不用改，已折叠）'),
-  }).description('配置入口：请在 WebUI 面板（/kkk）里修改'),
+      masters: Schema.array(Schema.string()).default([])
+        .description('主人账号，填用户 ID（不是 QQ 号），例如 123456789。可以收到报错通知，也能执行只有主人能用的指令'),
+      dataPath: Schema.string().default('data')
+        .description('数据目录：配置、数据库、临时文件都放在这里。改完要重启 Koishi'),
+      debug: Schema.boolean().default(false)
+        .description('在日志里输出调试信息。排查问题时才需要打开，平时会很吵'),
+      autoParse: Schema.boolean().default(true)
+        .description('群里有人发链接（或者回复一条带链接的消息）就自动解析，不用打指令'),
+      webUiAuth: Schema.boolean().default(true)
+        .description('配置面板 /kkk 是否要求先登录 Koishi 控制台。装了 auth 插件的部署建议保持打开；没装 auth 插件时本来就没有登录这一步，这里不生效'),
+    }).description('Koishi 原生设置（一般不用改）'),
+  }),
   Schema.object({
     /**
-     * 合并转发（两级开关）。
-     *
-     * 面板（/kkk 的 SPA）是上游打包好的产物，加不了新字段，所以这里单独给一组能在
-     * **控制台**里改的表单：全局开关 + 每个平台各自的开关与「合并哪些内容」。
-     * 值写回 config.json 的对应位置（app.fakeForward / app.forwardContent / <平台>.forward …）。
+     * 合并转发（两级开关）：值写回 config.json 的 app.fakeForward / app.forwardContent / <平台>.forward。
+     * 面板里也有同一组开关（见 scripts/patch-webui.mjs），改哪边都行，两边读的是同一份配置。
      */
     forward: Schema.object({
-      guide: Schema.const('').description(
-        '**合并转发**：打开后，一次解析产生的所有内容会等解析全部结束、合并成一条转发发出；' +
-        '关掉就是一边解析一边逐条发。\n\n' +
-        '**全局优先**：上面的「全局」打开 → 所有平台都合并，下面的平台开关不再起作用；' +
-        '全局关着时，才轮到各平台自己的开关。\n\n' +
-        '**默认全部关闭**。\n\n' +
-        '⚠️ 合并转发开着时，视频这类大文件如果塞进转发节点，某些适配器（如 NapCat）会整条拒绝 —— ' +
-        '这时它会自动改成单独发送，不会丢内容。\n\n' +
-        '另外：**markdown 只有 QQ 官方 bot 支持**，OneBot（NapCat / Lagrange 等个人号）不渲染，' +
-        '所以那边图片一律按普通图片段发（切片、图集都是），配置里的 markdown 选项对它没有意义。'
-      ),
       global: Schema.boolean().default(false)
-        .description('全局合并转发：打开后所有平台都合并（优先级高于下面的平台开关）'),
+        .description('全局合并转发。打开后所有平台都把一次解析的内容合成一条聊天记录发出；关着时下面各平台的开关才起作用。默认关闭'),
       globalContent: Schema.array(Schema.union(['text', 'image', 'video', 'file'])).default([])
-        .description('全局转发里合并哪些内容：text 文字 / image 图片 / video 视频 / file 文件。留空 = 用默认（text、image）。**语音和 markdown 不在候选里**：QQ 的聊天记录不支持语音气泡，markdown 只有官方 bot 认而官方适配器没有合并转发能力；没列出来的内容单独直发'),
-      douyin: Schema.boolean().default(false).description('抖音：单独打开合并转发（全局关着时生效）'),
+        .description('全局合并转发里放哪些内容：text 文字 / image 图片 / video 视频 / file 文件。没勾的单独直发，留空等于只放文字和图片。视频体积大时有些适配器（比如 NapCat）会拒绝整个聊天记录，这时会自动改成单独发送，不会丢内容'),
+      douyin: Schema.boolean().default(false).description('抖音：单独打开合并转发（全局关着时才起作用）'),
       douyinContent: Schema.array(Schema.union(['text', 'image', 'video', 'file'])).default([])
-        .description('抖音转发合并哪些内容（留空 = 用全局那份）'),
-      bilibili: Schema.boolean().default(false).description('B站：单独打开合并转发（全局关着时生效）'),
+        .description('抖音合并转发里放哪些内容，留空表示用全局那一份'),
+      bilibili: Schema.boolean().default(false).description('B站：单独打开合并转发（全局关着时才起作用）'),
       bilibiliContent: Schema.array(Schema.union(['text', 'image', 'video', 'file'])).default([])
-        .description('B站转发合并哪些内容（留空 = 用全局那份）'),
-      kuaishou: Schema.boolean().default(false).description('快手：单独打开合并转发（全局关着时生效）'),
+        .description('B站合并转发里放哪些内容，留空表示用全局那一份'),
+      kuaishou: Schema.boolean().default(false).description('快手：单独打开合并转发（全局关着时才起作用）'),
       kuaishouContent: Schema.array(Schema.union(['text', 'image', 'video', 'file'])).default([])
-        .description('快手转发合并哪些内容（留空 = 用全局那份）'),
-      xiaohongshu: Schema.boolean().default(false).description('小红书：单独打开合并转发（全局关着时生效）'),
+        .description('快手合并转发里放哪些内容，留空表示用全局那一份'),
+      xiaohongshu: Schema.boolean().default(false).description('小红书：单独打开合并转发（全局关着时才起作用）'),
       xiaohongshuContent: Schema.array(Schema.union(['text', 'image', 'video', 'file'])).default([])
-        .description('小红书转发合并哪些内容（留空 = 用全局那份）')
-    }).collapse().hidden().description('合并转发（全局 + 各平台）'),
-    upstream: buildUpstreamSchema(pluginRootDir).hidden().description(
-      '插件自身的配置（与 Karin 版 config.json 一致）。每项都带着上游默认值，枚举型字段是下拉框；' +
-      '**与默认值不同**的项会在启动时写回 config.json，保持默认值的项不写（这样你直接改文件的内容不会被覆盖）'
+        .description('小红书合并转发里放哪些内容，留空表示用全局那一份')
+    }).description('合并转发：把一次解析的内容合成一条聊天记录发出'),
+    upstream: buildUpstreamSchema(pluginRootDir).description(
+      '插件配置：接口库（Cookie / 代理 / API 服务）、抖音 / B站 / 快手 / 小红书 的解析与推送、推送订阅列表。'
+      + '每项都带默认值，枚举型是下拉框；和默认值不同的项会写回 config.json，保持默认值的不写（这样你直接改文件的内容不会被覆盖）'
     )
   })
 ])

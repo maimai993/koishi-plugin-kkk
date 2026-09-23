@@ -83,8 +83,16 @@ export function reportConfig (): ReportConfig {
   return { enabled, url: REPORT_URL, token: REPORT_TOKEN, logLines: REPORT_LOG_LINES, group: REPORT_GROUP }
 }
 
-/** 反馈群链接：QQ 官方的加群链接格式，面板里只填群号 */
-export const groupLinkOf = (group: string): string => 'https://qm.qq.com/q/' + group
+/**
+ * 反馈群的加群链接。
+ *
+ * ⚠️ **不能拿群号拼**：qm.qq.com/q/ 后面跟的是 QQ 给的**分享码**（一长串字母），
+ * 不是群号 —— 写成 https://qm.qq.com/q/1050229473 点开就是 404（用户实测反馈过）。
+ * 这里写死正确的分享链接；群号仍然照常显示在文案里。
+ */
+export const GROUP_INVITE_URL = 'https://qm.qq.com/q/viymkIPvvq'
+
+export const groupLinkOf = (_group?: string): string => GROUP_INVITE_URL
 
 /**
  * 已安装插件清单（名字 + 版本）。

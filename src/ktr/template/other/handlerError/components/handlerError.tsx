@@ -1053,7 +1053,7 @@ export const handlerError: React.FC<PosterProps<ApiErrorData>> = (props) => {
                   {data.report?.group ?? '1050229473'}
                 </p>
                 <p className="text-lg break-all opacity-80" style={{ color: secondaryColor }}>
-                  {data.report?.groupUrl ?? 'https://qm.qq.com/q/1050229473'}
+                  {data.report?.groupUrl ?? 'https://qm.qq.com/q/viymkIPvvq'}
                 </p>
               </div>
               <div>

@@ -128,7 +128,7 @@ export interface ApiErrorData {
     url: string
     /** 反馈群号 */
     group: string
-    /** 反馈群加群链接（https://qm.qq.com/q/群号） */
+    /** 反馈群加群链接（qm.qq.com 的分享链接；注意后面跟的是分享码，不是群号） */
     groupUrl: string
   }
   /** 是否为验证流程 */

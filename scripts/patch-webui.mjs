@@ -456,9 +456,9 @@ const TEXT_SWAPS = [
  * 用户实测反馈「关闭合并转发 还是合并的」—— 之前这个开关只管「用谁的身份展示」，
  * 关掉照样合并；现在它同时管「要不要合并」：打开才合并（触发者身份），关掉就逐条发。
  */
-const FAKE_FORWARD_DESC = '**全局合并转发（优先级最高）**：打开时所有平台的解析结果都合并成一条转发消息发出，'
-  + '转发用触发者身份展示；过程提示（开始解析 / 下载中 / 发送中…）不会进转发。**关掉就不合并**，'
-  + '内容像以前一样一条一条发。只有支持合并转发的适配器有效果（QQ 官方适配器没有这个能力，会自动退化成逐条发送）。'
+const FAKE_FORWARD_DESC = '全局合并转发，优先级最高：打开时所有平台的解析结果都合成一条聊天记录发出，用触发者的身份展示；'
+  + '「开始解析 / 下载中」这类过程提示不会进去。关掉就不合并，内容一条一条发。'
+  + '只对支持聊天记录的适配器有效果（QQ 官方适配器没有这个能力，会自动改成逐条发送）。'
 
 const DESC_BY_LABEL = [
   ['谁可以触发扫码登录', PERM_DESC],
@@ -787,9 +787,9 @@ const FORWARD_END = '/*KKK-FORWARD-END*/'
 const FORWARD_OPTIONS = '[' + [['text', '文字'], ['image', '图片'], ['video', '视频'], ['file', '文件']]
   .map(([value, label]) => '{value:' + q(value) + ',label:' + q(label) + '}').join(',') + ']'
 
-const FORWARD_SWITCH_DESC = '本平台单独打开合并转发。**全局优先**：通用里的「解析结果合并转发」打开时，所有平台都会合并（这里开不开都一样）；只有全局关着时这个开关才起作用。默认关闭。'
-const FORWARD_CONTENT_DESC = '合并转发里包含哪些内容：没勾选的内容会**单独直发**，不进转发节点。留空 = 用通用里那份全局设置。提示：视频体积大时有些适配器（如 NapCat）会拒绝整个转发节点，这时会自动改成单独发送，不会丢内容。'
-const FORWARD_GLOBAL_CONTENT_DESC = '全局合并转发里包含哪些内容（通用页这个开关打开时生效，所有平台共用）：没勾选的内容单独直发。视频类内容建议先不勾——转发节点太大的话适配器会整条拒绝。语音和 markdown 不在候选里：QQ 的聊天记录不支持语音气泡，markdown 只有官方 bot 认、而官方适配器没有合并转发能力。'
+const FORWARD_SWITCH_DESC = '本平台单独打开合并转发。注意全局优先：通用里的「解析结果合并转发」打开时所有平台都会合并，这个开关开不开都一样；只有全局关着时它才起作用。默认关闭。'
+const FORWARD_CONTENT_DESC = '合并转发里放哪些内容：没勾的会单独发出去、不进聊天记录。留空表示用通用里那份全局设置。视频体积大时有些适配器（比如 NapCat）会拒绝整条聊天记录，这时会自动改成单独发送，不会丢内容。'
+const FORWARD_GLOBAL_CONTENT_DESC = '全局合并转发里放哪些内容（通用页那个开关打开时生效，所有平台共用）：没勾的单独发。视频建议先不勾，聊天记录太大时适配器会整条拒绝。语音和 markdown 不在候选里：QQ 的聊天记录不支持语音气泡，markdown 只有官方 bot 认、而官方适配器没有合并转发能力。'
 
 /** 平台页的锚点：紧跟在「解析开关」那一项之后插入 */
 const FORWARD_TABS = [
@@ -813,7 +813,8 @@ function insertAfterCall (text, needle, code) {
 /** 平台页里那一段：小标题 + 本平台开关 + 本平台内容多选 */
 function forwardSectionCode (platform, label) {
   return 't.renderSubSection(' + q('合并转发') + ',(0,U.jsxs)(U.Fragment,{children:['
-    + 't.renderSwitch(' + arr([platform, 'forward']) + ',' + q('合并转发（' + label + '）') + ',' + q(FORWARD_SWITCH_DESC) + ')'
+    // 分类名已经写着平台名了（哔哩哔哩页里再写一遍「合并转发（哔哩哔哩）」是重复）
+    + 't.renderSwitch(' + arr([platform, 'forward']) + ',' + q('合并转发') + ',' + q(FORWARD_SWITCH_DESC) + ')'
     + ',t.renderCheckboxGroup(' + arr([platform, 'forwardContent']) + ',' + q('合并转发内容') + ',' + q(FORWARD_CONTENT_DESC) + ',' + FORWARD_OPTIONS + ')'
     + ']}))'
 }
