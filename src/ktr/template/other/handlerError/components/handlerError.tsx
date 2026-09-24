@@ -941,7 +941,7 @@ export const handlerError: React.FC<PosterProps<ApiErrorData>> = (props) => {
 
         {/* 底部版本信息 */}
         <div className="mt-auto pt-12" style={{ borderTop: `2px solid ${dark ? 'rgba(248,113,113,0.15)' : 'rgba(252,165,165,0.3)'}` }}>
-          {/* 版本信息：框架版本 / 插件版本 / 适配器 —— 合并成一行，适配器只显示名称 */}
+          {/* 版本信息：框架版本 / 插件版本 / 适配器 —— 合并成一行；适配器带版本号（取不到就不占位） */}
           <div className="flex items-center flex-wrap gap-x-16 gap-y-6 mb-12">
             <div className="flex items-center gap-6">
               <img src={(data as any).frameworkLogo ?? '/image/frame-logo.png'} className="h-16 w-auto" alt="Framework" />
@@ -976,6 +976,9 @@ export const handlerError: React.FC<PosterProps<ApiErrorData>> = (props) => {
                 <div>
                   <p className="text-xl" style={{ color: mutedColor }}>Adapter / 适配器</p>
                   <p className="text-3xl font-bold truncate" style={{ color: accentColor }}>{data.adapterInfo.name}</p>
+                  {data.adapterInfo.version && (
+                    <p className="text-2xl font-bold truncate" style={{ color: mutedColor }}>v{data.adapterInfo.version}</p>
+                  )}
                 </div>
               </div>
             )}

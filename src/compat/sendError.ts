@@ -221,6 +221,32 @@ export function describeSendFailure (failure: SendFailure): string {
   return code + (text || failure.kind)
 }
 
+/**
+ * 给「完全没有说明」的发送异常补一段人话。
+ *
+ * qq-chat 的编码器有时抛一个 message 为空的 Error（栈里只有 `_QQMessageEncoder.send`），
+ * 这种异常一路冒到错误卡片上就是一片空白 —— 用户看不出发生了什么，我们也无从排查。
+ * 有 message 的错误原样返回（错误码就在里面，调用方还要用）；空 message 的才包一层，
+ * 把异常类型、判错结论和栈顶帧拼进 message，原异常挂在 cause 上（判错逻辑会继续往里挖）。
+ *
+ * @param error 适配器抛出的原始异常
+ * @param failure 已经判好的失败分类
+ */
+export function decorateSendError (error: any, failure: SendFailure): any {
+  if (String(error?.message ?? '').trim()) return error
+  const name = String(error?.name || error?.constructor?.name || 'Error')
+  const frame = String(error?.stack ?? '').split('\n').slice(1, 3).join(' ').trim()
+  const reason = describeSendFailure(failure)
+  const message = '消息发送失败（' + name + '）：'
+    + (reason && reason !== failure.kind ? reason : '适配器没有给出原因')
+    + (frame ? '｜' + frame.slice(0, 200) : '')
+  const wrapped = new Error(message)
+  wrapped.name = 'SendFailedError'
+  ;(wrapped as any).cause = error
+  ;(wrapped as any).sendFailureKind = failure.kind
+  return wrapped
+}
+
 /** 是不是「换主动消息通道就能救」的那种失败（只有被动回复超限算） */
 export function isPassiveLimitFailure (failure: SendFailure): boolean {
   return failure.kind === 'passive-limit'

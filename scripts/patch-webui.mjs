@@ -146,42 +146,16 @@ const RENDERER_START = '/*KKK-RENDERER-START*/'
 const RENDERER_END = '/*KKK-RENDERER-END*/'
 
 /**
- * 「优先渲染器」这一项挂在「通用」分类下，**作为「渲染设置」的兄弟分组**插在它后面。
+ * 清理老版本注入过的「通用设置 → 优先渲染器」块。
  *
- * 存储位置是上游配置的 `app.renderer`（和 renderScale 同一个段），取值 'shotkit' | 'puppeteer'。
- * 面板里用下拉框（i = 该分类的选项渲染器），默认值放在上游 config.json / app.yaml 里，
- * 这里只负责把控件画出来。
- *
- * 文案里那句 https 的提醒是实测结论，不是猜测：预编译内核在 Windows 上拉不到 https 资源，
- * 而卡片里的封面、头像基本都是 https，选内核会缺图 —— 用户看到选项说明就知道该选哪个。
+ * 3.5.0 起插件只用浏览器渲染（不再支持 shotkit 内核），这个选项没有意义了 ——
+ * 注入代码删掉，但**保留这段清理**：已经装过的部署里那个块还躺在各自的前端包里，
+ * 不摘掉的话面板上会一直挂着一个早就失效的下拉框（改它也不会有任何效果）。
+ * 可反复执行（按标记切）。
  */
-const RENDERER_FIELD = 'i(' + arr(['app', 'renderer']) + ',' + q('优先渲染器') + ',' + q(
-  '卡片优先用哪个渲染器渲染。两个渲染服务都在时会按这里选的走，缺一个就自动用另一个；',
-) + ',['
-  + '{label:' + q('shotkit 内核（默认）') + ',value:' + q('shotkit') + ',description:' + q(
-    '不依赖浏览器，单张几十毫秒、内存低。注意：当前预编译内核在 Windows 上加载不了 https 资源，卡片里的远程封面、头像会缺图。',
-  ) + '}'
-  + ',{label:' + q('浏览器（Chrome / Edge）') + ',value:' + q('puppeteer') + ',description:' + q(
-    '完整渲染、远程资源正常，单张通常 1 秒以上，需要浏览器渲染服务（koishi-plugin-puppeteer 或同类）。',
-  ) + '}'
-  + '],e=>e)'
-
-const RENDERER_CODE = 'o(' + q('通用设置') + ',(0,U.jsxs)(U.Fragment,{children:[' + RENDERER_FIELD + ']}))'
-
-/** 插到「渲染设置」这个分组后面（兄弟节点）。可重复执行：先按标记删上次插的，再插一次。 */
-function patchRendererSetting (text, name) {
-  let out = stripMarkedWithComma(text, RENDERER_START, RENDERER_END)
-  const at = out.indexOf('`渲染设置`')
-  if (at < 0) return out
-  let open = -1
-  for (let i = at - 1; i >= 0 && i > at - 40; i--) {
-    if (out[i] === '(') { open = i; break }
-  }
-  if (open < 0) return out
-  const close = matchParen(out, open)
-  if (close < 0) return out
-  out = out.slice(0, close + 1) + ',' + RENDERER_START + RENDERER_CODE + RENDERER_END + out.slice(close + 1)
-  console.log('[kkk] 「通用设置 → 优先渲染器」已注入到「渲染设置」之后: ' + name)
+function stripLegacyRendererSetting (text, name) {
+  const out = stripMarkedWithComma(text, RENDERER_START, RENDERER_END)
+  if (out !== text) console.log('[kkk] 已摘掉面板里过期的「优先渲染器」分组: ' + name)
   return out
 }
 
@@ -784,12 +758,23 @@ function applyTextReplacements (text, name) {
 const FORWARD_START = '/*KKK-FORWARD-START*/'
 const FORWARD_END = '/*KKK-FORWARD-END*/'
 
+const forwardOption = ([value, label]) => '{value:' + q(value) + ',label:' + q(label) + '}'
 const FORWARD_OPTIONS = '[' + [['text', '文字'], ['image', '图片'], ['video', '视频'], ['file', '文件']]
-  .map(([value, label]) => '{value:' + q(value) + ',label:' + q(label) + '}').join(',') + ']'
+  .map(forwardOption).join(',') + ']'
+/**
+ * 「流程图」只有 B站互动视频有（它是剧情图，本身是图片但可以单独控制），
+ * 所以只补在 **B站** 和 **通用（全局）** 这两处候选里：抖音 / 快手 / 小红书 加了也是永远匹配不到的假选项，
+ * 跟当初删掉「语音 / markdown」是同一个理由（见 ParseForward 的说明）。
+ */
+const FORWARD_OPTIONS_CHART = '[' + [['text', '文字'], ['image', '图片'], ['video', '视频'], ['file', '文件'], ['chart', '流程图']]
+  .map(forwardOption).join(',') + ']'
 
 const FORWARD_SWITCH_DESC = '本平台单独打开合并转发。注意全局优先：通用里的「解析结果合并转发」打开时所有平台都会合并，这个开关开不开都一样；只有全局关着时它才起作用。默认关闭。'
 const FORWARD_CONTENT_DESC = '合并转发里放哪些内容：没勾的会单独发出去、不进聊天记录。留空表示用通用里那份全局设置。视频体积大时有些适配器（比如 NapCat）会拒绝整条聊天记录，这时会自动改成单独发送，不会丢内容。'
-const FORWARD_GLOBAL_CONTENT_DESC = '全局合并转发里放哪些内容（通用页那个开关打开时生效，所有平台共用）：没勾的单独发。视频建议先不勾，聊天记录太大时适配器会整条拒绝。语音和 markdown 不在候选里：QQ 的聊天记录不支持语音气泡，markdown 只有官方 bot 认、而官方适配器没有合并转发能力。'
+const FORWARD_GLOBAL_CONTENT_DESC = '全局合并转发里放哪些内容（通用页那个开关打开时生效，所有平台共用）：没勾的单独发。视频建议先不勾，聊天记录太大时适配器会整条拒绝。语音和 markdown 不在候选里：QQ 的聊天记录不支持语音气泡，markdown 只有官方 bot 认、而官方适配器没有合并转发能力。「流程图」是 B站互动视频的剧情图，勾上才会进聊天记录。'
+
+/** B站那一栏多说一句：流程图只有 B站有（别的平台页里连候选项都没有） */
+const FORWARD_CONTENT_DESC_BILIBILI = FORWARD_CONTENT_DESC + '「流程图」是互动视频的剧情图：勾上就进聊天记录，不勾就单独发出去。'
 
 /** 平台页的锚点：紧跟在「解析开关」那一项之后插入 */
 const FORWARD_TABS = [
@@ -812,10 +797,13 @@ function insertAfterCall (text, needle, code) {
 
 /** 平台页里那一段：小标题 + 本平台开关 + 本平台内容多选 */
 function forwardSectionCode (platform, label) {
+  /** B站那一栏多一个「流程图」候选（只有它有互动视频剧情图） */
+  const options = platform === 'bilibili' ? FORWARD_OPTIONS_CHART : FORWARD_OPTIONS
+  const description = platform === 'bilibili' ? FORWARD_CONTENT_DESC_BILIBILI : FORWARD_CONTENT_DESC
   return 't.renderSubSection(' + q('合并转发') + ',(0,U.jsxs)(U.Fragment,{children:['
     // 分类名已经写着平台名了（哔哩哔哩页里再写一遍「合并转发（哔哩哔哩）」是重复）
     + 't.renderSwitch(' + arr([platform, 'forward']) + ',' + q('合并转发') + ',' + q(FORWARD_SWITCH_DESC) + ')'
-    + ',t.renderCheckboxGroup(' + arr([platform, 'forwardContent']) + ',' + q('合并转发内容') + ',' + q(FORWARD_CONTENT_DESC) + ',' + FORWARD_OPTIONS + ')'
+    + ',t.renderCheckboxGroup(' + arr([platform, 'forwardContent']) + ',' + q('合并转发内容') + ',' + q(description) + ',' + options + ')'
     + ']}))'
 }
 
@@ -827,7 +815,7 @@ function patchForwardFields (text, name) {
   // ① 通用页：全局合并内容（开关本身是原版就有的 app.fakeForward）
   out = insertAfterCall(out, arr(['app', 'fakeForward']) + ',' + q('解析结果合并转发'),
     FORWARD_START + 't.renderCheckboxGroup(' + arr(['app', 'forwardContent']) + ',' + q('合并转发内容（全局）')
-    + ',' + q(FORWARD_GLOBAL_CONTENT_DESC) + ',' + FORWARD_OPTIONS + ')' + FORWARD_END)
+    + ',' + q(FORWARD_GLOBAL_CONTENT_DESC) + ',' + FORWARD_OPTIONS_CHART + ')' + FORWARD_END)
 
   // ② 平台页：本平台开关 + 本平台内容
   for (const [platform, label, anchor] of FORWARD_TABS) {
@@ -887,9 +875,11 @@ for (const file of files) {
   // 必须在 patchPermFields 之后：那个函数会先剥掉旧的 APP 标记块再重写「交互设置」里的字段，
   // 我们的分组要插在「交互设置」**之后**，顺序反了会插到它里面去（就是这次要修的样式问题）
   text = patchAppSections(text, name)
-  // 同样必须晚于 patchPermFields / patchAppSections：它锚定的是「渲染设置」的收尾括号
-  text = patchRendererSetting(text, name)
+  // 老版本在这里注入过「优先渲染器」分组：3.5.0 起不再支持 shotkit 内核，只剩摘除
+  text = stripLegacyRendererSetting(text, name)
   text = patchForwardFields(text, name)
+  text = patchChartOption(text, name)
+  text = patchChartOptionList(text, name)
   text = patchDescriptions(text, name)
   text = applyTextReplacements(text, name)
 
@@ -897,4 +887,100 @@ for (const file of files) {
   if (text.length !== before || before !== fs.statSync(file).size || !isBundle) console.log('[kkk] 已处理: ' + name + '（' + before + ' → ' + text.length + ' 字节）')
 }
 
+
+/* ---------------- 解析时发送的内容：补上「流程图」勾选项 ---------------- */
+
+/**
+ * 面板里「解析时发送的内容」的候选项是**面板自己写死的一份列表**（打包进前端包里了），
+ * 不是按配置里的数组值渲染的 —— 所以新加的 `chart` 对一个已经存在的安装永远不会自己冒出来，
+ * 必须把选项塞进控件本身。
+ *
+ * ⚠️ 这份列表在四个平台页之间是**共用变量**（ `jL` = 信息 / 评论图 / 视频 / 图片 ），
+ * B站那一栏是 `jL.filter(e=>e.value!==\`image\`)` 过滤出来的。上一版补丁按
+ * 「B站 sendContent 后面那个 `[` 开头的选项数组」去找，命中的却是**另一处**同名路径
+ * （判定表 / 补全表里的字符串数组），检查不通过就静默 return —— 于是面板里一直**没有**
+ * 「流程图」这个勾选项（控制台那边有，因为它读的是 YAML 注释）。
+ *
+ * 现在改成按「B站那一栏自己的渲染调用」定位：路径 + 标题「解析时发送的内容」，
+ * 再把它的第 4 个参数（选项数组）追加一项。
+ * 幂等：带上 /*KKK-CHART*\/ 标记，补过一次就不再补；万一找不到控件，**大声报警**而不是静默跳过。
+ */
+/** 按「顶层逗号」切分一段参数列表（字符串与括号里的逗号不算） */
+function splitTopLevel (code) {
+  const out = []
+  let current = ''
+  let depth = 0
+  let quote = ''
+  for (let i = 0; i < code.length; i++) {
+    const ch = code[i]
+    if (quote) {
+      current += ch
+      if (ch === '\\') { current += code[++i] ?? ''; continue }
+      if (ch === quote) quote = ''
+      continue
+    }
+    if (ch === BT || ch === '"' || ch === "'") { quote = ch; current += ch; continue }
+    if (ch === '(' || ch === '[' || ch === '{') depth++
+    else if (ch === ')' || ch === ']' || ch === '}') depth--
+    if (ch === ',' && depth === 0) { out.push(current); current = ''; continue }
+    current += ch
+  }
+  if (current.trim()) out.push(current)
+  return out
+}
+
+function patchChartOption (text, name) {
+  /**
+   * 补丁标记写在这里而不是模块顶层：主循环在本文件靠前的位置就跑完了，
+   * 顶层 `const` 那时候还在时间死区（TDZ）里 —— 函数声明倒是已经提升好了。
+   */
+  const CHART_MARK = '/*KKK-CHART*/'
+  if (text.includes(CHART_MARK)) return text
+  const option = '{value:' + q('chart') + ',label:' + q('流程图') + '}'
+  /** 锚点 = B站那一栏的渲染调用（第一个参数是路径，第二个是标题） */
+  const anchor = arr(['bilibili', 'sendContent']) + ',' + q('解析时发送的内容')
+  const at = text.indexOf(anchor)
+  if (at < 0) {
+    // 只有主包才该有这个控件：布局 / 主题 / index.html 里没有是正常的，别刷屏
+    if (text.includes('sendContent')) console.warn('[kkk] ' + name + '：没找到 B站「解析时发送的内容」控件，流程图勾选项没补上（前端包可能换版本了）')
+    return text
+  }
+  const open = text.lastIndexOf('(', at)
+  if (open < 0) return text
+  const close = matchParen(text, open)
+  if (close < 0) return text
+  const args = splitTopLevel(text.slice(open + 1, close))
+  // 参数顺序：路径 / 标题 / 说明 / 选项数组 / 是否禁用
+  if (args.length < 4) return text
+  const options = args[3]
+  /**
+   * 认一下：这个参数确实是「候选项数组」。
+   * 两种写法都要认：写死的数组（老版本包，里面有 info / video 这些字面量），
+   * 或者**过滤共用列表**（当前版本：\`jL.filter(e=>e.value!==\`image\`)\` —— 里面一个候选项名都没有，
+   * 上一版就是死在这一步：守着字面量、认不出表达式，于是又静默跳过了）。
+   */
+  if (!options.startsWith('[') && !/\b\w+\s*\.\s*filter\s*\(/.test(options)) return text
+  if (/chart/.test(options)) return text
+  args[3] = options.startsWith('[')
+    // 选项数组写死在这一处（老版本包）→ 直接补在数组里
+    ? options.slice(0, -1) + ',' + CHART_MARK + option + ']'
+    // 共用列表过滤出来的（当前版本：jL.filter(…)）→ 追加一项
+    : options + '.concat([' + CHART_MARK + option + '])'
+  console.log('[kkk] 「解析时发送的内容」已补上「流程图」勾选项: ' + name)
+  return text.slice(0, open) + '(' + args.join(',') + ')' + text.slice(close + 1)
+}
+
+/**
+ * 面板还有一份**值白名单**（补全表）：`{path:["bilibili","sendContent"],options:[…]}`。
+ * 保存前面板会拿它把配置里的数组洗一遍 —— **不在表里的值会被丢掉**。
+ * 所以 `chart` 也必须补进这张表，否则勾上「流程图」一保存就被面板自己清掉了。
+ */
+function patchChartOptionList (text, name) {
+  const B = String.fromCharCode(96)
+  const before = '{path:[' + B + 'bilibili' + B + ',' + B + 'sendContent' + B + '],options:[' + B + 'info' + B + ',' + B + 'comment' + B + ',' + B + 'video' + B + ',' + B + 'image' + B + ']}'
+  const after = '{path:[' + B + 'bilibili' + B + ',' + B + 'sendContent' + B + '],options:[' + B + 'info' + B + ',' + B + 'comment' + B + ',' + B + 'video' + B + ',' + B + 'image' + B + ',' + B + 'chart' + B + ']}'
+  if (!text.includes(before)) return text
+  console.log('[kkk] 「解析时发送的内容」候选项已补上 chart: ' + name)
+  return text.split(before).join(after)
+}
 console.log('[kkk] 完成，共处理 ' + files.length + ' 个文件')

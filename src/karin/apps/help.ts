@@ -1,9 +1,11 @@
-import karin, { config } from 'node-karin'
+import karin, { config, logger } from 'node-karin'
 
 import { Render } from '@/module'
 import { Config } from '@/module/utils/Config'
 import { wrapWithErrorHandler } from '@/module/utils/ErrorHandler'
 import { collectRuntimeReport, getLocalChangelog } from '@/module/utils/runtime-report'
+
+import { classifySendFailure, describeSendFailure } from '../../compat/sendError'
 
 type Role = 'master' | 'member'
 type RoleItem = { title: string; description: string; icon?: string | { name: string; color?: string }; roles?: Role[] }
@@ -190,7 +192,7 @@ const handleHelp = wrapWithErrorHandler(
 // 包装版本命令
 const handleVersion = wrapWithErrorHandler(
   async (e) => {
-    const img = await Render(e, 'other/runtime', collectRuntimeReport(e))
+    const img = await Render(e, 'other/runtime', await collectRuntimeReport(e))
     await e.reply(img)
     return true
   },
@@ -198,6 +200,18 @@ const handleVersion = wrapWithErrorHandler(
     businessName: 'KKK版本'
   }
 )
+
+/**
+ * 把 Markdown 更新日志压成纯文字。
+ *
+ * 图片发不出去时的降级用：去掉标题号与加粗符号就够了，内容本身不改写。
+ */
+const toPlainChangelog = (markdown: string): string =>
+  markdown
+    .replace(/^#{1,6}\s*/gm, '')
+    .replace(/\*\*/g, '')
+    .slice(0, 1800)
+    .trim()
 
 // 包装更新日志命令
 const handleChangelog = wrapWithErrorHandler(
@@ -213,7 +227,16 @@ const handleChangelog = wrapWithErrorHandler(
       localVersion: '',
       remoteVersion: ''
     })
-    await e.reply(img)
+    try {
+      await e.reply(img)
+    } catch (error) {
+      /**
+       * 图片发不出去（体积超限、主动消息被拒、适配器抽风…）时退回纯文字。
+       * 更新日志本身是文字，降级之后用户照样看得到更新了什么，比只弹一张错误卡片好。
+       */
+      logger.warn('[kkk] 更新日志图片发送失败，改用文字发送：' + describeSendFailure(classifySendFailure(error)))
+      await e.reply(toPlainChangelog(forwardLogs))
+    }
     return true
   },
   {

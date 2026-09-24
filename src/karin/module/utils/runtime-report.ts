@@ -5,6 +5,7 @@ import path from 'node:path'
 import type { RuntimeReportData } from '@template/template/other/runtime/components/types'
 import { isDocker, logs, type Message } from 'node-karin'
 
+import { queryAdapterImplementation } from '../../../compat/adapter-info'
 import { Root } from '../../root'
 import { formatBuildTime, getBuildMetadata } from './build-metadata'
 import { Config } from './Config'
@@ -62,10 +63,16 @@ export const getLocalChangelog = (length: number): string => {
  * 不采集账号、主机名、用户目录、网络地址、环境变量内容、启动参数或适配器鉴权信息，
  * 保证该命令在群聊中触发时不会把机器身份和凭据写入图片。
  *
+ * 采集前会尝试问一句适配器的实现端版本（NapCat / Lagrange 这类），带 1.5 秒超时，
+ * 问不到就退化成「适配器插件版本」，绝不让海报卡住。
+ *
  * @param event 当前消息事件
  */
-export const collectRuntimeReport = (event: Message): RuntimeReportData => {
+export const collectRuntimeReport = async (event: Message): Promise<RuntimeReportData> => {
   const packageMetadata = Root.pkg as PluginPackageMetadata
+  // 兼容层里 e.bot 是包装对象，真实 Koishi Bot 在 .bot 上：问实现端版本要用真的那个
+  const koishiBot: any = (event.bot as any)?.bot ?? event.bot
+  await queryAdapterImplementation(koishiBot)
   const adapter = event.bot.adapter
   const cpus = os.cpus()
   const memory = process.memoryUsage()
@@ -74,7 +81,10 @@ export const collectRuntimeReport = (event: Message): RuntimeReportData => {
   const buildMetadata = getBuildMetadata()
   const currentChangelog = getLocalChangelog(1)
   const renderScale = Math.min(2, Math.max(0.5, Number(Config.app.renderScale) / 100))
-  const buildState = !buildMetadata ? 'unavailable' : buildMetadata.version === Root.pluginVersion ? 'matched' : 'mismatched'
+  // 没有构建产物（老安装包）时依然会拿到一份 package.json 兜底元数据，所以用「有没有构建时间」判断
+  const buildState = !buildMetadata.buildTime
+    ? 'unavailable'
+    : buildMetadata.version === Root.pluginVersion ? 'matched' : 'mismatched'
 
   return {
     snapshotAt: new Intl.DateTimeFormat('zh-CN', {
@@ -112,13 +122,15 @@ export const collectRuntimeReport = (event: Message): RuntimeReportData => {
       processUptime: formatDuration(process.uptime())
     },
     adapter: {
-      name: adapter.name || '未知',
+      // 卡片上要好看：NapCat / OneBot 这种；取不到就退回平台名
+      name: (adapter as any).displayName || adapter.name || '未知',
       version: adapter.version || '未知',
       platform: String(adapter.platform || '未知'),
       protocol: String(adapter.protocol || '未知'),
       standard: String(adapter.standard || '未知'),
       communication: String(adapter.communication || '未知'),
-      connectedFor: formatDuration(Math.max(0, (Date.now() - adapter.connectTime) / 1000))
+      // connectTime 为 0 表示「没记到上线时间」，此时别拿 1970 年去算天数
+      connectedFor: adapter.connectTime > 0 ? formatDuration(Math.max(0, (Date.now() - adapter.connectTime) / 1000)) : '未知'
     },
     renderer: {
       scale: `${renderScale.toFixed(2)}x`,

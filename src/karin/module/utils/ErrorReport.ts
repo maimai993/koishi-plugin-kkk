@@ -19,6 +19,7 @@ import { MAX_CAPTURED_LOG_CHARS, foldAndTruncate } from '../../../compat/fold'
 import { tryGetRuntime } from '../../../compat/runtime'
 import { readQqOptions } from '../../../qqOptions'
 import { Root } from '../../root'
+import { Config } from './Config'
 import { getBuildMetadata } from './build-metadata'
 
 /**
@@ -192,6 +193,101 @@ const makeReportId = (): string => {
   return stamp + '-' + Math.random().toString(36).slice(2, 8)
 }
 
+/**
+ * **用框架原生 API 补齐来源信息**（用户要求：上报里「来源信息」不能是一片「—」）。
+ *
+ * 以前只读 event 上的几个字段 —— 推送任务（B站推送 / 抖音推送）的 event 是**合成**的，
+ * 根本没有 channelId / guildId，于是详情页里群号、频道全是空的。
+ * 现在：
+ *   - 先从 event 上取（消息场景最准）；
+ *   - 取不到就退回 bot 的原生字段（platform / selfId / user.name）；
+ *   - 群名 / 用户名尽量用 bot.getGuild() 这类**原生接口**查出来（查不到就算了，绝不让上报卡住）。
+ */
+const collectSource = async (input: UploadErrorReportInput, adapterInfo: any): Promise<Record<string, any>> => {
+  const event: any = input.event ?? {}
+  const bot: any = event?.bot?.bot ?? event?.bot
+  const channelId = String(event?.channelId ?? event?.contact?.peer ?? event?.guildId ?? '')
+  const guildId = String(event?.guildId ?? event?.contact?.guildId ?? channelId)
+  const userId = String(event?.userId ?? event?.sender?.userId ?? event?.author?.userId ?? '')
+  const source: Record<string, any> = {
+    platform: String(bot?.platform ?? event?.platform ?? adapterInfo?.platform ?? ''),
+    route: String(input.route ?? ''),
+    stage: String(input.stage ?? ''),
+    business: String(input.business ?? ''),
+    guildId,
+    channelId,
+    userId,
+    selfId: String(event?.selfId ?? bot?.selfId ?? bot?.account?.selfId ?? ''),
+    // 机器人名 / 用户名：能取到就填，详情页里比一串数字好认
+    botName: String(bot?.user?.name ?? bot?.username ?? bot?.account?.name ?? ''),
+    userName: String(event?.sender?.nick ?? event?.author?.nick ?? event?.username ?? event?.sender?.name ?? ''),
+    guildName: '',
+    command: foldAndTruncate(String(event?.msg ?? event?.content ?? ''), 300)
+  }
+  // 群名（框架原生接口；取不到就留空，不抛错）
+  if (!source.guildName && channelId && typeof bot?.getGuild === 'function') {
+    try {
+      const guild: any = await bot.getGuild(channelId)
+      source.guildName = String(guild?.name ?? guild?.guildName ?? '')
+    } catch { /* 频道查不到就算了 */ }
+  }
+  /**
+   * 阶段（stage）：解析链路里抛的错会带一句「步骤「渲染评论区」失败」，
+   * 直接抽出来当阶段，详情页上就能看出是卡在哪一步（route 同理，有就带）。
+   */
+  if (!source.stage) {
+    const message = String((input.error as any)?.message ?? '')
+    const step = /步骤「([^」]+)」/.exec(message) ?? /步骤失败[（(]([^）)]+)[）)]/.exec(message)
+    if (step) source.stage = step[1]
+  }
+  return source
+}
+
+/** 上游配置的几段（与 config.json 的顶层键一致）；Config 是只有 get 的 Proxy，只能按名字取 */
+const UPSTREAM_SECTIONS = ['amagi', 'app', 'douyin', 'bilibili', 'kuaishou', 'xiaohongshu', 'pushlist']
+
+/** 这些键一律不上传（cookie / 密钥 / 密码之类） */
+const SECRET_KEY = /cookie|token|secret|password|passwd|sessdata|bili_jct|csrf|authorization|apikey|api_key/i
+
+/**
+ * **上报用的配置快照**：把「改过什么」也带上去，复现问题才有依据。
+ *
+ * 两条硬规矩：
+ *   1. **cookie 一个都不传**（SESSDATA / bili_jct / 抖音那一长串都在 amagi.cookies 里，整块丢掉）；
+ *   2. 其余凡是键名像密钥/密码的（token / secret / password / apiKey…）也一律换成 '***'。
+ */
+const snapshotConfig = (upstream: any, qq: Record<string, any>): Record<string, any> => {
+  const clean = (value: any, depth: number): any => {
+    if (depth > 6 || value === null || value === undefined) return value
+    if (Array.isArray(value)) return value.slice(0, 200).map((item) => clean(item, depth + 1))
+    if (typeof value !== 'object') return typeof value === 'string' ? foldAndTruncate(value, 500) : value
+    const out: Record<string, any> = {}
+    for (const [key, item] of Object.entries(value)) {
+      if (SECRET_KEY.test(key)) { out[key] = '***'; continue }
+      out[key] = clean(item, depth + 1)
+    }
+    return out
+  }
+  const upstreamClean = clean(upstream ?? {}, 0) as Record<string, any>
+  // cookie 整块不要：键名可能不叫 cookie（amagi.cookies.bilibili 才是），所以直接在源头删掉
+  if (upstreamClean?.amagi && typeof upstreamClean.amagi === 'object') delete upstreamClean.amagi.cookies
+  return { qq: clean(qq, 0), upstream: upstreamClean }
+}
+
+/** 日志只留本项目（kkk）的行：日志文件是 JSON 行，控制台那份是人读的文本行，两种都要认 */
+const isOwnLogLine = (line: string): boolean => {
+  const text = String(line ?? '').trim()
+  if (!text) return false
+  if (text.startsWith('{')) {
+    try {
+      const record = JSON.parse(text)
+      const name = String(record?.name ?? '')
+      // 本插件的日志 name 是 kkk；带 paths 的是它的作用域
+      return name === 'kkk' || name === Root.pluginName || (Array.isArray(record?.meta?.paths) && record.meta.paths.includes('uclubw'))
+    } catch { /* 不是完整 JSON，按文本处理 */ }
+  }
+  return /\bkkk\b/.test(text)
+}
 export interface UploadErrorReportInput {
   error: Error
   /** 业务名（解析 / 推送…） */
@@ -226,23 +322,39 @@ export const uploadErrorReport = async (input: UploadErrorReportInput): Promise<
   const id = makeReportId()
   const lines = (input.logs ?? []).slice(-Math.max(config.logLines, 0))
     .map((line) => foldAndTruncate(line, LOG_LINE_LIMIT))
-  const envLogs = readLogFileTail(Math.min(config.logLines, 300))
+  const envLogsRaw = readLogFileTail(Math.min(config.logLines, 300))
+  /** 宿主日志文件里**只留本项目（kkk）的行**（用户要求：别把整台机器所有插件的日志都传上去） */
+  const envLogs = { ...envLogsRaw, lines: envLogsRaw.lines.filter((line) => isOwnLogLine(line)) }
+  const source = await collectSource(input, adapterInfo)
+  const runtimeConfig: any = (tryGetRuntime()?.config ?? {}) as any
+  const configSnapshot = (() => {
+    try {
+      /**
+       * 上游那份（接口库 / 各平台 / 推送列表）以 **Config** 为准：它是 config.json 的读取代理，
+       * 也是实际生效的那份；运行时 config 上的 `upstream` 只在控制台保存过才会有。
+       *
+       * 注意 Config 是个**只有 get 的 Proxy**（没有 ownKeys），直接 Object.entries 会得到空对象 ——
+       * 所以按已知的几段逐个取值再拼。
+       */
+      const upstream: Record<string, any> = {}
+      for (const section of UPSTREAM_SECTIONS) {
+        try {
+          const value = (Config as any)[section]
+          if (value !== undefined) upstream[section] = value
+        } catch { /* 某一段读不到就跳过 */ }
+      }
+      return snapshotConfig(upstream, readQqOptions(runtimeConfig))
+    } catch (error: any) {
+      logger.debug('[错误上报] 配置快照生成失败（忽略）: ' + String(error?.message ?? error))
+      return undefined
+    }
+  })()
 
   const payload: Record<string, any> = {
     id,
     time: Date.now(),
     plugin: { name: Root.pluginName, version: Root.pluginVersion },
-    source: {
-      platform: String(input.event?.bot?.platform ?? input.event?.platform ?? adapterInfo?.platform ?? ''),
-      route: String(input.route ?? ''),
-      stage: String(input.stage ?? ''),
-      business: String(input.business ?? ''),
-      guildId: String(input.event?.guildId ?? ''),
-      channelId: String(input.event?.channelId ?? ''),
-      userId: String(input.event?.userId ?? ''),
-      selfId: String(input.event?.selfId ?? ''),
-      command: foldAndTruncate(String(input.event?.msg ?? input.event?.content ?? ''), 300)
-    },
+    source,
     error: {
       name: String(error?.name ?? 'Error'),
       message: foldAndTruncate(error?.message ?? String(error), MAX_CAPTURED_LOG_CHARS),
@@ -271,15 +383,26 @@ export const uploadErrorReport = async (input: UploadErrorReportInput): Promise<
       // 宿主日志文件的尾部：整台机器最近的动静
       envFile: envLogs.file ?? '',
       envLines: envLogs.lines,
-      envTruncated: envLogs.truncated
+      envTruncated: envLogs.truncated,
+      // 只留本项目日志这件事要说清楚，免得看的人以为日志被截断了
+      envFiltered: 'kkk-only'
     },
+    /** 配置快照：cookie 与密钥已剔除（见 snapshotConfig） */
+    config: configSnapshot,
     extra: input.extra ?? {}
   }
 
-  // 体积兜底：还是太大就继续砍日志（先把宿主日志去掉，再砍本次日志）
+  /**
+   * 体积兜底：太大就一层层砍（先去掉整份配置快照，再去掉宿主日志，最后砍本次日志）。
+   * 配置快照最占地方（几百个字段），但它对复现最有帮助，所以放在最后才丢。
+   */
   let body = Buffer.from(JSON.stringify(payload))
-  if (body.length > PAYLOAD_LIMIT_BYTES) {
+  if (body.length > PAYLOAD_LIMIT_BYTES && payload.logs) {
     payload.logs.envLines = []
+    body = Buffer.from(JSON.stringify(payload))
+  }
+  if (body.length > PAYLOAD_LIMIT_BYTES) {
+    payload.config = { dropped: '配置快照过大，已省略' }
     body = Buffer.from(JSON.stringify(payload))
   }
   if (body.length > PAYLOAD_LIMIT_BYTES) {

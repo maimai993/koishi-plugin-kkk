@@ -61,6 +61,7 @@ import {
 } from '@/module/utils'
 import { bilibiliFetcher, isSoftFailure, SOFT_ERROR_CODES, softFetch } from '@/module/utils/amagiClient'
 import { Config } from '@/module/utils/Config'
+import { fetchInteractiveInfo } from '@/module/utils/InteractiveVideo'
 import { getParseOverride } from '@/module/utils/ParseOverride'
 // 解析阶段（「下载进度」指令读的就是这里登记的状态）
 import { DOWNLOAD_STAGES, withDownloadStage } from '@/module/utils/Network/Downloader'
@@ -74,6 +75,7 @@ import {
   buildBilibiliVideoDescRichText,
   getUsernameMetadata
 } from '@/platform/bilibili/dynamic-text'
+import { runInteractiveStory, renderInteractiveChart as renderChart } from '@/platform/bilibili/interactive-story'
 import { BilibiliDataTypes } from '@/types'
 
 let img: ElementTypes[]
@@ -108,6 +110,10 @@ export class Bilibili extends Base {
   downloadfilename: string
   /** 强制烧录弹幕（用于 #弹幕解析 命令） */
   forceBurnDanmaku: boolean
+  /** 只发这一段视频：互动剧情续播用，不发作品卡与评论区 */
+  storyOnly: boolean
+  /** 本次是不是互动视频；是的话视频发完要发剧情选项 */
+  interactive?: { bvid: string; cid: number }
   /**
    * 本次解析取到的弹幕。
    *
@@ -128,10 +134,11 @@ export class Bilibili extends Base {
     return this.e.bot?.adapter?.name
   }
 
-  constructor(e: Message, data: any, options?: { forceBurnDanmaku?: boolean }) {
+  constructor(e: Message, data: any, options?: { forceBurnDanmaku?: boolean; storyOnly?: boolean }) {
     super(e)
     this.e = e
     this.isVIP = false
+    this.storyOnly = options?.storyOnly ?? false
     this.Type = data?.type
     this.workType = BILIBILI_WORK_TYPES[data?.type as string]
     this.islogin = data?.USER?.STATUS === 'isLogin'
@@ -153,7 +160,7 @@ export class Bilibili extends Base {
       // 面板点进来的：只回一句「收到请求，开始下载」，并挂一个只查本次任务的进度按钮
       // replyReplacing 会先撤掉上一条（也就是刚点的画质面板），群里只留这句提示
       await replyReplacing(this.e, buildDownloadTip(String(iddata.bvid ?? ''), '收到请求，开始下载'))
-    } else if (Config.app.parseTip) {
+    } else if (!this.storyOnly && Config.app.parseTip) {
       /**
        * 同样：发这句话时把上一条机器人消息撤掉。
        * 另外过一道「同一句提示 5 秒内只发一次」—— 同一条消息被投递多遍时
@@ -199,9 +206,20 @@ export class Bilibili extends Base {
             durationSeconds: Number(detail.duration) > 0 ? Number(detail.duration) : undefined
           }
         }
+        /**
+         * 本次要解析的目标 cid：普通视频按分 P / 主 cid；互动剧情的续播节点由上层直接指定 cid。
+         */
+        const targetCid = Number(
+          iddata.cid ?? (iddata.p ? (infoData.data.data.pages[iddata.p - 1]?.cid ?? infoData.data.data.cid) : infoData.data.data.cid)
+        )
+        /** 互动视频（stein gate）：视频发完要发剧情选项，续播的那几段不再重复识别 */
+        if (!this.storyOnly && Number((infoData.data.data.rights as any)?.is_stein_gate) === 1) {
+          this.interactive = { bvid: String(iddata.bvid ?? infoData.data.data.bvid ?? ''), cid: targetCid }
+          logger.info('[互动视频] 检测到互动视频（bv=' + this.interactive.bvid + ' cid=' + targetCid + '）')
+        }
         const playUrlData = await this.amagi.bilibili.fetcher.fetchVideoStreamUrl({
           avid: infoData.data.data.aid,
-          cid: iddata.p ? (infoData.data.data.pages[iddata.p - 1]?.cid ?? infoData.data.data.cid) : infoData.data.data.cid
+          cid: targetCid
         })
         // const playUrl = bilibiliApiUrls.视频流信息({ avid: infoData.data.aid, cid: infoData.data.cid })
         /**
@@ -231,7 +249,7 @@ export class Bilibili extends Base {
           url:
             bilibiliApiUrls.getVideoStream({
               avid: infoData.data.data.aid,
-              cid: iddata.p ? (infoData.data.data.pages[iddata.p - 1]?.cid ?? infoData.data.data.cid) : infoData.data.data.cid
+              cid: targetCid
             }) + '&platform=html5',
           headers: this.headers
         }).getData()) as AmagiSuccess<BiliBiliVideoPlayurlNoLogin>
@@ -244,7 +262,7 @@ export class Bilibili extends Base {
          */
         // fromPanel：面板里已经发过这张卡片了，别再发一遍
         const renderInfoCard = async () => {
-          if (fromPanel || !Config.bilibili.sendContent.some((content) => content === 'info')) return
+          if (this.storyOnly || fromPanel || !Config.bilibili.sendContent.some((content) => content === 'info')) return
           if (Config.bilibili.videoInfoMode === 'text') {
             // 构建回复内容数组
             const replyContent: SendMessage = []
@@ -456,7 +474,7 @@ export class Bilibili extends Base {
 
         // 评论区同样只跳过自身
         sends.add('渲染评论区', async () => {
-        if (!Config.bilibili.sendContent.some((content) => content === 'comment')) return
+        if (this.storyOnly || !Config.bilibili.sendContent.some((content) => content === 'comment')) return
           const commentsData = await softFetch(
             () =>
               this.amagi.bilibili.fetcher.fetchComments(
@@ -562,6 +580,8 @@ export class Bilibili extends Base {
             sends.add('发送视频', async () => {
               await downloadTask
               await this.sendPreparedVideo()
+              /** 互动视频：视频发完再发剧情（后台跑，不阻塞解析主流程） */
+              if (this.interactive) void this.startInteractiveStory()
             })
           }
         }
@@ -1727,6 +1747,61 @@ export class Bilibili extends Base {
         break
     }
     return this.preparedVideo !== null
+  }
+
+  /**
+   * 起一次互动剧情（后台长跑，不阻塞解析主流程）。
+   *
+   * 选项与等待都在 interactive-story 里；这里只负责：问一次剧情图版本号 → 跑剧情 → 续播时
+   * 用**用户刚发的那条消息**重新走一遍解析链路（storyOnly：只发视频，不发卡片与评论区）。
+   */
+  private async startInteractiveStory (): Promise<void> {
+    const interactive = this.interactive
+    if (!interactive) return
+    try {
+      const info = await fetchInteractiveInfo({ bvid: interactive.bvid, cid: interactive.cid, headers: this.headers })
+      if (!info) {
+        logger.debug('[互动视频] 播放器接口没有 interaction.graph_version，按普通视频处理')
+        return
+      }
+      const result = await runInteractiveStory({
+        e: this.e,
+        bvid: interactive.bvid,
+        graphVersion: info.graphVersion,
+        rootCid: interactive.cid,
+        title: this.workInfo?.title ?? '',
+        notice: info.notice,
+        headers: this.headers,
+        onNode: async (node, event, path, isFirst, entry) => {
+          /** 整张图第一次就爬完并缓存，之后不再判断「画没画过」：只有第一段和结局出图 */
+          const isEnding = node.isLeaf || !node.choices.length
+          if (!isFirst && !isEnding) return false
+          /** 没勾「流程图」就只发选项面板，剧情照常能玩 */
+          if (!Config.bilibili.sendContent.some((item) => item === 'chart')) return false
+          const chart = await renderChart({
+            e: event,
+            bvid: interactive.bvid,
+            graphVersion: info.graphVersion,
+            cid: node.cid,
+            entry: entry ?? undefined,
+            title: this.workInfo?.title ?? node.title ?? '互动视频',
+            path,
+            notice: node.notice,
+            question: node.question,
+            isEnding,
+            headers: this.headers
+          })
+          return chart.sent
+        },
+        play: async (cid, event) => {
+          const story = new Bilibili(event, { type: 'one_video', bvid: interactive.bvid, cid }, { storyOnly: true })
+          await story.BilibiliHandler({ type: 'one_video', bvid: interactive.bvid, cid })
+        }
+      })
+      logger.info('[互动视频] 剧情结束（' + result.ended + '），共 ' + result.nodes + ' 段：' + (result.path.join(' → ') || '无'))
+    } catch (error: any) {
+      logger.warn('[互动视频] 剧情流程异常结束: ' + String(error?.message ?? error))
+    }
   }
 
   /**

@@ -5,7 +5,7 @@
  * Koishi 侧不引入 ktr 的构建管线（需要 vite/tailwind 打包），改为：
  *   1. 直接用 **react-dom/server** 对上游模板组件做 SSR（模板只依赖 \`{ data, ctx }\` props）；
  *   2. 内联上游构建产物 \`resources/template/style.css\`（tailwind 编译结果，省掉 tailwind 构建）；
- *   3. 优先用 koishi-plugin-puppeteer 截图（没有它才退回 koishi-plugin-shotkit 内核）。
+ *   3. 用浏览器渲染服务（koishi-plugin-puppeteer / puppeteer-without-canvas）截图；3.5.0 起不再支持 shotkit 内核。
  * 路由不在注册表里、或 SSR 失败时，回退到内置通用信息卡片，保证解析结果始终有图。
  */
 import fs from 'node:fs'
@@ -462,38 +462,6 @@ export function pruneMissingFontFaces (html: string, baseDir: string): string {
   })
 }
 
-/**
- * 内核（shotkit）加载不了的远程资源，交给它之前先摘掉。
- *
- * 实测：内核在 Windows 上**加载不了 https 资源**（卡片里的 https 图片一律渲染成空白框），
- * 但它照样会为这些地址发请求、并且等它们结束 —— 一张 1440x600 的小页面里只要有一个连不上的
- * https 图片，截图就从 1.5 秒变成 22 秒。React 19 的 SSR 还会给每个 `<img>` 额外补一条
- * `<link rel="preload" as="image">`（一张评论卡实测 27 条），这些 preload 同样算在页面加载里。
- *
- * 所以**只在 shotkit 这条路径**上做替换（puppeteer 那条路不动，它能正常加载远程图片）：
- *   - 删掉 `<link rel="preload">`（纯预加载提示，本地渲染没有意义）
- *   - 远程 `<img src>` 换成 1x1 透明图（反正渲染不出来），顺带删掉 srcset
- *   - 内联样式/CSS 里的 `url(http…)` 换成 none
- */
-export function neutralizeRemoteAssets (html: string): { html: string; links: number; images: number } {
-  let links = 0
-  let images = 0
-  let output = html.replace(/<link\b[^>]*\brel=["']?preload["']?[^>]*>/gi, () => {
-    links++
-    return ''
-  })
-  output = output.replace(/(<img\b[^>]*?)\ssrc="https?:\/\/[^"]*"/gi, (_all: string, head: string) => {
-    images++
-    return head + ' src="' + TRANSPARENT_PIXEL + '"'
-  })
-  output = output.replace(/(<img\b[^>]*?)\ssrcset="[^"]*"/gi, '$1')
-  output = output.replace(/url\(\s*(['"]?)https?:\/\/[^)'"]*\1\s*\)/gi, 'none')
-  return { html: output, links, images }
-}
-
-/** 顶掉远程图片用的 1x1 透明 gif（内联 data: 内核能正常解码） */
-const TRANSPARENT_PIXEL = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'
-
 /** 截图前的统一降级：先剔无效字体，再降级噪点层 */
 export function optimizeForScreenshot (html: string, baseDir: string): string {
   const pruned = pruneMissingFontFaces(html, baseDir)
@@ -511,31 +479,20 @@ export function optimizeForScreenshot (html: string, baseDir: string): string {
 /**
  * 对一个 HTML 文件截图，返回 base64 和实际产出的 mime。
  *
- * 优先用 koishi-plugin-puppeteer 那条浏览器路径；没有浏览器服务时退回 shotkit 内核。
+ * **只用浏览器渲染服务**（koishi-plugin-puppeteer / puppeteer-without-canvas 之类）。
+ * 3.5.0 起不再支持 shotkit 内核：它的预编译内核在 Windows 上加载不了 https 资源
+ * （卡片里的封面、头像全是空白框），换来的那点速度不值得让卡片看起来是坏的。
  *
- * `scale` 会作为 deviceScaleFactor（配置项 `app.renderScale`，100 = 1x，200 = 2x）：
+ * scale 会作为 deviceScaleFactor（配置项 app.renderScale，100 = 1x，200 = 2x）：
  * 不设的话高分辨率卡片会被截成 1x，群里看着又小又糊。
  */
-/** 用了 shotkit 只提示一次（每张卡片都刷一行没意义） */
-let shotkitLogged = false
-
-async function screenshot (htmlPath: string, selector: string, timeout: number, scale = 1, format: 'png' | 'jpeg' = 'jpeg', htmlSource?: string): Promise<{ base64: string; mime: string; dsf: number }> {
+async function screenshot (htmlPath: string, selector: string, timeout: number, scale = 1, format: 'png' | 'jpeg' = 'jpeg'): Promise<{ base64: string; mime: string; dsf: number }> {
   const koishiCtx: any = getKoishiContext()
   /** 浏览器渲染服务（koishi-plugin-puppeteer / puppeteer-without-canvas 之类） */
   const puppeteer: any = koishiCtx?.get ? koishiCtx.get('puppeteer') : koishiCtx?.puppeteer
-  /** kernel 渲染服务（koishi-plugin-shotkit） */
-  const shotkit: any = typeof koishiCtx?.get === 'function' ? koishiCtx.get('shotkit') : koishiCtx?.shotkit
-  if (!puppeteer && !shotkit) {
-    throw new Error('未安装 koishi-plugin-puppeteer（或 koishi-plugin-shotkit），无法渲染图片')
+  if (!puppeteer) {
+    throw new Error('没有可用的渲染器：需要安装浏览器渲染服务（koishi-plugin-puppeteer 或同类插件）才能渲染图片')
   }
-  /**
-   * 优先渲染器（面板「通用设置 → 优先渲染器」，配置项 `app.renderer`，默认 shotkit）。
-   *
-   * 谁排前面谁先上，失败或服务没装就自动落到另一个；两个都没有才报错。
-   * 默认 shotkit 是因为它快得多也省内存；要完整还原卡片外观（尤其是 https 远程封面/头像）
-   * 就把这个开关改成 puppeteer。
-   */
-  const preferShotkit = String(Config.app?.renderer ?? 'shotkit').toLowerCase() !== 'puppeteer'
 
   // 卡片是给手机看的：**低于 2x 会明显发虚**，所以下限锁 2（上限 3）。
   // 想更大更清晰就调 `app.renderScale`（100 → 2x，150 → 3x），配 100 时保持 2x 不出错。
@@ -546,59 +503,6 @@ async function screenshot (htmlPath: string, selector: string, timeout: number, 
   try {
     if (fs.statSync(htmlPath).size > 6 * 1024 * 1024) deviceScaleFactor = Math.max(1, deviceScaleFactor - 1)
   } catch { /* 忽略 */ }
-
-  /**
-   * shotkit 内核路径。
-   *
-   * 内核一次调用出一张图、直接按 `selector` 截元素盒子，不需要 evaluate 量尺寸，
-   * 也不执行页面 JS。上面选了 shotkit 就先用它；选了 puppeteer 而没装浏览器时也走这里兜底。
-   *
-   * 注意：实测这个预编译内核在 Windows 上**加载不了 https 资源**（http / data: / file: 正常），
-   * 卡片里的远程封面、头像会缺图 —— 面板上的说明里写了，要完整外观请把优先渲染器改成 puppeteer。
-   *
-   * 格式固定 PNG：内核不支持 JPEG（支持 webp，要压体积可以把 type 改成 'webp'
-   * 并把下面的 mime 一起改掉）。
-   */
-  let shotkitFailure: any = null
-  if (shotkit && typeof shotkit.renderFile === 'function' && (preferShotkit || !puppeteer)) {
-    try {
-      const started = Date.now()
-      /**
-       * 交给内核的 HTML 先摘掉它加载不了的远程资源（见 neutralizeRemoteAssets 的说明）。
-       * 走 `screenshot({ html })` 而不是 renderFile：磁盘上那份保持原样，
-       * 万一内核失败要回退到 puppeteer，那边还能正常加载远程图片。
-       */
-      const sanitized = htmlSource ? neutralizeRemoteAssets(htmlSource) : null
-      if (sanitized && (sanitized.links > 0 || sanitized.images > 0)) {
-        logger.debug('[Render] 内核用 HTML：摘掉 preload ' + sanitized.links + ' 条、远程图片 ' + sanitized.images + ' 张')
-      }
-      const buffer = sanitized && typeof shotkit.screenshot === 'function'
-        ? ((await shotkit.screenshot({
-          html: sanitized.html,
-          selector,
-          timeout,
-          deviceScaleFactor,
-          type: 'png',
-        }))?.image)
-        : await shotkit.renderFile(htmlPath, {
-          selector,
-          timeout,
-          deviceScaleFactor,
-          type: 'png',
-        })
-      if (buffer && buffer.length) {
-        if (!shotkitLogged) {
-          shotkitLogged = true
-          logger.info('[Render] 使用 shotkit 内核渲染卡片（静态内核，不执行页面 JS）')
-        }
-        logger.debug('[Render] shotkit 渲染 ' + htmlPath.split(/[\\/]/).pop() + ' 用时 ' + (Date.now() - started) + 'ms')
-        return { base64: Buffer.from(buffer).toString('base64'), mime: 'image/png', dsf: deviceScaleFactor }
-      }
-    } catch (error: any) {
-      shotkitFailure = error
-      logger.warn('[Render] shotkit 渲染失败，回退到 koishi-plugin-puppeteer：' + String(error?.message ?? error))
-    }
-  }
 
   /**
    * 视口用卡片的**设计宽度**（模板都按 1440 排版），高度按内容量一次。
@@ -706,13 +610,6 @@ async function screenshot (htmlPath: string, selector: string, timeout: number, 
         await page.close()
       } catch { /* 页面可能已被插件关掉，忽略 */ }
     }
-  }
-
-  if (!puppeteer) {
-    // 走到这里说明：优先的那条路失败了，而且另一条也没得用
-    const reason = String(shotkitFailure?.message ?? shotkitFailure ?? '')
-    throw new Error('没有可用的渲染器：未安装 koishi-plugin-puppeteer（或它的 start 失败）'
-      + (reason ? '；shotkit 内核渲染失败：' + reason : ''))
   }
 
   logger.debug('[Render] 插件未暴露 page/browser，退回 puppeteer.render()')
@@ -879,9 +776,9 @@ export const Render = async (_event: any, route: string, data: any): Promise<any
     // 二维码：必须像素级清晰（JPEG 压缩会影响扫码），继续用 PNG；其它卡片用 JPEG 压体积
     const isQrCode = /qrcode/i.test(route)
     const format: 'png' | 'jpeg' = isQrCode ? 'png' : 'jpeg'
-    // mime 由 screenshot 返回实际产出的格式：shotkit 走 PNG，其余路径仍是传入的 format
+    // mime 由 screenshot 返回实际产出的格式（就是上面选的那个 format）
     const htmlBuiltAt = Date.now()
-    const { base64, mime, dsf } = await screenshot(htmlPath, '#container', Number(Config.app?.RenderWaitTime ?? 10) * 1000, scale, format, html)
+    const { base64, mime, dsf } = await screenshot(htmlPath, '#container', Number(Config.app?.RenderWaitTime ?? 10) * 1000, scale, format)
     const shotAt = Date.now()
     const buffer = Buffer.from(base64, 'base64')
     const meta = getImageMetadata(buffer)

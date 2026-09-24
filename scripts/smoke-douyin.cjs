@@ -40,6 +40,9 @@ const LONG_URL = 'https://www.douyin.com/video/7123456789012345678'
 axios.get = async () => ({ request: { res: { responseUrl: LONG_URL } }, data: '' })
 
 // 2) 替换 amagi 的客户端工厂（每个 Base 实例都会新建 client，必须包住工厂）
+/** 由末尾的第二个场景打开：让 parseWork 返回「风控」响应 */
+let windy = false
+
 const amagi = require('@ikenxuan/amagi')
 const realFactory = amagi.default
 
@@ -94,7 +97,10 @@ function makeDetail () {
 
 amagi.default = function (options) {
   const client = realFactory(options)
-  client.douyin.fetcher.parseWork = async () => ({ success: true, code: 200, message: 'OK', data: { aweme_detail: makeDetail() } })
+  // windy = true 时模拟「接口被风控」：返回体里连 data 都没有（见文件末尾的第二个场景）
+  client.douyin.fetcher.parseWork = async () => (windy
+    ? { success: false, code: 8, message: '风控校验失败' }
+    : { success: true, code: 200, message: 'OK', data: { aweme_detail: makeDetail() } })
   client.douyin.fetcher.fetchWorkComments = async () => ({ success: true, code: 200, message: 'OK', data: { comments: [], cursor: 0, has_more: 0, total: 0 } })
   client.douyin.fetcher.fetchEmojiList = async () => ({ success: true, code: 200, message: 'OK', data: { emoji_list: [] } })
   client.douyin.fetcher.fetchUserProfile = async () => ({
@@ -134,7 +140,8 @@ const middlewares = []
 const originalMiddleware = ctx.middleware.bind(ctx)
 ctx.middleware = (fn, ...rest) => { middlewares.push(fn); return originalMiddleware(fn, ...rest) }
 
-ctx.plugin(plugin, { dataPath: dataRoot, debug: true, masters: ['12345'], webui: false })
+// parseDedupe: false —— 下面有两个场景会解析同一条链接，去重会把第二个场景挡掉
+ctx.plugin(plugin, { dataPath: dataRoot, debug: true, masters: ['12345'], webui: false, parseDedupe: false })
 
 const makeSession = (content) => ({
   content, selfId: '10000', userId: '12345', guildId: '456', channelId: '456',
@@ -169,6 +176,27 @@ setTimeout(async () => {
         const attrs = el && el.attrs ? JSON.stringify(el.attrs).slice(0, 120) : ''
         return '[' + type + '] ' + attrs
       }).join(' | ').slice(0, 400))
+    }
+    /**
+     * 第二个场景：**接口被风控**（返回体里连 data 都没有）。
+     *
+     * 线上真实报错：以前只挡了 aweme_detail === null，风控时直接
+     * TypeError: Cannot read properties of undefined (reading 'aweme_detail') —— 用户拿到一张满屏英文的错误卡片。
+     * 现在应当给一句人话（并且日志里留下错误码）。
+     */
+    console.log('\n=== 抖音接口被风控时的提示 ===')
+    windy = true
+    const before = sent.length
+    try {
+      await dispatch('https://www.douyin.com/video/7123456789012345678')
+      console.log('  ❌ 期望它抛错（这样才会走错误提示），但它正常跑完了')
+      process.exitCode = 1
+    } catch (error) {
+      const message = String(error?.message ?? error)
+      const friendly = /抖音没有返回这条作品的数据/.test(message) && /风控校验失败/.test(message)
+      console.log((friendly ? '  ✅' : '  ❌') + ' 提示是人话: ' + message.slice(0, 140))
+      if (!friendly) process.exitCode = 1
+      if (sent.length !== before) console.log('  （顺带：还多发了 ' + (sent.length - before) + ' 条消息）')
     }
   } catch (error) {
     console.error('抖音冒烟测试失败:', error && error.stack ? error.stack : error)

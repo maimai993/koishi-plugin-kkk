@@ -26,7 +26,6 @@
     "videoTool": true,
     "priority": 800,
     "removeCache": true,
-    "renderer": "shotkit",
     "renderScale": 100,
     "noiseOverlay": "off",
     "forwardContent": [
@@ -114,7 +113,8 @@
     "sendContent": [
       "info",
       "video",
-      "comment"
+      "comment",
+      "chart"
     ],
     "numcomment": 5,
     "realCommentCount": false,

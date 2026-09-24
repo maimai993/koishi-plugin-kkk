@@ -17,9 +17,10 @@ import type { Bot, Context, Session } from 'koishi'
 // 版本比较复用注入器那边的实现（它处理了 -beta.1 这类预发布号的先后）
 import { isSemverGreater } from '../karin/module/utils/semver'
 
+import { resolveAdapterInfo } from './adapter-info'
 import { logger } from './logger'
 import { COLLECTED_MESSAGE_ID, collectForward } from './forward-collect'
-import { UnconfirmedSendError, classifySendFailure, describeSendFailure, isPassiveLimitFailure } from './sendError'
+import { UnconfirmedSendError, classifySendFailure, decorateSendError, describeSendFailure, isPassiveLimitFailure } from './sendError'
 import { commandQueue, eventQueue, getRuntime, karinPathBase, taskQueue, tryGetRuntime } from './runtime'
 import { segment } from './segment'
 import { syncUpstreamToKoishi } from './syncConfig'
@@ -92,20 +93,15 @@ export class KkkBot {
     }
   }
 
+  /**
+   * 适配器信息（卡片上那一栏）。
+   *
+   * 以前这里直接读 `bot.adapter.version` —— 但 Koishi 的 Adapter 实例上根本没有版本号，
+   * 于是错误卡片和「#kkk版本」海报上永远是一个空的「v」。现在交给 compat/adapter-info：
+   * 按 Adapter 构造函数反查适配器插件、读它的 package.json，必要时再问一次实现端版本。
+   */
   get adapter () {
-    const platform = String(this.bot.platform ?? '')
-    const raw: any = (this.bot as any).adapter || {}
-    const cfg: any = raw.config ?? {}
-    return {
-      name: platform,
-      protocol: platform,
-      standard: platform,
-      // 错误卡片模板还会读这三项，之前没给 → 卡片上显示 undefined 和一个空的「v」
-      platform: String(raw.platform ?? cfg.platform ?? (platform || '未知')),
-      communication: String(raw.communication ?? cfg.communication ?? cfg.protocol ?? '未知'),
-      version: String(raw.version ?? cfg.version ?? ''),
-      raw: this.bot.adapter
-    }
+    return resolveAdapterInfo(this.bot)
   }
 
   get ctx () {
@@ -565,7 +561,8 @@ export class Message {
       const failure = classifySendFailure(error)
       // 只有「被动回复额度/时间窗超了」才值得换通道重发；体积超限、被禁言、无权限这类
       // 换通道也一样失败，直接抛给调用方（它拿到错误码会去切片 / 降级 / 报错）
-      if (!isPassiveLimitFailure(failure)) throw error
+      // 空 message 的异常（qq-chat 编码器那种）在这里补一段可读说明，别让错误卡片上一片空白
+      if (!isPassiveLimitFailure(failure)) throw decorateSendError(error, failure)
       // 用 mark 级别：这是「视频明明下好了却发不出去」的关键兜底，日志里要看得见
       logger.mark('[compat] 被动回复受限，改用主动消息发送: ' + describeSendFailure(failure))
       return await sendActive()
@@ -656,13 +653,40 @@ let commandOrder = 0
 export const contactGroup = (groupId: string): Contact => ({ peer: groupId, guildId: groupId, isGroup: true })
 export const contactFriend = (userId: string): Contact => ({ peer: 'private:' + userId, userId, isGroup: false })
 
+/**
+ * 这个机器人现在能不能发消息。
+ *
+ * 线上真实报错（B站推送）：
+ *
+ *     TypeError: this._request is not a function
+ *         at _Internal._get (adapter-onebot/lib/index.js:115)
+ *         at ... sendGroupMsg ...
+ *         at async Object.sendMsg (koishi-plugin-kkk/lib/compat/node-karin.js:684)
+ *
+ * 适配器**掉线后 bot 对象仍然留在 ctx.bots 里**，但底层连接（OneBot 的 _request）已经没了，
+ * 于是 sendMessage 一路传到适配器内部才炸成一句莫名其妙的英文。
+ * 这里提前认出来，给一句人话（用户要求：日志和错误卡片要能看懂）。
+ *
+ * Koishi 的 Bot.status：0 离线 / 1 在线 / 2 连接中 / 3 断开 / 4 重连。
+ */
+function isBotOnline (bot: any): boolean {
+  const status = bot?.status
+  // 没有 status 字段的（老适配器 / 测试桩）不拦，免得把好机器人也挡住
+  if (typeof status !== 'number') return true
+  return status === 1 || status === 2
+}
+
 function resolveBot (selfId?: string): KkkBot | undefined {
   const runtime = tryGetRuntime()
   if (!runtime) return undefined
   const bots = runtime.ctx.bots as unknown as Bot[]
   if (!bots?.length) return undefined
   const matched = selfId ? bots.find((bot) => bot.selfId === selfId || bot.user?.id === selfId) : undefined
-  return new KkkBot(matched ?? bots[0])
+  // 指定了 selfId：就算它掉线也返回它 —— 不能偷偷换一个机器人发，那样会串号（调用方会报「不在线」）
+  if (matched) return new KkkBot(matched)
+  // 没指定：优先挑在线的
+  const online = bots.find((bot) => isBotOnline(bot))
+  return online ? new KkkBot(online) : (bots[0] ? new KkkBot(bots[0]) : undefined)
 }
 
 function command (reg: RegExp | string, handler: (...args: any[]) => any, options?: Record<string, any>) {
@@ -688,6 +712,11 @@ function on (event: string, handler: (...args: any[]) => any) {
 async function sendMsg (selfId: string, contact: Contact | string, content: any, _options?: any) {
   const bot = resolveBot(selfId)
   if (!bot) throw new Error('[kkk] 没有可用的机器人实例，无法发送消息')
+  const rawBot: any = (bot as any).bot
+  if (!isBotOnline(rawBot)) {
+    throw new Error('[kkk] 机器人 ' + String(selfId || rawBot?.selfId || '') + ' 当前不在线（status=' + String(rawBot?.status)
+      + '），这条消息发不出去。等它重新上线后下次推送会正常发出；如果是长期不在线，检查一下适配器连接')
+  }
   const channelId = peerOf(contact)
   /** 解析结果合并转发：这条也走漏斗（karin.sendMsg 是业务代码另一条常用出口） */
   if (collectForward(channelId, normalizeContent(content))) {
@@ -803,7 +832,10 @@ export const db = {
 export const render = {
   /**
    * karin 的 render.render：给 HTML 文件截图。
-   * 优先用 koishi-plugin-puppeteer，没有浏览器服务时才退回 koishi-plugin-shotkit 内核。
+   *
+   * **只用浏览器渲染服务**（koishi-plugin-puppeteer / puppeteer-without-canvas 之类）。
+   * 3.5.0 起不再支持 shotkit 内核：它在 Windows 上加载不了 https 资源，卡片里的远程封面、
+   * 头像一律是空白框 —— 用户看到的是「卡片坏了」，快那一点不值得。
    */
   async render (options: {
     name?: string
@@ -818,42 +850,10 @@ export const render = {
     const runtime = getRuntime()
     const puppeteer: any = (runtime.ctx as any).puppeteer
     /**
-     * 优先渲染器（面板「通用设置 → 优先渲染器」，配置项 `app.renderer`，默认 shotkit）。
-     *
-     * 和卡片主渲染走同一个开关：选了谁谁先上，没装或渲染失败就落到另一个。
-     * 这里用延迟 require 读配置：Config 依赖本文件（node-karin 兼容层），
-     * 顶部 import 会和本文件形成循环依赖，放到调用时读最稳。
+     * 渲染只走浏览器这一条路（3.5.0 起不再支持 shotkit 内核，见 Render/index.ts 的说明）。
+     * 以前这里会按配置项 app.renderer 在「内核 / 浏览器」之间挑一个，现在没得挑了。
      */
-    let preferShotkit = true
-    try {
-      const { Config } = require('../karin/module/utils/Config')
-      preferShotkit = String(Config?.app?.renderer ?? 'shotkit').toLowerCase() !== 'puppeteer'
-    } catch { /* 读不到配置就按默认值 shotkit */ }
-    const useShotkit = preferShotkit || !puppeteer
-    const shotkit: any = useShotkit
-      ? (typeof (runtime.ctx as any).get === 'function'
-        ? (runtime.ctx as any).get('shotkit')
-        : (runtime.ctx as any).shotkit)
-      : undefined
-    if (shotkit && typeof shotkit.renderFile === 'function') {
-      try {
-        const request: any = {
-          // fullPage 和 selector 互斥：要整页就别给选择器
-          fullPage: options.fullPage ?? false,
-          omitBackground: options.omitBackground ?? true,
-          type: options.type ?? 'png',
-          scale: 2,
-          pageGotoParams: options.pageGotoParams
-        }
-        if (!request.fullPage) request.selector = options.selector ?? '#container'
-        const buffer = await shotkit.renderFile(options.file, request)
-        if (buffer && buffer.length) return buffer.toString('base64')
-      } catch (error: any) {
-        logger.debug('[kkk] shotkit 渲染失败，回退到 puppeteer：' + String(error?.message ?? error))
-      }
-    }
-
-    if (!puppeteer) throw new Error('[kkk] 渲染失败：未安装 koishi-plugin-puppeteer（或 koishi-plugin-shotkit）')
+    if (!puppeteer) throw new Error('[kkk] 渲染失败：没有可用的浏览器渲染服务（需要 koishi-plugin-puppeteer 或同类插件）')
 
     const screenshotOptions: any = {
       file: options.file,
@@ -1637,10 +1637,12 @@ export const karin = {
 /**
  * 解析结果合并转发用的收集器（见 compat/forward-collect）。
  *
- * 业务侧一般只用得到 `withoutForwardCollect`：把「过程提示」那次发送包起来，
- * 让它不要被收进最终那条转发里。
+ * 业务侧一般只用得到两个：
+ *   - `withoutForwardCollect`：把「过程提示」那次发送包起来，让它不要被收进最终那条转发里；
+ *   - `withForwardKind`：段类型看不出类别的内容（互动视频剧情流程图）标一个类别，
+ *     交给 ParseForward 按「合并转发内容」分流。
  */
-export { COLLECTED_MESSAGE_ID, collectForward, currentForwardBag, drainForward, drainForwardGroups, isForwardCollecting, runWithForwardBag, withoutForwardCollect } from './forward-collect'
+export { COLLECTED_MESSAGE_ID, collectForward, currentForwardBag, drainForward, drainForwardGroups, forwardKindOf, isForwardCollecting, runWithForwardBag, withForwardKind, withoutForwardCollect } from './forward-collect'
 
 export { logger, segment, syncUpstreamToKoishi }
 export default karin

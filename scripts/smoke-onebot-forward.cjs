@@ -115,13 +115,17 @@ wss.on('connection', (ws) => {
     console.log('  收到的参数: ' + JSON.stringify(call.params))
     const nodes = call.params?.messages ?? []
     check('收件群正确', String(call.params?.group_id) === '456', String(call.params?.group_id))
-    check('只有 1 个 node（整次解析合成一条转发）', nodes.length === 1, nodes.length + ' 个')
+    /**
+     * 节点数 = **一次发送一条**：实测「一个条目里塞卡片 + 评论 + 视频时 QQ 只加载了视频」，
+     * 所以每条消息各自成一个聊天记录条目（见 compat/forward-collect 里 groups 的说明）。
+     */
+    check('两条内容各自成一个 node（一次发送 = 一个条目）', nodes.length === 2, nodes.length + ' 个')
     const node = nodes[0]
     check('node 的身份是触发者（uin / name）',
       node?.type === 'node' && String(node.data?.uin) === '12345' && node.data?.name === '触发者昵称',
       JSON.stringify(node?.data && { uin: node.data.uin, name: node.data.name }))
-    const content = node?.data?.content ?? []
-    check('node 里带着两条内容', content.length === 2 && JSON.stringify(content).includes('结果一') && JSON.stringify(content).includes('结果二'),
+    const content = nodes.flatMap((item) => item?.data?.content ?? [])
+    check('两个 node 合起来带着两条内容', JSON.stringify(content).includes('结果一') && JSON.stringify(content).includes('结果二'),
       JSON.stringify(content).slice(0, 140))
   }
 
@@ -160,8 +164,9 @@ wss.on('connection', (ws) => {
     check('整条解析只发了一条合并转发', forwards.length === 1, forwards.length + ' 条')
     const nodes = forwards[0]?.params?.messages ?? []
     const nodeText = JSON.stringify(nodes)
-    check('转发里有两条结果，且不含过程提示',
-      nodes.length === 1 && /解析卡片/.test(nodeText) && /评论区/.test(nodeText) && !/发送中/.test(nodeText),
+    /** 同上：两次 reply = 两个条目（卡片一个、评论区一个），但都在同一条转发里 */
+    check('转发里有两条结果（各自一个条目），且不含过程提示',
+      nodes.length === 2 && /解析卡片/.test(nodeText) && /评论区/.test(nodeText) && !/发送中/.test(nodeText),
       nodeText.slice(0, 180))
     check('过程提示单独发（走的是普通消息 send_group_msg）',
       plain.length === 1 && JSON.stringify(plain[0].params).includes('发送中'),

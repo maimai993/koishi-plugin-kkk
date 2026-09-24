@@ -84,8 +84,9 @@ export const inject = {
   // ffmpeg：由 koishi-plugin-ffmpeg-path 提供，兼容层的 ffmpeg()/ffprobe() 会优先用它
   // assets：koishi-plugin-assets-qqbot-part-file 之类提供的图床服务，
   // 面板卡片要上传成 https 地址才能放进 QQ 的 markdown 图片里
-  // shotkit：koishi-plugin-shotkit 提供的内核截图服务；装了就用它渲染卡片（没装退回 puppeteer）
-  optional: ['shotkit', 'puppeteer', 'database', 'http', 'ffmpeg', 'assets', 'server', 'console']
+  // 渲染：只用浏览器渲染服务（koishi-plugin-puppeteer 或同类插件）
+  // 3.5.0 起不再支持 shotkit 内核（它在 Windows 上加载不了 https 资源，卡片会缺图）
+  optional: ['puppeteer', 'database', 'http', 'ffmpeg', 'assets', 'server', 'console']
 }
 
 export interface Config {
@@ -184,14 +185,14 @@ export const Config: Schema<Config> = Schema.intersect([
     forward: Schema.object({
       global: Schema.boolean().default(false)
         .description('全局合并转发。打开后所有平台都把一次解析的内容合成一条聊天记录发出；关着时下面各平台的开关才起作用。默认关闭'),
-      globalContent: Schema.array(Schema.union(['text', 'image', 'video', 'file'])).default([])
-        .description('全局合并转发里放哪些内容：text 文字 / image 图片 / video 视频 / file 文件。没勾的单独直发，留空等于只放文字和图片。视频体积大时有些适配器（比如 NapCat）会拒绝整个聊天记录，这时会自动改成单独发送，不会丢内容'),
+      globalContent: Schema.array(Schema.union(['text', 'image', 'video', 'file', 'chart'])).default([])
+        .description('全局合并转发里放哪些内容：text 文字 / image 图片 / video 视频 / file 文件 / chart 流程图（B站互动视频的剧情图）。没勾的单独直发，留空等于只放文字和图片。视频体积大时有些适配器（比如 NapCat）会拒绝整个聊天记录，这时会自动改成单独发送，不会丢内容'),
       douyin: Schema.boolean().default(false).description('抖音：单独打开合并转发（全局关着时才起作用）'),
       douyinContent: Schema.array(Schema.union(['text', 'image', 'video', 'file'])).default([])
         .description('抖音合并转发里放哪些内容，留空表示用全局那一份'),
       bilibili: Schema.boolean().default(false).description('B站：单独打开合并转发（全局关着时才起作用）'),
-      bilibiliContent: Schema.array(Schema.union(['text', 'image', 'video', 'file'])).default([])
-        .description('B站合并转发里放哪些内容，留空表示用全局那一份'),
+      bilibiliContent: Schema.array(Schema.union(['text', 'image', 'video', 'file', 'chart'])).default([])
+        .description('B站合并转发里放哪些内容，chart 是互动视频的剧情流程图（只有 B站有）。留空表示用全局那一份'),
       kuaishou: Schema.boolean().default(false).description('快手：单独打开合并转发（全局关着时才起作用）'),
       kuaishouContent: Schema.array(Schema.union(['text', 'image', 'video', 'file'])).default([])
         .description('快手合并转发里放哪些内容，留空表示用全局那一份'),
@@ -846,8 +847,14 @@ function registerCommands (
   })
 }
 
-/** 合并转发内容可选项（与 ParseForward 里的 FORWARD_KINDS 保持一致） */
-const FORWARD_KIND_VALUES = ['text', 'image', 'video', 'audio', 'file', 'markdown']
+/**
+ * 合并转发内容可选项（与 ParseForward 里的 FORWARD_KINDS 保持一致）。
+ *
+ * 注意这里**不再有** audio / markdown：QQ 的聊天记录不支持语音气泡，markdown 只有官方 bot 认、
+ * 而官方适配器没有合并转发能力 —— 留着它们只会让人配了不生效（见 ParseForward 的说明）。
+ * chart 是 B站互动视频的剧情流程图。
+ */
+const FORWARD_KIND_VALUES = ['text', 'image', 'video', 'file', 'chart']
 /** 平台名 → 上游配置段名 */
 const FORWARD_PLATFORMS = ['douyin', 'bilibili', 'kuaishou', 'xiaohongshu']
 

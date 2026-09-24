@@ -21,7 +21,7 @@
  * 开关关掉、或者平台不支持合并转发（QQ 官方适配器）时**完全不收集**，
  * 保持原来的「一边解析一边逐条发」，行为与以前一模一样。
  */
-import { drainForwardGroups, isForwardSupported, logger, makeForward, runWithForwardBag, withoutForwardCollect, type Message } from 'node-karin'
+import { drainForwardGroups, forwardKindOf, isForwardSupported, logger, makeForward, runWithForwardBag, withoutForwardCollect, type Message } from 'node-karin'
 
 import { Config } from './Config'
 
@@ -106,6 +106,8 @@ export function isParseForwardEnabled (platform?: string): boolean {
  *   - \`image\` 图片（信息卡、评论卡、图集、切片后的评论卡都算这一类）
  *   - \`video\` 视频（体积大的会被硬上限挡下，见 HARD_INLINE_LIMIT）
  *   - \`file\`  文件（群文件等）
+ *   - \`chart\` B站互动视频的**剧情流程图**：它本身是图片，但可以在「合并转发内容」里单独勾/不勾，
+ *     所以由发送方用 \`withForwardKind('chart', …)\` 标出来（见 compat/forward-collect）
  *
  * **没列出来的内容一律单独直发**（不进转发节点）。默认只合并文字和图片。
  *
@@ -123,7 +125,7 @@ export function isParseForwardEnabled (platform?: string): boolean {
  * 会让整条转发被拒（\`Error with request send_group_forward_msg …\`），所以默认只合并文字和图片；
  * 想要视频也进去就勾上 \`video\` —— 真发不出去时下面的兜底会逐条直发，不会丢内容。
  */
-const FORWARD_KINDS = ['text', 'image', 'video', 'file']
+const FORWARD_KINDS = ['text', 'image', 'video', 'file', 'chart']
 const DEFAULT_FORWARD_CONTENT = ['text', 'image']
 
 /**
@@ -142,8 +144,15 @@ const NEVER_FORWARD_TYPES = /^(record|audio|markdown)$/
  */
 const HARD_INLINE_LIMIT = 30 * 1024 * 1024
 
-/** 把元素归到一个可配置的类别（\`other\` 是 at / 引用这类轻量装饰，永远跟着转发走） */
+/**
+ * 把元素归到一个可配置的类别（\`other\` 是 at / 引用这类轻量装饰，永远跟着转发走）。
+ *
+ * **发送方标的类别优先**：剧情流程图和普通图片都是 \`img\`，从段对象上看不出区别 ——
+ * 只有发送方知道它是剧情图（见 compat 的 \`withForwardKind\`）。没标的才按段类型判断。
+ */
 const kindOfElement = (element: any): string => {
+  const tagged = forwardKindOf(element)
+  if (tagged) return tagged
   const type = String(element?.type ?? '')
   if (type === 'img' || type === 'image') return 'image'
   if (type === 'record' || type === 'audio') return 'audio'

@@ -17,6 +17,7 @@ export const templateRegistry: Record<string, TemplateLoader> = {
   'bilibili/dynamic/DYNAMIC_TYPE_FORWARD': () => import('./template/bilibili/dynamic/DYNAMIC_TYPE_FORWARD'),
   'bilibili/dynamic/DYNAMIC_TYPE_LIVE_RCMD': () => import('./template/bilibili/dynamic/DYNAMIC_TYPE_LIVE_RCMD'),
   'bilibili/dynamic/DYNAMIC_TYPE_WORD': () => import('./template/bilibili/dynamic/DYNAMIC_TYPE_WORD'),
+  'bilibili/interactive': () => import('./template/bilibili/interactive'),
   'bilibili/qrcodeImg': () => import('./template/bilibili/qrcodeImg'),
   'bilibili/userlist': () => import('./template/bilibili/userlist'),
   'bilibili/videoInfo': () => import('./template/bilibili/videoInfo'),

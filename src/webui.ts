@@ -313,6 +313,25 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
     return !!(match && tokens.has(match[1]))
   }
 
+  /**
+   * 请求有没有带**控制台发的面板令牌**。
+   *
+   * 这是「只能从控制台 iframe 进面板」的唯一凭据：令牌由 RPC \`kkk/panel-token\` 下发，
+   * 那个 RPC 走控制台登录态（authority 4），没登录控制台根本调不到 → 也就拿不到令牌。
+   * 这里**不看 webUiAuth，也不依赖宿主装没装 auth 插件**，所以任何部署下都堵得住。
+   */
+  const panelTokenOk = (request: any): boolean => {
+    const panelCookie = new RegExp(COOKIE_NAME + '_panel=([0-9a-f]+)').exec(String(request?.headers?.cookie || ''))
+    if (panelCookie && panelTokenValid(panelCookie[1])) return true
+    const header = String(request?.headers?.authorization || request?.headers?.['x-access-token'] || '')
+    if (header && panelTokenValid(header.replace(/^Bearer\\s+/i, ''))) return true
+    const url = String(request?.url || '')
+    const panel = /[?&]panel=([0-9a-f]+)/.exec(url)
+    if (panel && panelTokenValid(panel[1])) return true
+    const token = /[?&]token=([0-9a-f]+)/.exec(url)
+    return !!(token && panelTokenValid(token[1]))
+  }
+
   const ok = (response: any, data: any = null, message = '') => {
     response.type = 'application/json; charset=utf-8'
     response.body = JSON.stringify({ code: 200, data, message })
@@ -607,9 +626,14 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
    * 这样未登录状态下连 SPA 的静态资源和 /kkk/assets/config 这种前端路由也拿不到。
    */
   const pageDenied = async (response: any): Promise<boolean> => {
+    /**
+     * 鉴权就用控制台登录态：装了 auth 插件（且 webUiAuth 开着）时认控制台 cookie，
+     * 没登录给 404。**额外加令牌校验会把控制台 iframe 也挡掉**（实测面板直接打不开），
+     * 按用户要求不做那层校验。
+     */
     if (!authRequired()) return false
-    if (await consoleAuthed(response)) return false
-    // 直接当成「没有这个页面」：面板只从控制台侧边栏进，独立 URL 不给任何提示
+    if (await consoleAuthed(response.request)) return false
+    logger.warn('[kkk] 拒绝访问面板：需要先登录 Koishi 控制台')
     response.status = 404
     response.type = 'text/plain; charset=utf-8'
     response.body = 'Not Found'
@@ -660,10 +684,17 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
     response.body = file
   })
 
-  for (const route of ['/kkk', '/kkk/', '/kkk/login']) {
+  /**
+   * 面板页面：**只从控制台 iframe 进**（见 pageDenied 的说明）。
+   * 原来还有一条独立的 \`/kkk/login\` 兜底入口，按用户要求一并去掉 —— 它就是「单独放出来」的那条路。
+   */
+  for (const route of ['/kkk', '/kkk/']) {
     server.get(route, async (response: any) => {
       if (await pageDenied(response)) return
       rememberPanelToken(response)
+      // 只允许同源 iframe 嵌套：别人把面板嵌到自己站里也用不了
+      response.set('Content-Security-Policy', "frame-ancestors 'self'")
+      response.set('X-Frame-Options', 'SAMEORIGIN')
       response.type = 'text/html; charset=utf-8'
       response.body = indexHtml()
     })
@@ -671,19 +702,10 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
 
   /* ---------------- 简易编辑页（改插件配置） ---------------- */
 
-  server.get('/kkk/edit', async (response: any) => {
-    if (await pageDenied(response)) return
-    let body: string
-    try {
-      body = fs.readFileSync(path.join(pluginRoot, 'assets', 'webui.html'), 'utf-8')
-    } catch {
-      body = '<h1>kkk 配置</h1><p>assets/webui.html 缺失</p>'
-    }
-    const token = issueToken()
-    response.set('Set-Cookie', COOKIE_NAME + '=' + token.accessToken + '; Path=/; HttpOnly; Max-Age=' + Math.floor(TOKEN_TTL / 1000))
-    response.type = 'text/html; charset=utf-8'
-    response.body = body
-  })
+  /**
+   * 原来的 `/kkk/edit` 是一个**独立的 HTML 配置编辑页**（assets/webui.html），
+   * 它绕开控制台、把配置表单单独放出来 —— 用户要求删掉，配置只从控制台里改。
+   */
 
   server.get('/kkk/api/config', (response: any) => {
     if (!authed(response)) return fail(response, 401, '未登录')

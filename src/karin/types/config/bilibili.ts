@@ -15,7 +15,7 @@ export interface bilibiliConfig {
    */
   forwardContent: Array<'text' | 'image' | 'video' | 'file'>
 
-  /** 解析时发送的内容，可选值：'info'(视频信息)、'comment'(评论图片)、'video'(视频文件) */
+  /** 解析时发送的内容，可选值：'info'(视频信息)、'comment'(评论图片)、'video'(视频文件)、'chart'(互动视频的剧情流程图) */
   sendContent: ['info' | 'comment' | 'video']
 
   /** B站评论数量，设置接口返回的评论数量，范围1 ~ x 条 */

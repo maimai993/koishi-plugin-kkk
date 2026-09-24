@@ -115,8 +115,24 @@ export class DouYin extends Base {
           aweme_id: data.aweme_id
         })
 
-        if (VideoData.data.aweme_detail === null) {
-          throw new Error('获取作品详情失败，可能是因为该作品已被删除或设置为私密。')
+        /**
+         * **接口没给出作品详情时的兜底**（线上真实报错）：
+         *
+         *     TypeError: Cannot read properties of undefined (reading 'aweme_detail')
+         *         at DouYin.DouyinHandler (douyin.js:94)
+         *
+         * 以前只挡了「aweme_detail === null」这一种 —— 而接口被风控 / Cookie 失效 / 链接失效时，
+         * 返回体里**连 data 都没有**，于是直接 TypeError，用户拿到的是一张满屏英文的错误卡片。
+         * 现在把整段摊开检查，并给一句人话 + 把原始响应写进日志（排查时才看得到错误码）。
+         */
+        if (!VideoData || !(VideoData as any).data || (VideoData as any).data.aweme_detail === null || (VideoData as any).data.aweme_detail === undefined) {
+          const raw: any = VideoData ?? {}
+          const code = raw.code ?? raw.data?.code
+          const message = raw.message ?? raw.msg ?? raw.data?.message ?? raw.data?.msg
+          logger.error('[抖音] 接口没有返回作品详情: ' + JSON.stringify({ code, message, 顶层键: Object.keys(raw) }).slice(0, 300))
+          throw new Error('抖音没有返回这条作品的数据'
+            + (code !== undefined ? '（错误码 ' + String(code) + (message ? '：' + String(message) : '') + '）' : '')
+            + '，常见原因：Cookie 失效、被风控，或者这条链接已经失效 / 作品已删除。')
         }
         // 根据 API 返回的数据判断作品类型，而不是依赖 URL
         // aweme_type: 0=视频, 68=图集, 163=文章

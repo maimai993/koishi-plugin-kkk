@@ -205,8 +205,14 @@ export const renderErrorImage = async (ctx: ErrorContext, opts: RenderErrorOptio
     pluginVersion: Root.pluginVersion,
     buildTime: buildMetadata?.buildTime ? formatBuildTime(buildMetadata.buildTime) : undefined,
     commitHash: buildMetadata?.commitHash,
-    // 之前这里可能传 undefined，模板读 adapterInfo.version.startsWith 直接 SSR 崩掉
-    adapterInfo: adapterInfo ?? { name: '未知适配器', version: '' },
+    /**
+     * 之前这里可能传 undefined，模板读 adapterInfo.version.startsWith 直接 SSR 崩掉。
+     * name 换成友好名（NapCat / OneBot）只是给卡片看：兼容层里 adapter.name 是**平台标识**，
+     * 别动原对象，免得面板那条链路拿到被改过的平台名。
+     */
+    adapterInfo: adapterInfo
+      ? { ...adapterInfo, name: String((adapterInfo as any).displayName || adapterInfo.name || '未知适配器') }
+      : { name: '未知适配器', version: '' },
     // 上报成功的编号与反馈群：印在卡片上，用户照着进群提问
     report: ctx.report
       ? { id: ctx.report.id, url: ctx.report.url, group: reportConfig().group, groupUrl: groupLinkOf(reportConfig().group) }

@@ -8,6 +8,7 @@
  *    - @kkk/richtext    → 内置 richtext
  *    - node-karin[/sub] → 兼容层实现（这样产物自带兼容层，不依赖 node_modules 里的转发包）
  */
+import { execFileSync } from 'node:child_process'
 import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -118,7 +119,41 @@ const checkImportMeta = (dir) => {
   return offenders
 }
 
+/**
+ * 写入构建元数据。
+ *
+ * 卡片上的「Built Time / Commit Hash」以前一直是空的：插件读的是 lib/build-metadata.json，
+ * 但没有任何地方生成它。构建时顺手写一份，随 lib 一起部署（也会被打进 npm 包里）。
+ */
+const writeBuildMetadata = () => {
+  const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'))
+  let commitHash = ''
+  try {
+    commitHash = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim()
+  } catch {
+    // 没装 git（或不在仓库里）：CI 上通常给了 GITHUB_SHA
+    commitHash = String(process.env.GITHUB_SHA ?? '').trim()
+  }
+  const metadata = {
+    version: String(pkg.version ?? ''),
+    buildTime: new Date().toISOString(),
+    buildTimestamp: Date.now(),
+    name: String(pkg.name ?? ''),
+    description: String(pkg.description ?? ''),
+    homepage: String(pkg.homepage ?? ''),
+    commitHash,
+    shortCommitHash: commitHash.slice(0, 7)
+  }
+  writeFileSync(path.join(outDir, 'build-metadata.json'), JSON.stringify(metadata, null, 2) + '\n')
+  return metadata
+}
+
 mkdirSync(outDir, { recursive: true })
+const buildMetadata = writeBuildMetadata()
 const rewritten = rewriteAliases(outDir)
 const offenders = checkImportMeta(outDir)
 if (offenders.length) {
@@ -127,3 +162,4 @@ if (offenders.length) {
   process.exit(1)
 }
 console.log('构建完成：输出到 ' + path.relative(root, outDir) + '，重写别名文件 ' + rewritten + ' 个')
+console.log('构建信息：v' + buildMetadata.version + ' · ' + (buildMetadata.shortCommitHash || '无 commit') + ' · ' + buildMetadata.buildTime)

@@ -187,7 +187,7 @@ setTimeout(async () => {
         texts.length + ' 条')
       check('没有发出任何合并转发（这就是用户反馈的那条）',
         !texts.some((text) => text.includes('"type":"message"')))
-      check('日志里说明这次按逐条发送处理', hasLog(/「解析结果合并转发」关着/),
+      check('日志里说明这次按逐条发送处理', hasLog(/按逐条发送处理/),
         (logs.find((line) => /合并转发/.test(line)) || '（没有）').slice(0, 140))
       /** 开关打开时又是合并的（确认开关真的能来回切） */
       await Config.Modify('app', 'fakeForward', true)

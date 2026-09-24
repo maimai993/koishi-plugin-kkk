@@ -1,12 +1,12 @@
 /**
- * 冒烟测试：kkk 的渲染优先级开关（面板「通用设置 → 优先渲染器」，配置项 app.renderer）。
+ * 冒烟测试：kkk 的渲染**只走浏览器服务**（3.5.0 起不再支持 shotkit 内核）。
  *
- *   用例 1：renderer = shotkit（默认）+ 两个服务都在 → 用内核，浏览器一次都不碰
- *   用例 2：renderer = puppeteer + 两个服务都在 → 用浏览器，内核一次都不碰
- *   用例 3：renderer = puppeteer + 只有内核 → 自动落到内核
+ *   用例 1：装了浏览器服务（这里用假的）+ 顺带装了 shotkit → 用浏览器渲染，内核一次都不碰
+ *   用例 2：karin 兼容层的 render.render() 走的是同一条路
+ *   用例 3：只有内核、没有浏览器服务 → 渲染失败，而且**不会偷偷用内核兜底**，
+ *          日志里给出能照做的报错（"需要安装浏览器渲染服务"）
  *
- * 两个入口都覆盖：卡片主渲染 Render() 和 karin 兼容层的 render.render()。
- * 另外全程记录两边渲染的起止时间，断言**两个引擎没有同时渲染**。
+ * 另外记录渲染区间，断言没有并发渲染（渲染是串行的硬性要求）。
  *
  * 用法：node scripts/smoke-render-path.cjs
  */
@@ -24,17 +24,6 @@ const check = (name, ok, extra = '') => {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 const DATA_ROOT = path.join(pluginRoot, 'data-smoke-render-path')
-const CONFIG_DIR = path.join(DATA_ROOT, 'koishi-plugin-kkk', 'config')
-
-/** 把「优先渲染器」写进本插件的 config.json（Config 每次访问都重新读盘，改完立刻生效） */
-function setRenderer (value) {
-  fs.mkdirSync(CONFIG_DIR, { recursive: true })
-  const file = path.join(CONFIG_DIR, 'config.json')
-  let config = {}
-  try { config = JSON.parse(fs.readFileSync(file, 'utf8')) } catch { /* 第一次跑，还没有文件 */ }
-  config.app = { ...(config.app || {}), renderer: value }
-  fs.writeFileSync(file, JSON.stringify(config, null, 2), 'utf8')
-}
 
 const TINY_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64')
 
@@ -60,97 +49,97 @@ function fakePuppeteer (events) {
   return { name: 'puppeteer', page: async () => page, browser: { newPage: async () => page, process: () => ({ pid: 0 }) } }
 }
 
-/** 建一个上下文：可选挂假浏览器服务，并给内核的 renderFile 打点 */
+/** 建一个上下文：可选挂假浏览器服务；装了 shotkit 就给它打点（用它=失败） */
 async function boot ({ withPuppeteer, events }) {
   const kkk = require(path.join(pluginRoot, 'lib/index.js'))
-  const shotkit = require('koishi-plugin-shotkit')
   const ctx = new Context()
   ctx.plugin(kkk, { dataPath: DATA_ROOT, debug: true })
-  ctx.plugin(shotkit, {})
+  try {
+    const shotkit = require('koishi-plugin-shotkit')
+    ctx.plugin(shotkit, {})
+  } catch { /* 没装就没装：这个测试的重点是「不会用它」，没装更省事 */ }
   if (withPuppeteer) ctx.set('puppeteer', fakePuppeteer(events))
   await ctx.start()
   await sleep(400)
-  const service = ctx.get('shotkit')
-  const original = service.renderFile.bind(service)
-  service.renderFile = record(events, 'shotkit:renderFile', original)
+  const service = typeof ctx.get === 'function' ? ctx.get('shotkit') : null
+  if (service && typeof service.renderFile === 'function') {
+    const original = service.renderFile.bind(service)
+    service.renderFile = record(events, 'shotkit:renderFile', original)
+  }
   return ctx
 }
 
-/** 两个引擎的渲染区间不能交叠（串行是硬性要求） */
+/** 渲染区间不能交叠（串行是硬性要求） */
 function overlaps (events) {
-  const spans = events.filter((e) => e.end && /^(chrome:screenshot|shotkit:renderFile)$/.test(e.name))
-    .sort((a, b) => a.start - b.start)
+  const spans = events.filter((e) => e.end).sort((a, b) => a.start - b.start)
   for (let i = 1; i < spans.length; i++) {
     if (spans[i].start < spans[i - 1].end) return spans[i - 1].name + ' 与 ' + spans[i].name + ' 重叠'
   }
   return null
 }
 
-const CARD = { title: '优先级冒烟', author: 'smoke', desc: '', cover: '' }
+/** 抓住这段代码里的日志（兼容层日志最终落到 console.log） */
+async function captureLogs (fn) {
+  const lines = []
+  const original = console.log
+  console.log = (...args) => { lines.push(args.map((item) => String(item)).join(' ')) }
+  try { await fn() } finally { console.log = original }
+  return lines
+}
+
+const CARD = { title: '渲染冒烟', author: 'smoke', desc: '', cover: '' }
 
 ;(async () => {
   console.log('')
-  console.log('[1] renderer = shotkit（默认）：用内核')
+  console.log('[1] 有浏览器服务：用浏览器渲染，shotkit 一次都不碰')
   {
-    setRenderer('shotkit')
     const events = []
     const ctx = await boot({ withPuppeteer: true, events })
-    const before = ctx.shotkit.captures
+    const before = ctx.shotkit?.captures ?? 0
     const { Render } = require(path.join(pluginRoot, 'lib/karin/module/utils/Render/index.js'))
     const result = await Render({}, 'bilibili/info', CARD)
     const image = Array.isArray(result) ? result.find((el) => el && (el.type === 'img' || el.type === 'image')) : null
     check('渲染出了图片元素', !!image)
-    check('走了内核', ctx.shotkit.captures - before === 1, (ctx.shotkit.captures - before) + ' 次')
-    check('浏览器一次都没碰', !events.some((e) => e.name === 'chrome:screenshot'), events.map((e) => e.name).join(',') || '无')
+    check('浏览器被用上了', events.some((e) => e.name === 'chrome:screenshot'), events.map((e) => e.name).join(',') || '无')
+    check('shotkit 内核一次都没碰', (ctx.shotkit?.captures ?? 0) - before === 0, ((ctx.shotkit?.captures ?? 0) - before) + ' 次')
     check('没有并发渲染', !overlaps(events))
     await ctx.stop()
   }
 
   console.log('')
-  console.log('[2] renderer = puppeteer：用浏览器')
+  console.log('[2] karin 兼容层的 render.render() 也走浏览器')
   {
-    setRenderer('puppeteer')
     const events = []
     const ctx = await boot({ withPuppeteer: true, events })
-    const before = ctx.shotkit.captures
-    const { Render } = require(path.join(pluginRoot, 'lib/karin/module/utils/Render/index.js'))
-    const result = await Render({}, 'bilibili/info', CARD)
-    const image = Array.isArray(result) ? result.find((el) => el && (el.type === 'img' || el.type === 'image')) : null
-    check('渲染出了图片元素', !!image)
-    check('浏览器被用上了', events.some((e) => e.name === 'chrome:screenshot'), events.map((e) => e.name).join(','))
-    check('内核一次都没碰', ctx.shotkit.captures - before === 0, (ctx.shotkit.captures - before) + ' 次')
-
-    // karin 兼容层要跟着同一个开关走
     const htmlPath = path.join(DATA_ROOT, 'html', 'koishi-plugin-kkk', 'bilibili_info.html')
+    const before = ctx.shotkit?.captures ?? 0
     const mark = events.length
     const { render: karinRender } = require(path.join(pluginRoot, 'lib/compat/node-karin.js'))
     const base64 = await karinRender.render({ file: htmlPath, selector: '#container' })
     const compatEvents = events.slice(mark)
-    check('render.render 也走了浏览器', compatEvents.some((e) => e.name === 'chrome:screenshot') && base64.length > 50,
+    check('render.render 走了浏览器', compatEvents.some((e) => e.name === 'chrome:screenshot') && base64.length > 50,
       compatEvents.map((e) => e.name).join(',') + ' → ' + base64.length + ' chars')
+    check('render.render 也没碰内核', (ctx.shotkit?.captures ?? 0) - before === 0, ((ctx.shotkit?.captures ?? 0) - before) + ' 次')
     check('没有并发渲染', !overlaps(events))
     await ctx.stop()
   }
 
   console.log('')
-  console.log('[3] renderer = puppeteer，但没有浏览器服务：自动落到内核')
+  console.log('[3] 没有浏览器服务：渲染失败，不拿内核兜底，报错能照做')
   {
-    setRenderer('puppeteer')
     const events = []
     const ctx = await boot({ withPuppeteer: false, events })
-    const before = ctx.shotkit.captures
+    const before = ctx.shotkit?.captures ?? 0
     const { Render } = require(path.join(pluginRoot, 'lib/karin/module/utils/Render/index.js'))
-    const result = await Render({}, 'bilibili/info', CARD)
+    let result = null
+    const logs = await captureLogs(async () => { result = await Render({}, 'bilibili/info', CARD) })
     const image = Array.isArray(result) ? result.find((el) => el && (el.type === 'img' || el.type === 'image')) : null
-    const src = (image && image.attrs && image.attrs.src) || ''
-    const buffer = Buffer.from(src.includes(',') ? src.slice(src.indexOf(',') + 1) : '', 'base64')
-    const isPng = buffer.length > 24 && buffer.readUInt32BE(0) === 0x89504e47
-    check('内核被调用了一次', ctx.shotkit.captures - before === 1, (ctx.shotkit.captures - before) + ' 次')
-    check('出的是真卡片而不是占位图', isPng && buffer.readUInt32BE(16) > 100, isPng ? buffer.readUInt32BE(16) + 'x' + buffer.readUInt32BE(20) : 'not png')
+    check('没有渲染出图片（返回空数组）', Array.isArray(result) && !image, JSON.stringify(result).slice(0, 80))
+    check('内核没有被拿来兜底', (ctx.shotkit?.captures ?? 0) - before === 0, ((ctx.shotkit?.captures ?? 0) - before) + ' 次')
+    check('日志说清楚了要装什么', logs.some((line) => /需要安装浏览器渲染服务/.test(line)),
+      (logs.find((line) => /渲染失败/.test(line)) || '（没找到渲染失败日志）').slice(0, 160))
     await ctx.stop()
   }
-
-  setRenderer('shotkit')
 
   console.log('')
   console.log('=== ' + (failures ? '失败 ' + failures + ' 项' : '全部通过') + ' ===')
