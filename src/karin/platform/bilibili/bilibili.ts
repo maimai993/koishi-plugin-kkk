@@ -9,6 +9,7 @@ import {
   effectivePlayerSizeLimitMB,
   isOnlinePlayerRequest,
   markOnlinePlayerOverride,
+  normalizePlayerDanmaku,
   publishOnlinePlayer,
   setPlayerStorySourceFactory,
   shouldRedirectOversizeToPlayer,
@@ -2276,6 +2277,26 @@ export const buildPlayerStorySource = (params: {
         request
       })
       return node ? trim(node) : null
+    },
+    /**
+     * 某一段的弹幕。
+     *
+     * 互动稿每一段是**独立的 cid、独立的弹幕池**，所以必须按 cid 现取
+     * —— 不然切段之后画面上还是第一段那批弹幕（用户实测反馈）。
+     * 每段都很短（通常几秒到几十秒），取一个 6 分钟分段就够（见 fetchVideoDanmakuList 的分段逻辑）。
+     */
+    danmaku: async (cid) => {
+      try {
+        const story = new Bilibili(e, { type: 'one_video', bvid, cid }, { storyOnly: true })
+        story.headers = { ...story.headers, ...headers }
+        const list = await story.fetchVideoDanmakuList(cid, 360)
+        const items = normalizePlayerDanmaku(list)
+        logger.mark('[互动视频] 分段弹幕 cid=' + cid + '：' + items.length + ' 条')
+        return items
+      } catch (error: any) {
+        logger.warn('[互动视频] 取分段弹幕失败（cid=' + cid + '）: ' + String(error?.message ?? error))
+        return null
+      }
     },
     segment: async (cid, report) => {
       /**

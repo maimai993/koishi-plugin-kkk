@@ -216,6 +216,13 @@ export interface PlayerStorySource {
    * 而它只拿得到这里报的数（页面读不到服务器的终端进度条）。
    */
   segment?: (cid: number, report?: SegmentReporter) => Promise<{ filepath: string; audioPath?: string } | null>
+  /**
+   * 取某一段的弹幕。
+   *
+   * 互动视频**每段是独立的 cid，弹幕池也各是各的** —— 不按 cid 取的话，
+   * 切段之后画面上飘的还是第一段那批弹幕（用户实测反馈就是这个）。
+   */
+  danmaku?: (cid: number) => Promise<PlayerDanmakuItem[] | null>
 }
 
 /** 把可能为空的数字洗干净（拿不到就 undefined，别在页面上显示 NaN/undefined） */
@@ -579,17 +586,47 @@ export function getPlayerSession (token: unknown): PlayerSession | undefined {
   return session
 }
 
-/** 读弹幕数据（每次从磁盘读：弹幕可能上万条，没必要常驻内存） */
-export function readPlayerDanmaku (token: unknown): { total: number, items: PlayerDanmakuItem[] } | null {
+/**
+ * 读弹幕数据（每次从磁盘读：弹幕可能上万条，没必要常驻内存）。
+ *
+ * @param cid 互动视频的某一段；不给 = 会话自己那一段（`danmaku.json`），
+ *            给了 = 那一段缓存下来的 `danmaku-<cid>.json`
+ */
+export function readPlayerDanmaku (token: unknown, cid?: number): { total: number, items: PlayerDanmakuItem[] } | null {
   const session = getPlayerSession(token)
   if (!session) return null
   try {
-    const raw = readJsonFile(path.join(session.dir, 'danmaku.json'))
+    const file = cid && isValidStoryCid(cid) && String(cid) !== String(session.story?.cid)
+      ? 'danmaku-' + cid + '.json'
+      : 'danmaku.json'
+    const raw = readJsonFile(path.join(session.dir, file))
     const items = Array.isArray(raw) ? raw : (Array.isArray(raw?.items) ? raw.items : [])
     return { total: Array.isArray(raw?.items) ? (Number(raw.total) || items.length) : items.length, items }
   } catch (error: any) {
     logger.debug('[在线播放] 读取弹幕失败: ' + String(error?.message ?? error))
     return { total: 0, items: [] }
+  }
+}
+
+/** 某一段的弹幕缓存还在不在（在就直接发，不去问接口） */
+export function hasPlayerSegmentDanmaku (token: unknown, cid: number): boolean {
+  const session = getPlayerSession(token)
+  if (!session || !isValidStoryCid(cid)) return false
+  try {
+    return fs.statSync(path.join(session.dir, 'danmaku-' + cid + '.json')).isFile()
+  } catch {
+    return false
+  }
+}
+
+/** 把某一段的弹幕写进会话目录（下次点回来就不必再问接口） */
+export function writePlayerSegmentDanmaku (token: unknown, cid: number, items: PlayerDanmakuItem[]): void {
+  const session = getPlayerSession(token)
+  if (!session || !isValidStoryCid(cid)) return
+  try {
+    fs.writeFileSync(path.join(session.dir, 'danmaku-' + cid + '.json'), JSON.stringify({ total: items.length, items }))
+  } catch (error: any) {
+    logger.debug('[在线播放] 分段弹幕落盘失败（不影响播放）: ' + String(error?.message ?? error))
   }
 }
 

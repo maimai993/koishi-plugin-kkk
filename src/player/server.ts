@@ -33,6 +33,7 @@ import {
   adoptPlayerSegment,
   getPlayerSession,
   getPlayerStorySource,
+  hasPlayerSegmentDanmaku,
   isValidPlayerToken,
   isValidStoryCid,
   markPlayerMerged,
@@ -43,6 +44,7 @@ import {
   resolvePlayerMerged,
   resolvePlayerSegment,
   resolvePlayerVideo,
+  writePlayerSegmentDanmaku,
   type SegmentKind,
   type SegmentReporter,
   type SegmentStage
@@ -292,14 +294,35 @@ function coverResponse (token: string): PlayerHttpResponse {
   }
 }
 
-/** 弹幕 JSON： `{ total, items: [{ time, mode, size, color, text }] }` */
-function danmakuResponse (token: string): PlayerHttpResponse {
-  const data = readPlayerDanmaku(token)
-  if (!data) return notFound(false)
-  return {
-    status: 200,
-    headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
-    body: Buffer.from(JSON.stringify(data))
+/**
+ * 弹幕 JSON： `{ total, items: [{ time, mode, size, color, text }] }`。
+ *
+ * `?cid=` 取互动视频**某一段**的弹幕：互动稿每一段是独立的 cid、弹幕池也各是各的，
+ * 不按 cid 取的话切段之后飘的还是第一段那批（用户实测反馈）。
+ * 取过一次就缓存在会话目录里（`danmaku-<cid>.json`），点回来不必再问接口。
+ */
+async function danmakuResponse (token: string, query: URLSearchParams): Promise<PlayerHttpResponse> {
+  const cid = Number(query.get('cid')) || 0
+  const session = getPlayerSession(token)
+  if (!cid || !isValidStoryCid(cid) || Number(session?.story?.cid) === Number(cid)) {
+    const data = readPlayerDanmaku(token)
+    if (!data) return notFound(false)
+    return jsonResponse(data)
+  }
+  if (hasPlayerSegmentDanmaku(token, cid)) {
+    return jsonResponse(readPlayerDanmaku(token, cid) ?? { total: 0, items: [] })
+  }
+  const source = getPlayerStorySource(token)
+  if (!source?.danmaku) return jsonResponse({ total: 0, items: [] })
+  try {
+    const items = await source.danmaku(cid)
+    if (!items) return jsonResponse({ total: 0, items: [] })
+    writePlayerSegmentDanmaku(token, cid, items)
+    logger.mark('[在线播放] 已取到互动分段弹幕 cid=' + cid + '（' + items.length + ' 条）')
+    return jsonResponse({ total: items.length, items })
+  } catch (error: any) {
+    logger.warn('[在线播放] 取互动分段弹幕失败 cid=' + cid + '：' + String(error?.message ?? error))
+    return jsonResponse({ total: 0, items: [] })
   }
 }
 
@@ -565,7 +588,7 @@ export async function handlePlayerRequest (request: PlayerHttpRequest): Promise<
   }
   // 独立路由：`/kkk/player/<token>/download` 与 `/video?download=1` 完全等价
   if (action === 'download') return videoResponse(token, request.range, method === 'HEAD', true)
-  if (action === 'danmaku') return danmakuResponse(token)
+  if (action === 'danmaku') return danmakuResponse(token, query)
   if (action === 'cover') return coverResponse(token)
   // 互动视频：当前剧情（题目 + 选项）与分段视频
   if (action === 'story') return storyResponse(token, query)

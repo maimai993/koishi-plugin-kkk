@@ -54,6 +54,7 @@ const firstNode = {
 }
 const nodeCalls = []
 const segmentCalls = []
+const danmakuCalls = []
 let nodeResult = { cid: 2002, question: '第二段？', isLeaf: false, choices: [{ label: 'A', text: '继续', cid: 4004, edgeId: 21 }] }
 
 const session = store.registerPlayerSession({
@@ -69,6 +70,13 @@ const session = store.registerPlayerSession({
     node: firstNode,
     source: {
       node: async (params) => { nodeCalls.push(params); return nodeResult },
+      danmaku: async (cid) => {
+        danmakuCalls.push(cid)
+        return [
+          { time: 0, mode: 1, size: 25, color: 0xffffff, text: 'cid' + cid + ' 的第 1 条' },
+          { time: 500, mode: 5, size: 25, color: 0xff0000, text: 'cid' + cid + ' 的顶部彩色弹幕' }
+        ]
+      },
       segment: async (cid, report) => {
         segmentCalls.push(cid)
         // 模拟「下载 + 合成」：先报下载进度、再报合成，最后给一个临时文件让播放器搬进会话目录
@@ -136,6 +144,14 @@ const main = async () => {
       scriptText.includes("fetch(API + '/progress?cid=' + cid)") &&
       scriptText.includes('function pollProgress') &&
       scriptText.includes("info.reason"))
+    check('换段时**同时换弹幕**（互动稿每段一个弹幕池）',
+      scriptText.includes('function loadDanmaku') &&
+      scriptText.includes("fetch(API + '/danmaku' + (cid ? '?cid=' + cid : ''))") &&
+      /function pickStory[\s\S]{0,1200}?loadDanmaku\(choice\.cid\)/.test(scriptText))
+    check('弹幕洪峰时白字抽稀、彩色/顶底优先放行（不然彩色和顶部永远轮不到）',
+      scriptText.includes('DM_BUDGET_PER_SEC') &&
+      scriptText.includes("var isRare = kind !== 'scroll' || Number(item.color) !== 0xffffff") &&
+      scriptText.includes('if (dmBudget < 1) return'))
     check('下好开播后自动收起进度卡片（loadeddata / canplay）',
       scriptText.includes('function settleStoryWait') &&
       scriptText.includes("addEventListener('loadeddata', settleStoryWait)"))
@@ -244,6 +260,19 @@ const main = async () => {
     check('已经下好的分段直接回 ready（不用等一次往返）', again.stage === 'ready', JSON.stringify(again))
     const badCid = await request(base + '/progress', undefined, '?cid=abc')
     check('非法 cid 的进度查询 → 404', badCid.status === 404, 'status=' + badCid.status)
+  }
+
+  console.log('[5a] 分段弹幕：互动稿每段一个弹幕池')
+  {
+    const own = JSON.parse(bodyOf(await request(base + '/danmaku')) || '{}')
+    check('不带 cid = 会话自己那一段的弹幕', Array.isArray(own.items), 'total=' + own.total)
+    const other = JSON.parse(bodyOf(await request(base + '/danmaku', undefined, '?cid=2002')) || '{}')
+    check('带 cid → 现取那一段的弹幕', other.items?.length === 2 && String(other.items[1].text).includes('2002'),
+      JSON.stringify((other.items || []).map((i) => i.text)))
+    check('确实去平台侧要了（按 cid）', danmakuCalls.length === 1 && danmakuCalls[0] === 2002, JSON.stringify(danmakuCalls))
+    check('取到的弹幕落在会话目录里（点回来不用再问接口）', fs.existsSync(path.join(session.dir, 'danmaku-2002.json')))
+    const again = JSON.parse(bodyOf(await request(base + '/danmaku', undefined, '?cid=2002')) || '{}')
+    check('第二次命中缓存（不再问平台）', again.items?.length === 2 && danmakuCalls.length === 1)
   }
 
   console.log('[5b] 分段准备失败：进度接口把原因带给页面')
