@@ -405,6 +405,8 @@ export function renderPlayerPage (info: PlayerPageInfo): string {
     + '<meta charset="utf-8">\n'
     + '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">\n'
     + '<meta name="referrer" content="no-referrer">\n'
+    // 空 data URI 图标：不然浏览器会去请求 /favicon.ico 打个 404（用户日志里看到过）
+    + '<link rel="icon" href="data:,">\n'
     + '<title>' + title + '</title>\n'
     + '<style>' + PLAYER_STYLE + '</style>\n'
     + '</head>\n<body>\n'
@@ -1414,7 +1416,7 @@ const PLAYER_SCRIPT = [
   "    var fromCid = storyNode ? storyNode.cid : 0",
   "    renderProgress('正在准备下一段…', 0)",
   "    try { fetch(API + '/segment/' + choice.cid, { method: 'HEAD' }).catch(function () {}) } catch (err) { /* 没有 fetch 时靠轮询兜底 */ }",
-  "    loadStory(fromCid, choice.edgeId)",
+  "    loadStory(fromCid, choice.edgeId, choice.cid)",
   "    pollProgress(choice.cid, 0)",
   "  }",
   "",
@@ -1475,7 +1477,13 @@ const PLAYER_SCRIPT = [
   "  }",
   "",
   "  /** 拉一次剧情：不带 fromCid = 问「当前这一段」的选项；带了 = 问走这条边之后的下一段 */",
-  "  function loadStory (fromCid, edgeId) {",
+  "  /**",
+  "   * @param fromCid 从哪一段出发（不带 = 问当前这一段自己的选项）",
+  "   * @param edgeId 走哪条边（不带 = 根节点）",
+  "   * @param landingCid 这条边落地那一段的 cid —— edgeinfo 只回题干和选项、不回落点 cid，",
+  "   *                   所以要拿选项自己带的 cid 钉住，之后「从哪一段出发」才不会用错。",
+  "   */",
+  "  function loadStory (fromCid, edgeId, landingCid) {",
   "    var url = API + '/story' + (fromCid ? '?cid=' + fromCid + '&edge=' + (edgeId || 0) : '')",
   "    fetch(url)",
   "      .then(function (res) { return res.ok ? res.json() : null })",
@@ -1485,7 +1493,7 @@ const PLAYER_SCRIPT = [
   "        if (storyBtn) storyBtn.hidden = false",
   "        // 剧情一到就把选项贴出来 —— 用户反馈「进了播放页看不到能点的按钮」，",
   "        // 别让人以为这页没有互动（不想看就点卡片外面收起来）",
-  "        if (!storyPending && !storyShown) renderStory()",
+  "        if (landingCid) node.cid = landingCid",
   "      })",
   "      .catch(function () { /* 取不到就当普通视频放，不影响这一段 */ })",
   "  }",

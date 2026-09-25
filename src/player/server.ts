@@ -44,7 +44,8 @@ import {
   resolvePlayerSegment,
   resolvePlayerVideo,
   type SegmentKind,
-  type SegmentReporter
+  type SegmentReporter,
+  type SegmentStage
 } from './store'
 
 /** 一次请求（只取用得到的字段） */
@@ -340,7 +341,13 @@ async function storyResponse (token: string, query: URLSearchParams): Promise<Pl
 }
 
 /** 正在下载的分段任务：同一条会话 + 同一个 cid 只下一次，用户连点也不会把带宽打满 */
-const segmentJobs = new Map<string, Promise<{ filepath: string } | null>>()
+const segmentJobs = new Map<string, Promise<SegmentFiles | null>>()
+
+/** 一次分段准备的产物：画面一份 +（可选）音轨一份 */
+interface SegmentFiles {
+  filepath: string
+  audioPath?: string
+}
 
 /**
  * 分段准备的进度表：`token:cid` → 现在在哪一步、下了多少。
@@ -396,7 +403,7 @@ function progressResponse (token: string, query: URLSearchParams): PlayerHttpRes
   })
 }
 
-function segmentJob (token: string, cid: number, run: () => Promise<{ filepath: string } | null>): Promise<{ filepath: string } | null> {
+function segmentJob (token: string, cid: number, run: () => Promise<SegmentFiles | null>): Promise<SegmentFiles | null> {
   const key = token + ':' + cid
   const running = segmentJobs.get(key)
   if (running) return running

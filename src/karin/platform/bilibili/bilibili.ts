@@ -63,7 +63,12 @@ import {
 } from '@/module/utils'
 import { bilibiliFetcher, isSoftFailure, SOFT_ERROR_CODES, softFetch } from '@/module/utils/amagiClient'
 import { Config } from '@/module/utils/Config'
-import { fetchInteractiveInfo } from '@/module/utils/InteractiveVideo'
+import {
+  fetchInteractiveInfo,
+  fetchInteractiveNode,
+  type InteractiveNode,
+  type InteractiveRequest
+} from '@/module/utils/InteractiveVideo'
 import { getParseOverride } from '@/module/utils/ParseOverride'
 // 解析阶段（「下载进度」指令读的就是这里登记的状态）
 import { DOWNLOAD_STAGES, withDownloadStage } from '@/module/utils/Network/Downloader'
@@ -2183,14 +2188,23 @@ export const buildPlayerStorySource = (params: {
   rootCid: number
   headers: Record<string, string>
   islogin: boolean
+  /**
+   * 请求实现（默认走插件的网络层）。
+   *
+   * 留这个口子是给冒烟测试用的：真跑一次要用真接口 + Cookie，测不了；
+   * 注入假实现就能把「节点怎么解析、边 id 怎么带」钉在测试里
+   * —— 这里踩过一次坑：少 import 一个函数，编译不报错（构建是 noCheck）、
+   * 线上表现却是「播放页永远没有选项」。
+   */
+  request?: InteractiveRequest
 }): PlayerStorySource => {
-  const { e, bvid, rootCid, headers, islogin } = params
+  const { e, bvid, rootCid, headers, islogin, request } = params
   /** 剧情图版本号（0 = 还没问到 / 问不到） */
   let graphVersion = 0
 
   const ensureGraphVersion = async (): Promise<number> => {
     if (graphVersion > 0) return graphVersion
-    const info = await fetchInteractiveInfo({ bvid, cid: rootCid, headers })
+    const info = await fetchInteractiveInfo({ bvid, cid: rootCid, headers, request })
     graphVersion = Number(info?.graphVersion ?? 0)
     return graphVersion
   }
@@ -2216,7 +2230,8 @@ export const buildPlayerStorySource = (params: {
         graphVersion: version,
         cid,
         edgeId,
-        headers
+        headers,
+        request
       })
       return node ? trim(node) : null
     },
