@@ -656,13 +656,14 @@ export class Bilibili extends Base {
               await downloadTask
               await this.sendPreparedVideo()
               /**
-               * 互动视频：视频发完再发剧情（后台跑，不阻塞解析主流程）。
+               * 互动视频：**群里不再发「选择按钮」了**（用户要求）。
                *
-               * 例外：这次走的是**在线播放**（视频没发进群里，用户在看播放页）时不跑 ——
-               * 选项已经浮在播放页的画面上了（见 sendPreparedVideo 里的 story），
-               * 再在群里同步跑一套，用户会被两处剧情各问一遍。
+               * 剧情选择整个搬到播放页上（选项贴在视频上、点完显示加载进度）；
+               * 群里如果还同步问一遍，用户会被两处剧情各问一次。
+               * 只有「视频直接发到群里、没走播放页」时，顺手补一张**剧情图**（图片，不是按钮）——
+               * 用户至少能看到这张图里有几条分支。
                */
-              if (this.interactive && !this.publishedStory) void this.startInteractiveStory()
+              if (this.interactive && !this.publishedStory) void this.sendInteractiveChartOnly()
             })
           }
         }
@@ -1610,11 +1611,19 @@ export class Bilibili extends Base {
     infoData,
     playUrlData,
     danmakuList = [],
-    onProgress
+    onProgress,
+    keepAudioSeparate = false
   }: {
     infoData?: BilibiliBangumiInfoResponse | BilibiliVideoInfoResponse
     playUrlData: BilibiliVideoStreamResponse | BiliBiliVideoPlayurlNoLogin | BilibiliBangumiStreamResponse
     danmakuList?: BiliDanmakuElem[]
+    /**
+     * 强制「音视频分开存」（不跑 ffmpeg 合成）。
+     *
+     * 在线播放本来就是这个行为；播放页**按需下载的互动分段**也要它 ——
+     * 那种调用发生在 HTTP 请求里（不在解析上下文），`isOnlinePlayerRequest()` 是 false，不显式指定就会被合成。
+     */
+    keepAudioSeparate?: boolean
     /**
      * 过程上报（可选）：在线播放页的互动视频点完一段要显示「加载进度」，
      * 页面读不到服务器的终端进度条，只能由这里把数字交出去。
@@ -1745,7 +1754,7 @@ export class Bilibili extends Base {
               })
             )
             sourcePath = resultPath
-          } else if (isOnlinePlayerRequest()) {
+          } else if (isOnlinePlayerRequest() || keepAudioSeparate) {
             /**
              * **在线播放：默认不合成**（用户要求）。
              *
@@ -1753,22 +1762,14 @@ export class Bilibili extends Base {
              * 低配机器更久）。改成：画面和声音**各自留一份**，播放页用 `<video muted>` + `<audio>`
              * 同时播；只有用户在播放页点「服务器合并后下载」时才按需合成（见 player/server.ts）。
              *
-             * 例外：**互动视频**照常合成一条 mp4 —— 播放器要在选项点完之后直接换 `src` 续播下一段，
-             * 那一条链路上不能同时管两份文件（画面 + 声音的同步逻辑会跟着翻倍，容易出错）。
+             * 互动视频也一样：画面和声音各自留一份，播放页换段时两个 src 一起换 ——
+             * 不跑 ffmpeg，点完选项少等一两秒（用户要求）。
+             * `keepAudioSeparate` 是给「播放页按需下载的分段」用的：那种调用发生在 HTTP 请求里、
+             * 不在解析上下文，`isOnlinePlayerRequest()` 是 false，不显式指定就会被合成。
              */
-            if (!!this.interactive || this.storyOnly) {
-              /** 合成分不出百分比，但至少让播放页把「正在合成」显示出来 */
-              try { onProgress?.(0, 0, 'merging') } catch { /* 上报失败不影响合成 */ }
-              success = await withDownloadStage(DOWNLOAD_STAGES.merging, () =>
-                mergeVideoAudio(bmp4.filepath, bmp3.filepath, resultPath)
-              )
-              sourcePath = resultPath
-              logger.mark('[在线播放] 互动视频：仍合成一条 mp4，方便播放页按选项续播')
-            } else {
-              success = true
-              sourcePath = bmp4.filepath
-              logger.mark('[在线播放] 跳过音视频合成：画面与声音分开存，浏览器端同时播放')
-            }
+            success = true
+            sourcePath = bmp4.filepath
+            logger.mark('[在线播放] 跳过音视频合成：画面与声音分开存，浏览器端同时播放')
           } else {
             success = await mergeVideoAudio(bmp4.filepath, bmp3.filepath, resultPath)
             sourcePath = resultPath
@@ -1779,7 +1780,7 @@ export class Bilibili extends Base {
              * 在线播放（音视频分离）时**不要重命名** —— 画面那个文件原样留着，
              * 「audioPath」指向单独的音轨文件，两个都由 publishOnlinePlayer 搬进会话目录。
              */
-            const separateAudio = isOnlinePlayerRequest() && !!bmp3 && sourcePath === bmp4.filepath
+            const separateAudio = (isOnlinePlayerRequest() || keepAudioSeparate) && !!bmp3 && sourcePath === bmp4.filepath
             if (separateAudio) {
               const videoStats = fs.statSync(bmp4.filepath)
               this.preparedVideo = {
@@ -1893,6 +1894,35 @@ export class Bilibili extends Base {
   }
 
   /**
+   * 互动视频发到群里时：只补一张**剧情图**，不问选项（用户要求：群里不要选择按钮）。
+   *
+   * 选项流程在播放页里（见 sendPreparedVideo 的 story）；这里只把「有几条分支」画出来。
+   * 失败只记日志 —— 出不了图不影响视频已经发出去这件事。
+   */
+  private async sendInteractiveChartOnly (): Promise<void> {
+    const interactive = this.interactive
+    if (!interactive) return
+    /** 没勾「流程图」就什么都不做（配置说了算） */
+    if (!Config.bilibili.sendContent.some((item) => item === 'chart')) return
+    try {
+      const info = await fetchInteractiveInfo({ bvid: interactive.bvid, cid: interactive.cid, headers: this.headers })
+      if (!info) return
+      await renderChart({
+        e: this.e,
+        bvid: interactive.bvid,
+        graphVersion: info.graphVersion,
+        cid: interactive.cid,
+        title: this.workInfo?.title ?? '互动视频',
+        notice: info.notice,
+        headers: this.headers,
+        full: true
+      })
+    } catch (error: any) {
+      logger.debug('[互动视频] 群里补剧情图失败（不影响视频）: ' + String(error?.message ?? error))
+    }
+  }
+
+  /**
    * 起一次互动剧情（后台长跑，不阻塞解析主流程）。
    *
    * 选项与等待都在 interactive-story 里；这里只负责：问一次剧情图版本号 → 跑剧情 → 续播时
@@ -1966,7 +1996,8 @@ export class Bilibili extends Base {
       if (!source.node) return undefined
       const node = await source.node({ cid: interactive.cid })
       if (!node) {
-        logger.debug('[互动视频] 播放页拿不到第一段的剧情，这次不挂互动面板')
+        /** 用 warn：用户在播放页看不到选项时，控制台里得能直接查到「是这里没拿到」 */
+        logger.warn('[互动视频] 播放页拿不到第一段的剧情（edgeinfo 没返回有效节点），这次不挂互动面板')
         return undefined
       }
       logger.mark('[互动视频] 播放页已挂上互动剧情（' + node.choices.length + ' 个选项）')
@@ -2226,6 +2257,8 @@ export const buildPlayerStorySource = (params: {
           infoData,
           playUrlData,
           danmakuList: [],
+          /** 画面和声音分开存（不跑 ffmpeg）：播放页换段时两个 src 一起换，点完少等一两秒 */
+          keepAudioSeparate: true,
           onProgress: report
             ? (bytes, total, stage) => report({ stage, bytes, total })
             : undefined
@@ -2233,8 +2266,9 @@ export const buildPlayerStorySource = (params: {
         if (!ok) return null
         const prepared = story.takePreparedVideo()
         if (!prepared?.filepath) return null
-        logger.mark('[互动视频] 播放页分段已下好 cid=' + cid + '（' + Number(prepared.totalBytes || 0).toFixed(2) + 'MB）')
-        return { filepath: prepared.filepath }
+        logger.mark('[互动视频] 播放页分段已下好 cid=' + cid + '（' + Number(prepared.totalBytes || 0).toFixed(2) + 'MB'
+          + (prepared.audioPath ? '，音轨单独一份' : '') + '）')
+        return { filepath: prepared.filepath, audioPath: prepared.audioPath }
       } catch (error: any) {
         logger.warn('[互动视频] 播放页分段下载失败（cid=' + cid + '）: ' + String(error?.message ?? error))
         return null

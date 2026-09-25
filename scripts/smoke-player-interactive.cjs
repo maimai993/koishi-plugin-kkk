@@ -58,6 +58,8 @@ let nodeResult = { cid: 2002, question: '第二段？', isLeaf: false, choices: 
 
 const session = store.registerPlayerSession({
   videoPath: writeFake('main.mp4', 2048, 7),
+  // 画面 + 声音分开的两份（B站就是两条流；互动分段也一样，不在服务器合成）
+  audioPath: writeFake('main.m4a', 1024, 9),
   title: '互动测试',
   platform: 'bilibili',
   danmaku: [],
@@ -72,9 +74,12 @@ const session = store.registerPlayerSession({
         // 模拟「下载 + 合成」：先报下载进度、再报合成，最后给一个临时文件让播放器搬进会话目录
         report?.({ stage: 'video', bytes: 2048, total: 4096 })
         await new Promise((resolve) => setTimeout(resolve, 120))
-        report?.({ stage: 'merging', bytes: 0, total: 0 })
+        report?.({ stage: 'audio', bytes: 512, total: 1024 })
         await new Promise((resolve) => setTimeout(resolve, 60))
-        return { filepath: writeFake('seg-src-' + cid + '.mp4', 4096, cid % 251) }
+        return {
+          filepath: writeFake('seg-src-' + cid + '.mp4', 4096, cid % 251),
+          audioPath: writeFake('seg-src-' + cid + '.m4a', 1024, 13)
+        }
       }
     }
   }
@@ -127,6 +132,11 @@ const main = async () => {
       scriptText.includes("fetch(API + '/progress?cid=' + cid)") &&
       scriptText.includes("info.stage === 'ready'") &&
       scriptText.includes('function switchSegment'))
+    check('换段时音轨一起换（画面 muted、声音走 <audio>，不在服务器合成）',
+      scriptText.includes("audioTrack.setAttribute('src', API + '/segment/' + cid + '?audio=1')") &&
+      html.includes('id="audioTrack"'))
+    check('剧情一到就把选项贴出来（进页面就能看到能点的按钮）',
+      scriptText.includes('if (!storyPending && !storyShown) renderStory()'))
     check('快放完（剩 6 秒）就把选项贴上来，放完停在结束画面',
       scriptText.includes('function maybeShowStory') && scriptText.includes('left <= 6') &&
       scriptText.includes("addEventListener('timeupdate', maybeShowStory)"))
@@ -177,6 +187,18 @@ const main = async () => {
     check('临时文件已经不在原地了（是搬不是拷）', !fs.existsSync(path.join(root, 'seg-src-2002.mp4')))
     const again = await request(base + '/segment/2002')
     check('第二次请求命中缓存（不再下载）', again.status === 200 && segmentCalls.length === 1)
+
+    const audio = await request(base + '/segment/2002', undefined, '?audio=1')
+    check('分段的音轨也能单独取（?audio=1 → audio/mp4）',
+      audio.status === 200 && audio.headers['Content-Type'] === 'audio/mp4' && sizeOf(audio) === 1024,
+      audio.headers['Content-Type'] + ' ' + sizeOf(audio))
+    check('音轨也搬进了会话目录（seg-2002.m4a）', fs.existsSync(path.join(session.dir, 'seg-2002.m4a')))
+    const audioRange = await request(base + '/segment/2002', 'bytes=0-511', '?audio=1')
+    check('音轨同样支持 Range', audioRange.status === 206 && sizeOf(audioRange) === 512, String(audioRange.status))
+
+    const firstAudio = await request(base + '/segment/1001', undefined, '?audio=1')
+    check('当前这一段的音轨就是会话里那份（不用再下载）',
+      firstAudio.status === 200 && sizeOf(firstAudio) === 1024, 'size=' + sizeOf(firstAudio))
   }
   {
     // 并发：用户连点同一个选项

@@ -198,7 +198,7 @@ export interface PlayerStorySource {
    * `report` 用来把「下载了多少 / 在干嘛」交出去 —— 播放页点完选项要显示加载进度，
    * 而它只拿得到这里报的数（页面读不到服务器的终端进度条）。
    */
-  segment?: (cid: number, report?: SegmentReporter) => Promise<{ filepath: string } | null>
+  segment?: (cid: number, report?: SegmentReporter) => Promise<{ filepath: string; audioPath?: string } | null>
 }
 
 /** 把可能为空的数字洗干净（拿不到就 undefined，别在页面上显示 NaN/undefined） */
@@ -599,12 +599,24 @@ export function isValidStoryCid (cid: unknown): boolean {
   return Number.isInteger(value) && value > 0 && value < 1e12
 }
 
-/** 取某一分段的文件（会话目录里的 seg-<cid>.mp4；没有就 null，路由再去按需下载） */
-export function resolvePlayerSegment (token: unknown, cid: number): { path: string, size: number } | null {
+/**
+ * 分段文件的两种：画面 `seg-<cid>.mp4` / 音轨 `seg-<cid>.m4a`。
+ *
+ * B站的音视频是分开的两条流，播放页也是两个元素同时播（用户要求不合成），
+ * 所以分段得跟着存两份、分开取。
+ */
+export type SegmentKind = 'video' | 'audio'
+
+/** 取某一分段的文件（会话目录里的 seg-<cid>.mp4 / .m4a；没有就 null，路由再去按需下载） */
+export function resolvePlayerSegment (
+  token: unknown,
+  cid: number,
+  kind: SegmentKind = 'video'
+): { path: string, size: number } | null {
   const session = getPlayerSession(token)
   if (!session || !isValidStoryCid(cid)) return null
   try {
-    const file = path.join(session.dir, 'seg-' + cid + '.mp4')
+    const file = path.join(session.dir, 'seg-' + cid + (kind === 'audio' ? '.m4a' : '.mp4'))
     const stat = fs.statSync(file)
     return stat.isFile() ? { path: file, size: stat.size } : null
   } catch {
@@ -618,11 +630,16 @@ export function resolvePlayerSegment (token: unknown, cid: number): { path: stri
  * 和登记会话时搬视频同一套逻辑：同分区改名、跨分区复制 + 删源；
  * 搬进会话目录还有个好处 —— 到期清目录时它会跟着一起消失，不用单独记账。
  */
-export function adoptPlayerSegment (token: unknown, cid: number, sourcePath: string): { path: string, size: number } | null {
+export function adoptPlayerSegment (
+  token: unknown,
+  cid: number,
+  sourcePath: string,
+  kind: SegmentKind = 'video'
+): { path: string, size: number } | null {
   const session = getPlayerSession(token)
   if (!session || !isValidStoryCid(cid)) return null
   if (!sourcePath || !fs.existsSync(sourcePath)) return null
-  const target = path.join(session.dir, 'seg-' + cid + '.mp4')
+  const target = path.join(session.dir, 'seg-' + cid + (kind === 'audio' ? '.m4a' : '.mp4'))
   try {
     try {
       fs.renameSync(sourcePath, target)
@@ -631,7 +648,8 @@ export function adoptPlayerSegment (token: unknown, cid: number, sourcePath: str
       fs.rmSync(sourcePath, { force: true })
     }
     const size = Number(fs.statSync(target).size) || 0
-    logger.mark('[在线播放] 互动分段已就绪 cid=' + cid + '（' + (size / 1024 / 1024).toFixed(1) + 'MB）')
+    logger.mark('[在线播放] 互动分段' + (kind === 'audio' ? '音轨' : '画面') + '已就绪 cid=' + cid
+      + '（' + (size / 1024 / 1024).toFixed(1) + 'MB）')
     return { path: target, size }
   } catch (error: any) {
     logger.warn('[在线播放] 互动分段搬进会话目录失败: ' + String(error?.message ?? error))

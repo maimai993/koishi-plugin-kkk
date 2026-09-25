@@ -43,6 +43,7 @@ import {
   resolvePlayerMerged,
   resolvePlayerSegment,
   resolvePlayerVideo,
+  type SegmentKind,
   type SegmentReporter
 } from './store'
 
@@ -414,17 +415,22 @@ async function segmentResponse (
   cid: number,
   range?: string,
   head = false,
-  download = false
+  download = false,
+  /** true = 要**音轨**（`?audio=1`）；B站音视频是两条流，播放页两个元素同时播，不合成 */
+  wantAudio = false
 ): Promise<PlayerHttpResponse> {
   const session = getPlayerSession(token)
   if (!session?.story || !isValidStoryCid(cid)) return notFound(false)
-  /** 当前这一段就是会话里的主视频，不用绕路也不用下载 */
+  const kind: SegmentKind = wantAudio ? 'audio' : 'video'
+  const type = wantAudio ? 'audio/mp4' : 'video/mp4'
+  const ext = wantAudio ? '.m4a' : '.mp4'
+  /** 当前这一段就是会话里的那份，不用绕路也不用下载 */
   if (Number(session.story.cid) === Number(cid)) {
-    const current = resolvePlayerVideo(token)
-    if (current) return fileResponse(token, current, 'video/mp4', range, head, download, '.mp4')
+    const current = wantAudio ? resolvePlayerAudio(token) : resolvePlayerVideo(token)
+    if (current) return fileResponse(token, current, type, range, head, download, ext)
   }
-  const cached = resolvePlayerSegment(token, cid)
-  if (cached) return fileResponse(token, cached, 'video/mp4', range, head, download, '.mp4')
+  const cached = resolvePlayerSegment(token, cid, kind)
+  if (cached) return fileResponse(token, cached, type, range, head, download, ext)
 
   const source = getPlayerStorySource(token)
   if (!source?.segment) return notFound(false)
@@ -446,12 +452,23 @@ async function segmentResponse (
   /**
    * 并发同一个分段时两个请求等的是同一个任务，**文件只该被搬一次**：
    * 先看一眼缓存（另一个请求可能已经搬进去了），没有再自己搬。
+   * 画面和音轨各搬各的（两个元素会分别来取）。
    */
-  const ready = resolvePlayerSegment(token, cid) ??
-    (prepared?.filepath ? adoptPlayerSegment(token, cid, prepared.filepath) : null)
+  const sourcePath = wantAudio ? prepared?.audioPath : prepared?.filepath
+  /**
+   * **一次把两份都搬进会话目录**（画面 + 音轨）。
+   *
+   * 页面上是两个元素分别来取文件的：只搬自己那份的话，另一个元素来的时候
+   * 会发现缓存里没有、于是**把整段又下一次**（同一条会话、同一个 cid 白下两遍）。
+   */
+  if (prepared?.filepath) adoptPlayerSegment(token, cid, prepared.filepath, 'video')
+  if (prepared?.audioPath) adoptPlayerSegment(token, cid, prepared.audioPath, 'audio')
+  const ready = resolvePlayerSegment(token, cid, kind) ??
+    (sourcePath ? adoptPlayerSegment(token, cid, sourcePath, kind) : null)
   if (!ready) return notFound(false)
-  logger.mark('[在线播放] 互动分段准备完成 cid=' + cid + '（' + (Date.now() - started) + 'ms）')
-  return fileResponse(token, ready, 'video/mp4', range, head, download, '.mp4')
+  logger.mark('[在线播放] 互动分段' + (wantAudio ? '音轨' : '画面') + '准备完成 cid=' + cid
+    + '（' + (Date.now() - started) + 'ms）')
+  return fileResponse(token, ready, type, range, head, download, ext)
 }
 
 /**
@@ -507,7 +524,10 @@ export async function handlePlayerRequest (request: PlayerHttpRequest): Promise<
   if (action === 'cover') return coverResponse(token)
   // 互动视频：当前剧情（题目 + 选项）与分段视频
   if (action === 'story') return storyResponse(token, query)
-  if (action === 'segment') return segmentResponse(token, Number(sub), request.range, method === 'HEAD', wantDownload)
+  if (action === 'segment') {
+    const wantAudio = query.has('audio') && query.get('audio') !== '0'
+    return segmentResponse(token, Number(sub), request.range, method === 'HEAD', wantDownload, wantAudio)
+  }
   // 互动视频：分段准备的进度（播放页点完选项轮询它显示加载进度）
   if (action === 'progress') return progressResponse(token, query)
   return notFound(false)
