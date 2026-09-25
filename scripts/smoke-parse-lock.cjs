@@ -105,7 +105,15 @@ console.log('\n[4] 四个平台都接了这把锁')
   const source = fs.readFileSync(path.join(pluginRoot, 'src/karin/apps/tools.ts'), 'utf-8')
   // import 那一行长这样：import { acquireParseLock } from …（名字后面没有括号），所以只数调用
   const usages = source.split('acquireParseLock(').length - 1
-  check('tools.ts 里有 4 处调用（抖音 / B站 / 快手 / 小红书）', usages === 4, '调用 ' + usages + ' 次')
+  /**
+   * 5 处 = 4 个平台（抖音 / B站 / 快手 / 小红书）+ 1 处**消息级**去重。
+   *
+   * 那处是后来补的（见 tools.ts 顶部 acquireMessageLock 的说明）：QQ 会把同一次发送投递多遍，
+   * 平台级去重只挡得住解析本身、挡不住「检测到 X 链接」那句提示，所以最前面还要再拦一道。
+   * 断言写死 4 会把它当成「多出来的调用」误报 —— 这里改成「平台 4 处 + 消息级 1 处」。
+   */
+  check('tools.ts 里每个平台都接了这把锁（4 处）+ 1 处消息级去重', usages === 5, '调用 ' + usages + ' 次')
+  check('那处多出来的是消息级去重（acquireMessageLock）', /const acquireMessageLock[\s\S]{0,400}?acquireParseLock\(/.test(source))
   check('并且是从 ParseLock 里 import 进来的', /import \{ acquireParseLock \} from '@\/module\/utils\/ParseLock'/.test(source))
   for (const [name, pattern] of [['抖音', /douyinKey/], ['B站', /biliKey/], ['快手', /kuaishouKey/], ['小红书', /xiaohongshuKey/]]) {
     check(name + ' 有去重键', pattern.test(source))

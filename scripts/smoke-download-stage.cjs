@@ -287,9 +287,18 @@ setTimeout(async () => {
 
     const { commandQueue } = require(path.join(pluginRoot, 'lib/compat/runtime.js'))
     const { Message } = require(path.join(pluginRoot, 'lib/compat/node-karin.js'))
+    /**
+     * 每次调用换一个会话 id。
+     *
+     * 去重键是「会话 + 用户 + 消息原文」（见 tools.ts 的 acquireMessageLock），
+     * 而这个脚本会在 [5] 真烧录 与 [6] 播放器模式里跑**同一条命令原文** ——
+     * 会话写死的话第二次会被「短时间不重复解析」直接吃掉，阶段自然一条都记录不到。
+     */
+    let commandSeq = 0
     const runCommand = async (namePart, content) => {
       const reg = commandQueue.find((item) => String(item.options?.name ?? '').includes(namePart))
       if (!reg) throw new Error('没有注册命令: ' + namePart)
+      commandSeq++
       const sent = []
       // 发送侧刻意慢一点：真实上传要几秒，太快的话「正在发送」阶段会被采样漏掉
       const bot = {
@@ -298,7 +307,8 @@ setTimeout(async () => {
         getGuild: async () => ({ name: 'smoke-guild' })
       }
       const session = {
-        content, selfId: '10000', userId: '12345', guildId: '456', channelId: '456', messageId: 'm1',
+        content, selfId: '10000', userId: '12345', guildId: '456', channelId: '456-' + commandSeq,
+        messageId: 'm1-' + commandSeq,
         bot, author: { nick: 'smoke' }, username: 'smoke', event: {},
         send: async (payload) => { sent.push(payload); await sleep(150); return ['msg-2'] }
       }

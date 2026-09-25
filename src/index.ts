@@ -603,8 +603,19 @@ function registerCommands (
       // Koishi 的 checkArgCount / checkUnknown 默认都是关的，多传也不会报错
       const parseCommand = name === '解析' || name === '弹幕解析' || name === 'kkk解析'
       const command = ctx.command(parseCommand ? name + ' [input:text]' : name, description)
-      // 面板按钮发过来的是「解析 <链接> --qn=80」这类文本，声明一下选项免得被当成参数报错
-      if (parseCommand) {
+      /**
+       * 面板按钮发过来的是「解析 <链接> --qn=80」这类文本，声明一下选项免得被当成参数报错。
+       *
+       * **只挂一次**：插件被热重载时（改配置 / 控制台点重载 / 迁移旧配置触发的 scope.update）
+       * apply 会再跑一遍，而 `ctx.command()` 拿到的是**同一个指令对象** ——
+       * 再 `.option('qn', …)` 一次就会抛 `duplicate option name "qn" for command "解析"`，
+       * 整个 apply 跟着失败：指令没注册上、控制台 /kkk 路由也挂不上
+       * （线上表现就是「改完配置机器人不理人，控制台面板 404」）。
+       * 记号直接挂在指令对象上，重载后依然是同一个对象，天然幂等。
+       */
+      const PARSE_OPTIONS_READY = Symbol.for('koishi-plugin-kkk/parse-options')
+      if (parseCommand && !(command as any)[PARSE_OPTIONS_READY]) {
+        ;(command as any)[PARSE_OPTIONS_READY] = true
         command
           .option('qn', '--qn <qn:number> B站画质 qn')
           .option('q', '--q <quality:string> 抖音/小红书画质档位')
