@@ -1642,8 +1642,17 @@ export class Bilibili extends Base {
     this.danmakuList = danmakuList
     switch (this.islogin) {
       case true: {
-        const videoStream: DashStreamUrls | undefined =
-          this.Type === 'one_video' ? playUrlData.data?.dash?.video[0] : playUrlData.result.dash.video[0]
+        /**
+         * 取选好的那一路视频流。
+         *
+         * **两处都要看**：amagi 的 playurl 响应里 dash 有时挂在 `data.dash`、有时挂在 `data.data.dash`
+         * （仓库里两种写法都存在，构建是 noCheck 所以一直没人发现）。
+         * 线上踩过：播放页按需下分段时走的链路只写了两层那个位置，
+         * 这里只读一层 → 拿到 undefined → 报「没有拿到视频流直链（playurl 返回里没有 base_url）」。
+         */
+        const videoStream: DashStreamUrls | undefined = this.Type === 'one_video'
+          ? (playUrlData.data?.dash?.video?.[0] ?? (playUrlData as any)?.data?.data?.dash?.video?.[0])
+          : playUrlData.result.dash.video[0]
         logger.debug('视频 URL:', videoStream?.base_url)
 
         // B站 CDN 需要正确的 Referer
@@ -1678,8 +1687,10 @@ export class Bilibili extends Base {
         // 删除原始 m4s 文件
         await Common.removeFile(bmp4Raw.filepath, true)
 
-        const audioStream: DashStreamUrls | undefined =
-          this.Type === 'one_video' ? playUrlData.data?.dash?.audio?.[0] : playUrlData.result.dash.audio?.[0]
+        /** 音轨同理：两层都看（不然会「有画面没声音」，而且不会有任何报错） */
+        const audioStream: DashStreamUrls | undefined = this.Type === 'one_video'
+          ? (playUrlData.data?.dash?.audio?.[0] ?? (playUrlData as any)?.data?.data?.dash?.audio?.[0])
+          : playUrlData.result.dash.audio?.[0]
         /** 音频候选同样带镜像，理由见上面视频那段 */
         const audioUrls = buildDashUrlCandidates(audioStream)
         const audioUrl = audioUrls[0]
@@ -2251,8 +2262,16 @@ export const buildPlayerStorySource = (params: {
           avid: infoData.data.data.aid,
           cid
         })
-        /** 选流：和主流程同一套（每个清晰度只留一条 + 按配置的画质挑一路） */
-        const dashStreams = playUrlData?.data?.data?.dash?.video
+        /**
+         * 选流：和主流程同一套（每个清晰度只留一条 + 按配置的画质挑一路）。
+         *
+         * dash 可能挂在 `data.dash`、也可能在 `data.data.dash`，这里统一挑一处，
+         * 并把选好的那一路**写回 `data.dash`**（prepareVideo 读的就是那里）。
+         */
+        const outer: any = playUrlData?.data ?? {}
+        const inner: any = outer?.data ?? {}
+        const dash: any = outer.dash ?? inner.dash
+        const dashStreams = dash?.video
         if (!Array.isArray(dashStreams) || !dashStreams.length) {
           /**
            * 没有 dash 流基本只有一个原因：这次拿的是「免登录 html5」那套响应（只有 durl）。
@@ -2265,15 +2284,22 @@ export const buildPlayerStorySource = (params: {
         const simplify = (dashStreams as any[]).filter((item, index, self) =>
           self.findIndex((row: { id: number }) => row.id === item.id) === index
         )
-        playUrlData.data.data.dash.video = simplify
-        const audioUrl = playUrlData.data.data.dash.audio?.[0]?.base_url
+        dash.video = simplify
+        const audioUrl = dash.audio?.[0]?.base_url
         const corpus = await bilibiliProcessVideos({
-          accept_description: playUrlData.data.data.accept_description,
+          accept_description: dash.accept_description ?? outer.accept_description,
           bvid,
           qn: Config.bilibili.videoQuality
         }, simplify, audioUrl)
-        playUrlData.data.data.dash.video = corpus.videoList
-        playUrlData.data.data.accept_description = corpus.accept_description
+        /** 挂到 prepareVideo 会读的位置（两层都写一份，谁读哪层都对） */
+        outer.dash = dash
+        dash.video = corpus.videoList
+        dash.accept_description = corpus.accept_description
+        outer.accept_description = corpus.accept_description
+        if (inner && inner !== outer) {
+          inner.dash = dash
+          inner.accept_description = corpus.accept_description
+        }
         /**
          * 播放页那一段不带弹幕烧录（弹幕由播放页自己画）。
          * `onProgress` 一路传到 downloadFile，播放页据此显示「下载 xx% / 正在合成」。
