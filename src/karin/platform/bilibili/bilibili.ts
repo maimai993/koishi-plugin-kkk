@@ -10,7 +10,9 @@ import {
   isOnlinePlayerRequest,
   markOnlinePlayerOverride,
   publishOnlinePlayer,
+  setPlayerStorySourceFactory,
   shouldRedirectOversizeToPlayer,
+  type PlayerStoryMeta,
   type PlayerStoryNode,
   type PlayerStorySource,
   type PlayerWorkInfo
@@ -1998,7 +2000,11 @@ export class Bilibili extends Base {
    *
    * 拿不到节点就返回 undefined —— 播放页那边「没有剧情」= 普通播放页，比一个空面板好。
    */
-  private async buildPlayerStory (): Promise<{ node: PlayerStoryNode; source: PlayerStorySource } | undefined> {
+  private async buildPlayerStory (): Promise<{
+    node: PlayerStoryNode
+    source: PlayerStorySource
+    meta: PlayerStoryMeta
+  } | undefined> {
     const interactive = this.interactive
     if (!interactive) return undefined
     try {
@@ -2017,7 +2023,8 @@ export class Bilibili extends Base {
         return undefined
       }
       logger.mark('[互动视频] 播放页已挂上互动剧情（' + node.choices.length + ' 个选项）')
-      return { node, source }
+      /** meta 存进会话索引：宿主重启后靠它把 source 现造回来（见 store 的 setPlayerStorySourceFactory） */
+      return { node, source, meta: { bvid: interactive.bvid, cid: interactive.cid, islogin: this.islogin } }
     } catch (error: any) {
       logger.warn('[互动视频] 播放页剧情准备失败: ' + String(error?.message ?? error))
       return undefined
@@ -2095,7 +2102,8 @@ export class Bilibili extends Base {
         platform: 'bilibili',
         danmaku: this.danmakuList,
         work: this.workInfo,
-        story
+        story: story ? { node: story.node, source: story.source } : undefined,
+        storyMeta: story?.meta
       })
       if (published) {
         /** 剧情真的挂上去了，群里的选项流程就可以省了（见上面 story 的说明） */
@@ -2327,6 +2335,35 @@ export const buildPlayerStorySource = (params: {
     }
   }
 }
+
+/**
+ * 「宿主重启后重建剧情来源」用的空事件。
+ *
+ * 重建出来的来源只做两件事：取剧情节点、下载分段 —— 都不会往群里发消息，
+ * 所以事件本身用不到（`Base` 只是把它存起来）。给一个能应答的壳子就够了。
+ */
+const playerStoryStubEvent = {
+  reply: async () => ({ messageId: '' }),
+  contact: {},
+  selfId: '',
+  bot: {}
+} as unknown as Message
+
+/**
+ * 注册剧情来源工厂：宿主一重启，内存里那套「取节点 / 取分段」就没了，
+ * 播放页会直接「选项按钮消失、/story 404」（用户实测撞过）。有了它，
+ * 只要会话里还留着 bvid / cid / 登录态，就能照样取剧情、照样下分段。
+ */
+setPlayerStorySourceFactory((meta) => buildPlayerStorySource({
+  e: playerStoryStubEvent,
+  bvid: meta.bvid,
+  rootCid: meta.cid,
+  headers: {
+    Referer: 'https://www.bilibili.com/',
+    Cookie: Config.amagi.cookies.bilibili
+  },
+  islogin: meta.islogin
+}))
 
 const qnd: Record<number, string> = {
   6: '极速 240P',

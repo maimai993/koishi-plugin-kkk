@@ -108,6 +108,8 @@ export interface PlayerSession {
    * 用户点了就换到那一段继续播（分段由 getPlayerStorySource 按需下载）。
    */
   story?: PlayerStoryNode
+  /** 重启后重建「取节点 / 取分段」能力用的材料（见 {@link PlayerStoryMeta}） */
+  storyMeta?: PlayerStoryMeta
 }
 
 /**
@@ -175,6 +177,21 @@ export interface PlayerStoryNode {
  * 插件重启后这里就是空的 —— 播放页会退化成普通播放页（视频照常能看），这是有意的降级：
  * 宁可没有选项，也不能给出一排点了没反应的按钮。
  */
+/**
+ * 互动剧情的「重建材料」。
+ *
+ * 平台侧那套「取节点 / 取分段」的能力是内存里的回调，宿主一重启就没了 ——
+ * 于是播放页的选项按钮会消失（/story 404）。把这几项存进会话索引，重启后用工厂现造一份回来。
+ */
+export interface PlayerStoryMeta {
+  /** 稿件 bvid */
+  bvid: string
+  /** 根节点（第一段）的 cid */
+  cid: number
+  /** 登记时是不是登录态（分段取流要用它挑分支） */
+  islogin: boolean
+}
+
 /** 分段准备的进度上报：stage 是阶段名（见 SegmentStage），bytes/total 是当前这一步的字节数 */
 export type SegmentReporter = (info: { stage: SegmentStage; bytes: number; total: number }) => void
 
@@ -230,9 +247,38 @@ export function bindPlayerStorySource (token: string, source: PlayerStorySource)
   if (isValidPlayerToken(token)) storySources.set(String(token), source)
 }
 
-/** 取一条会话的剧情来源（没有 = 这条会话没有剧情，播放页就当普通播放页） */
+/** 重启后用来「现造一份剧情来源」的工厂（由平台在加载时注册） */
+export type PlayerStorySourceFactory = (meta: PlayerStoryMeta) => PlayerStorySource | null
+let storySourceFactory: PlayerStorySourceFactory | null = null
+
+/** 注册剧情来源工厂（平台模块加载时调一次） */
+export function setPlayerStorySourceFactory (factory: PlayerStorySourceFactory | null): void {
+  storySourceFactory = factory
+}
+
+/**
+ * 取一条会话的剧情来源。
+ *
+ * 内存里没有就用 {@link PlayerStoryMeta} **现造一份**：宿主一重启，回调就没了，
+ * 不重建的话播放页会「选项按钮直接消失、/story 404」（用户实测就是这么撞上的）。
+ */
 export function getPlayerStorySource (token: unknown): PlayerStorySource | undefined {
-  return isValidPlayerToken(token) ? storySources.get(String(token)) : undefined
+  if (!isValidPlayerToken(token)) return undefined
+  const key = String(token)
+  const bound = storySources.get(key)
+  if (bound) return bound
+  const meta = sessions.get(key)?.storyMeta
+  if (!meta || !storySourceFactory) return undefined
+  try {
+    const rebuilt = storySourceFactory(meta)
+    if (!rebuilt) return undefined
+    storySources.set(key, rebuilt)
+    logger.info('[在线播放] 已按会话里的信息重建互动剧情来源（host 重启后照常能选剧情）')
+    return rebuilt
+  } catch (error: any) {
+    logger.warn('[在线播放] 重建互动剧情来源失败: ' + String(error?.message ?? error))
+    return undefined
+  }
 }
 
 let storeDir = ''
@@ -307,7 +353,10 @@ function normalizeSession (raw: any): PlayerSession | null {
     shares: optionalNumber(raw.shares),
     comments: optionalNumber(raw.comments),
     publishedAt: optionalNumber(raw.publishedAt),
-    durationSeconds: optionalNumber(raw.durationSeconds)
+    durationSeconds: optionalNumber(raw.durationSeconds),
+    // 互动剧情：**必须还原** —— 不还原的话宿主重启后播放页就没有选项了（/story 404）
+    story: raw.story && typeof raw.story === 'object' ? normalizeStoryNode(raw.story as PlayerStoryNode) : undefined,
+    storyMeta: normalizeStoryMeta(raw.storyMeta)
   }
 }
 
@@ -394,6 +443,8 @@ export function registerPlayerSession (input: {
    * 给了它就等于「这条链接是个互动播放页」。
    */
   story?: { node: PlayerStoryNode; source?: PlayerStorySource }
+  /** 重建材料：宿主重启后播放页还能自己把剧情取回来（不然选项按钮就没了） */
+  storyMeta?: PlayerStoryMeta
 }): PlayerSession | null {
   if (!storeDir) {
     logger.warn('[在线播放] 存储尚未初始化，无法登记播放会话')
@@ -495,7 +546,8 @@ export function registerPlayerSession (input: {
       comments: optionalNumber(work.comments),
       publishedAt: optionalNumber(work.publishedAt),
       durationSeconds: optionalNumber(work.durationSeconds),
-      story
+      story,
+      storyMeta: normalizeStoryMeta(input.storyMeta)
     }
     sessions.set(token, session)
     if (story && input.story?.source) bindPlayerStorySource(token, input.story.source)
@@ -578,6 +630,14 @@ function normalizeStoryNode (node: PlayerStoryNode): PlayerStoryNode {
     isLeaf: node?.isLeaf === true || choices.length === 0,
     choices
   }
+}
+
+/** 洗一遍重建材料（字段缺 / 歪都不要紧，缺了就当没有剧情） */
+function normalizeStoryMeta (raw: any): PlayerStoryMeta | undefined {
+  const bvid = String(raw?.bvid ?? '').trim()
+  const cid = Number(raw?.cid)
+  if (!bvid || !Number.isFinite(cid) || cid <= 0) return undefined
+  return { bvid, cid, islogin: raw?.islogin === true }
 }
 
 /** 读剧情数据（会话目录里的 story.json；没有就 null） */

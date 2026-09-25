@@ -296,6 +296,50 @@ const main = async () => {
     check('会话删掉之后 /story 也不认了', gone.status === 404, 'status=' + gone.status)
   }
 
+  console.log('[7] 宿主重启后：选项还在、还能继续选')
+  {
+    /** 这一节要自己的会话 —— [6] 里已经把上面那条删掉了 */
+    const restartSession = store.registerPlayerSession({
+      videoPath: writeFake('restart.mp4', 2048, 21),
+      title: '重启验证',
+      platform: 'bilibili',
+      danmaku: [],
+      story: { node: firstNode, source: { node: async () => null, segment: async () => null } },
+      storyMeta: { bvid: 'BV1xx411c7mD', cid: 1001, islogin: true }
+    })
+    const rToken = restartSession.token
+    const rBase = '/kkk/player/' + rToken
+    /** 索引里必须留着剧情与重建材料（不然重启就「按钮消失」） */
+    const indexText = fs.readFileSync(path.join(root, 'player', 'sessions.json'), 'utf-8')
+    check('会话索引里存着剧情与重建材料',
+      indexText.includes('"story"') && indexText.includes('"storyMeta"') && indexText.includes('BV1xx411c7mD'))
+
+    /**
+     * 模拟一次宿主重启：清掉 lib 的 require 缓存重新加载 ——
+     * 内存里的会话、以及平台注入的「取节点 / 取分段」回调**全都没了**。
+     */
+    const libRoot = path.join(__dirname, '..', 'lib')
+    for (const key of Object.keys(require.cache)) {
+      if (key.startsWith(libRoot)) delete require.cache[key]
+    }
+    const freshStore = require(path.join(libRoot, 'player/store.js'))
+    /** 重新加载平台模块 = 它会重新注册「重建剧情来源」的工厂 */
+    require(path.join(libRoot, 'karin/platform/bilibili/bilibili.js'))
+    freshStore.setupPlayerStore(path.join(root, 'player'))
+    const freshServer = require(path.join(libRoot, 'player/server.js'))
+
+    const restored = freshStore.getPlayerSession(rToken)
+    check('重启后会话从索引恢复，并且带着剧情', !!restored?.story && restored.story.cid === 1001,
+      JSON.stringify(restored?.story || null))
+    const story = await freshServer.handlePlayerRequest({ method: 'GET', path: rBase + '/story', query: '' })
+    const node = JSON.parse(bodyOf(story) || '{}')
+    check('重启后 /story 仍是 200（播放页的选项按钮不会消失）',
+      story.status === 200 && node.cid === 1001 && (node.choices || []).length === 2, 'status=' + story.status)
+    const rebuilt = freshStore.getPlayerStorySource(rToken)
+    check('重启后能按会话里的信息重建「取节点 / 取分段」能力（不用重新发链接）',
+      !!rebuilt && typeof rebuilt.node === 'function' && typeof rebuilt.segment === 'function')
+  }
+
   fs.rmSync(root, { recursive: true, force: true })
   console.log('')
   console.log(failures ? '失败 ' + failures + ' 项' : '全部通过')

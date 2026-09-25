@@ -321,12 +321,14 @@ function jsonResponse (payload: unknown): PlayerHttpResponse {
  */
 async function storyResponse (token: string, query: URLSearchParams): Promise<PlayerHttpResponse> {
   const session = getPlayerSession(token)
-  if (!session?.story) return notFound(false)
+  /** 会话对象里没有就地读一遍 story.json（重启恢复的会话也照常能出选项） */
+  const current = session?.story ?? readPlayerStory(token)
+  if (!session || !current) return notFound(false)
   const rawCid = query.get('cid')
   const edgeId = Number(query.get('edge')) || 0
   /** 没有 cid（或问的就是当前这一段、也没带边）→ 直接用会话里那份，不必再问接口 */
-  if (!rawCid || (!edgeId && Number(rawCid) === Number(session.story.cid))) {
-    return jsonResponse(readPlayerStory(token) ?? session.story)
+  if (!rawCid || (!edgeId && Number(rawCid) === Number(current.cid))) {
+    return jsonResponse(current)
   }
   const cid = Number(rawCid)
   const source = getPlayerStorySource(token)
@@ -451,7 +453,14 @@ async function segmentResponse (
   if (cached) return fileResponse(token, cached, type, range, head, download, ext)
 
   const source = getPlayerStorySource(token)
-  if (!source?.segment) return notFound(false)
+  if (!source?.segment) {
+    /**
+     * 走到这里说明「既没有内存回调、也没法重建」—— 目前只有一种情况：
+     * 会话是老版本登记的（那时还没存重建材料）。说清楚，别让页面只显示一句「没准备好」。
+     */
+    setSegmentProgress(token, cid, 'failed', 0, 0, '这条播放链接登记时还没有互动剧情信息，把链接再发一次重新解析')
+    return notFound(false)
+  }
   const started = Date.now()
   logger.mark('[在线播放] 正在准备互动分段 cid=' + cid + '（' + token + '）')
   setSegmentProgress(token, cid, 'queued')

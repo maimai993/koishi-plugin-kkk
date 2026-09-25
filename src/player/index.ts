@@ -30,6 +30,7 @@ import {
   startPlayerSweeper,
   stopPlayerSweeper,
   type PlayerDanmakuItem,
+  type PlayerStoryMeta,
   type PlayerStoryNode,
   type PlayerStorySource,
   type PlayerWorkInfo
@@ -486,6 +487,13 @@ export async function publishOnlinePlayer (e: any, input: {
    * 用户点一条就按需把那一段下下来接着播（见 server.ts 的 story / segment 路由）。
    */
   story?: { node: PlayerStoryNode; source?: PlayerStorySource }
+  /**
+   * 重建材料（bvid / 根 cid / 登录态）。
+   *
+   * 宿主重启后内存里的「取节点 / 取分段」回调就没了，靠它现造一份 ——
+   * 不然播放页的选项按钮会直接消失（/story 404，用户实测撞过）。
+   */
+  storyMeta?: PlayerStoryMeta
 }): Promise<boolean> {
   // 允许「只开在线看按钮」的部署：那种配置下弹幕不走播放器，但「在线看」这条要能落库
   if (!isPlayerAvailable()) return false
@@ -541,7 +549,8 @@ export async function publishOnlinePlayer (e: any, input: {
       work: input.work,
       coverPath: coverPath ?? undefined,
       localOnly,
-      story: input.story
+      story: input.story,
+      storyMeta: input.storyMeta
     })
     if (!session) {
       await reply('在线播放准备失败（详情见日志），这里直接发送视频')
