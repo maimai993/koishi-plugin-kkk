@@ -58,4 +58,9 @@ export interface NetworksConfigType {
    * 当下载速度过快导致连接被重置时，会自动降速重试
    */
   throttle?: ThrottleConfig
+  /**
+   * 备用直链：当前直链被判定为坏源（连得上但不吐数据）时，下载器按顺序换过去。
+   * B站 dash 的 `backup_url` 就属于这种镜像地址。
+   */
+  backupUrls?: string[]
 }

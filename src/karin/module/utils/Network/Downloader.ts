@@ -180,9 +180,45 @@ export function listActiveDownloads (): DownloadProgressEntry[] {
   return result.sort((left, right) => right.at - left.at)
 }
 
+/* ------------------------------------------------------------------ *
+ * 坏源判定阈值
+ * ------------------------------------------------------------------ */
+
+/**
+ * 换源前的热身时间：新源先给这么久证明自己。
+ *
+ * B站 playurl 经常把直链指向 `*.mcdn.bilivideo.cn` 这类 PCDN 边缘节点：
+ * TCP 连得上、响应头也回得来（content-length 都正常），就是几乎不吐数据
+ * （实测 118 KB / 60 秒 ≈ 2 KB/s）。在这种源上干等毫无意义。
+ */
+const STALL_WARMUP_MS = 20_000
+
+/** 热身期过后速度仍低于这个值（byte/s）且还有备用地址时，判定为坏源并换源 */
+const STALL_MIN_SPEED = 64 * 1024
+
+/**
+ * 重试同一个源之前，本轮至少要传这么多字节，才值得原地重试。
+ *
+ * 传了几 MB 再断，说明源本身是好的（只是被掐了），留着进度续传最划算；
+ * 传了几百 KB 就断，那就是坏源，直接换。
+ */
+const SWITCH_IF_UNDER_BYTES = 4 * 1024 * 1024
+
+/** 单次尝试的硬上限：既没数据、又没有备用源可换的「涓流」源不能永远挂着 */
+const MAX_ATTEMPT_MS = 30 * 60_000
+
+/** 打个码的地址（只留 host，别把带签名的完整直链写进日志） */
+const safeHost = (url: string): string => {
+  try {
+    return new URL(url).host
+  } catch {
+    return '(非法地址)'
+  }
+}
+
 /**
  * 文件下载器
- * 支持断点续传、限速下载、自动重试
+ * 支持断点续传、限速下载、自动重试，以及**坏源自动换源**
  */
 export class Downloader {
   private axiosInstance: AxiosInstance
@@ -194,6 +230,19 @@ export class Downloader {
   private throttleConfig: ThrottleConfig
   private currentSpeed: number
   private consecutiveResets: number
+  /** 备用直链：当前源被判定为坏源时按顺序换过去（B站 dash 的 backup_url） */
+  private backupUrls: string[]
+  /**
+   * 本次尝试「被自己掐断」的原因：
+   * - `timeout`：空闲超时（连续 timeout 毫秒没收到数据）
+   * - `slow`：坏源看门狗主动放弃
+   *
+   * 自己掐断的必须和「服务器重置」区分开 —— Node 把 abort 报成
+   * `Error: aborted`（code ECONNRESET），照抄进日志会把排查方向带偏。
+   */
+  private abortReason: 'timeout' | 'slow' | null = null
+  /** 已经换过几次源（仅用于日志） */
+  private sourceSwitches = 0
 
   constructor(
     axiosInstance: AxiosInstance,
@@ -202,7 +251,8 @@ export class Downloader {
     headers: Record<string, string>,
     timeout: number,
     maxRetries: number,
-    throttleConfig?: Partial<ThrottleConfig>
+    throttleConfig?: Partial<ThrottleConfig>,
+    backupUrls: string[] = []
   ) {
     this.axiosInstance = axiosInstance
     this.url = url
@@ -213,6 +263,7 @@ export class Downloader {
     this.throttleConfig = { ...DEFAULT_THROTTLE_CONFIG, ...throttleConfig }
     this.currentSpeed = this.throttleConfig.maxSpeed
     this.consecutiveResets = 0
+    this.backupUrls = [...backupUrls]
   }
 
   /**
@@ -231,11 +282,49 @@ export class Downloader {
       throw new Error('未指定文件保存路径: filepath 为空')
     }
 
+    // 每次尝试都从「没被掐断」开始
+    this.abortReason = null
+
     const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), this.timeout)
     let intervalId: NodeJS.Timeout | null = null
     let throttleStream: ThrottleStream | null = null
     let writer: fs.WriteStream | null = null
+    /** 本轮尝试收到的字节数（用于坏源判定，断点续传时只算这一轮新增的） */
+    let attemptBytes = 0
+    /** 本轮尝试的开始时间 */
+    const attemptStart = Date.now()
+
+    let timeoutId: NodeJS.Timeout | null = null
+    let attemptCapId: NodeJS.Timeout | null = null
+    const clearTimers = () => {
+      if (timeoutId) clearTimeout(timeoutId)
+      if (attemptCapId) clearTimeout(attemptCapId)
+      timeoutId = null
+      attemptCapId = null
+    }
+    /**
+     * 重新计时：**这是空闲超时，不是总时长超时**。
+     *
+     * 以前这里是一个从头开始算的定时器（`setTimeout(abort, 60000)` 并且全程不再重置），
+     * 于是任何需要超过 60 秒的文件（按 1.5 MB/s 算就是 90 MB 以上）都**永远下不完**：
+     * 到点就被 abort，而 Node 把「自己 abort」报成 `Error: aborted`（code ECONNRESET），
+     * 日志里就成了「下载失败: 连接被重置 (ECONNRESET): aborted」，把所有排查方向都带偏。
+     * 现在每收到一块数据就重新计时，只有**真的没数据**才超时。
+     */
+    const armIdleTimeout = () => {
+      if (this.timeout <= 0) return
+      if (timeoutId) clearTimeout(timeoutId)
+      timeoutId = setTimeout(() => {
+        this.abortReason = 'timeout'
+        controller.abort()
+      }, this.timeout)
+    }
+    armIdleTimeout()
+    // 兜底：涓流源（一直有数据但慢得离谱、又没有备用源）不能在这一次尝试里挂几个小时
+    attemptCapId = setTimeout(() => {
+      this.abortReason = 'timeout'
+      controller.abort()
+    }, MAX_ATTEMPT_MS)
 
     try {
       // 检查断点续传
@@ -282,7 +371,7 @@ export class Downloader {
       })
 
       const response = await this.axiosInstance(requestConfig)
-      clearTimeout(timeoutId)
+      // 注意：这里**不**清除定时器 —— 传输阶段的空闲超时还得靠它（每收到数据会重新计时）
 
       // 检查 HTTP 状态码
       // 416 Range Not Satisfiable
@@ -387,12 +476,35 @@ export class Downloader {
       }
 
       const interval = totalBytes > 0 && totalBytes < 10 * 1024 * 1024 ? 1000 : 500
-      intervalId = setInterval(printProgress, interval)
+
+      /**
+       * 坏源看门狗：有备用地址时，热身期过了速度还低得离谱就直接放弃这个源。
+       *
+       * 没有备用地址时不介入 —— 慢总比失败强，真正的死源交给空闲超时兜底。
+       */
+      const checkStall = () => {
+        if (this.backupUrls.length === 0) return
+        const elapsed = Date.now() - attemptStart
+        if (elapsed < STALL_WARMUP_MS) return
+        const speed = attemptBytes / (elapsed / 1000)
+        if (speed >= STALL_MIN_SPEED) return
+        logger.warn(`当前下载源速度过低 (${formatBytes(Math.round(speed))}/s)，准备切换备用地址`)
+        this.abortReason = 'slow'
+        controller.abort()
+      }
+
+      intervalId = setInterval(() => {
+        printProgress()
+        checkStall()
+      }, interval)
 
       // 创建计数流
       const counterStream = new Transform({
         transform(chunk, encoding, callback) {
           downloadedBytes += chunk.length
+          attemptBytes += chunk.length
+          // 还有数据在流，说明这个源活着：把空闲超时往后推
+          armIdleTimeout()
           callback(null, chunk)
         }
       })
@@ -405,8 +517,6 @@ export class Downloader {
       } else {
         await pipeline(response.data, counterStream, writer as fs.WriteStream)
       }
-
-      if (intervalId) clearInterval(intervalId)
 
       // pipeline 已经等待所有流完成，包括 writer 的 finish 事件
       logger.debug('文件下载并写入完成')
@@ -456,20 +566,34 @@ export class Downloader {
         totalBytes: totalBytes > 0 ? totalBytes : downloadedBytes
       }
     } catch (error) {
-      clearTimeout(timeoutId)
+      clearTimers()
       if (intervalId) clearInterval(intervalId)
       // 失败/中断也要清掉，不然「查询下载进度」会一直卡在旧任务上
       clearDownloadProgress(this.filepath)
 
-      const isRecoverable = isRecoverableNetworkError(error)
-      const isThrottling = isThrottlingError(error)
-      const errorDesc = getErrorDescription(error)
+      /**
+       * 自己掐断的（空闲超时 / 坏源看门狗）不能按「服务器重置」处理。
+       *
+       * Node 对 `request.abort()` 抛的是 `Error: aborted`（code ECONNRESET），
+       * 直接套 code→文案的映射就会打印成「连接被重置」，既误导排查、
+       * 又会让下面的「服务器断流自动降速」误判（把一个坏源当成风控）。
+       */
+      const idleTimeout = this.abortReason === 'timeout'
+      const slowSource = this.abortReason === 'slow'
+      const ownAbort = idleTimeout || slowSource
+      const isRecoverable = ownAbort || isRecoverableNetworkError(error)
+      const isThrottling = !ownAbort && isThrottlingError(error)
+      const errorDesc = idleTimeout
+        ? `下载超时（${Math.round(this.timeout / 1000)} 秒内没有收到新数据）`
+        : slowSource
+          ? '下载源速度过低，主动放弃该源'
+          : getErrorDescription(error)
 
-      if (error instanceof AxiosError) {
+      if (error instanceof AxiosError && !ownAbort) {
         const sanitized = sanitizeHeaders(this.headers)
         logger.error(`请求失败: ${errorDesc}, URL: ${this.url}, Headers: ${JSON.stringify(sanitized)}`)
       } else {
-        logger.error(`下载失败: ${errorDesc}`)
+        logger.error(ownAbort ? `下载中断: ${errorDesc}` : `下载失败: ${errorDesc}`)
       }
 
       // 如果是断流错误，自动降速
@@ -485,6 +609,25 @@ export class Downloader {
         } else {
           logger.warn(`已达到最低速度限制 ${formatBytes(this.throttleConfig.minSpeed)}/s，无法继续降速`)
         }
+      }
+
+      /**
+       * 坏源优先换源。
+       *
+       * 同一份数据在别的镜像上往往能跑满带宽，而坏源上耗满 maxRetries 次
+       * （每次都要再等一个超时）纯属浪费时间；反过来，如果本轮已经传了好几 MB
+       * 只是被掐了一下，那就该留在原源续传，别把进度扔掉。
+       */
+      if ((slowSource || (idleTimeout && attemptBytes < SWITCH_IF_UNDER_BYTES)) && this.backupUrls.length > 0) {
+        const next = this.backupUrls.shift() as string
+        this.sourceSwitches++
+        logger.warn(
+          `当前源不可用，换备用下载源 (${this.sourceSwitches}，剩余 ${this.backupUrls.length}): ` +
+          `${safeHost(this.url)} -> ${safeHost(next)}`
+        )
+        this.url = next
+        await new Promise((resolve) => setTimeout(resolve, 1000))
+        return this.download(progressCallback, 0)
       }
 
       const nextDelay = calculateBackoffDelay(retryCount)
@@ -528,6 +671,9 @@ export class Downloader {
             if (isThrottling) {
               logger.warn('建议: 服务器可能有下载速度限制，请尝试在配置中降低 maxSpeed 参数')
             }
+            if (idleTimeout) {
+              logger.warn('提示: 这条直链所属的 CDN 节点（常见于 *.mcdn.bilivideo.cn 这类 PCDN）很可能已失效，稍后重试或换个画质通常会换到别的节点')
+            }
           } else {
             try {
               fs.unlinkSync(this.filepath)
@@ -541,6 +687,10 @@ export class Downloader {
         const sanitized = sanitizeHeaders(this.headers)
         throw new Error(`在 ${this.maxRetries} 次尝试后下载失败: ${errorDesc}, URL: ${this.url}, Headers: ${JSON.stringify(sanitized)}`)
       }
+    } finally {
+      // 所有出口（成功 / 416 提前返回 / 换源 / 重试 / 抛错）都要把定时器和轮询清干净
+      clearTimers()
+      if (intervalId) clearInterval(intervalId)
     }
   }
 

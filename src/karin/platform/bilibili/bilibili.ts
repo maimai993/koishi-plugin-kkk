@@ -81,6 +81,52 @@ import { BilibiliDataTypes } from '@/types'
 let img: ElementTypes[]
 type videoDownloadUrlList = BilibiliVideoStreamResponse['data']['dash']['video']
 
+/**
+ * 一条 dash 流里能拿来下载的地址（video / audio 都是这个形状）
+ */
+type DashStreamUrls = {
+  base_url?: string
+  baseUrl?: string
+  backup_url?: string[]
+  backupUrl?: string[]
+}
+
+/**
+ * 一个地址是不是 PCDN 边缘节点。
+ *
+ * `xy120x240x109x22xy.mcdn.bilivideo.cn:8082/v1/resource/upgcxcode/...` 这种就是：
+ * 域名带 mcdn、带非标准端口、路径 `/v1/resource/`。
+ * 它们对本机来说常常是「TCP 连得上、响应头也正常，就是不吐数据」（实测 118 KB / 60 秒），
+ * 而同一份数据在 `upos-*` 镜像上能跑满带宽。
+ */
+const isPcdnUrl = (url: string) => /\.mcdn\.bilivideo\./i.test(url) || /\.pcdn\./i.test(url) || /\/v1\/resource\//i.test(url)
+
+/**
+ * 把一条 dash 流的直链整理成**按优先级排序**的候选列表。
+ *
+ * 排序规则（尽量不改变原来的行为，只在必要时动）：
+ *   1. `base_url` 不是 PCDN 时保持第一 —— 原来的行为不变；
+ *   2. `base_url` 是 PCDN 时，把非 PCDN 的备用地址提到前面；
+ *   3. 其余地址按接口给的顺序跟在后面。
+ *
+ * 下载器遇到「连得上但不吐数据」的源会自动换到下一个（见 Downloader 的坏源看门狗），
+ * 所以列表顺序就是换源顺序。
+ *
+ * @param stream dash 里的 video / audio 流对象
+ * @returns 去重且已排序的直链列表（可能为空）
+ */
+export const buildDashUrlCandidates = (stream?: DashStreamUrls): string[] => {
+  const raw = [stream?.base_url ?? stream?.baseUrl, ...(stream?.backup_url ?? stream?.backupUrl ?? [])]
+  const seen = new Set<string>()
+  const urls: string[] = []
+  for (const url of raw) {
+    if (typeof url !== 'string' || !/^https?:\/\//i.test(url) || seen.has(url)) continue
+    seen.add(url)
+    urls.push(url)
+  }
+  return [...urls.filter((url) => !isPcdnUrl(url)), ...urls.filter(isPcdnUrl)]
+}
+
 /** 评论请求统一使用匿名态，避免账号 Cookie 改变评论热度池结果。 */
 const bilibiliAnonymousRequestConfig = {
   headers: {
@@ -1520,10 +1566,9 @@ export class Bilibili extends Base {
     this.danmakuList = danmakuList
     switch (this.islogin) {
       case true: {
-        logger.debug(
-          '视频 URL:',
-          this.Type === 'one_video' ? playUrlData.data?.dash?.video[0].base_url : playUrlData.result.dash.video[0].base_url
-        )
+        const videoStream: DashStreamUrls | undefined =
+          this.Type === 'one_video' ? playUrlData.data?.dash?.video[0] : playUrlData.result.dash.video[0]
+        logger.debug('视频 URL:', videoStream?.base_url)
 
         // B站 CDN 需要正确的 Referer
         const downloadHeaders = {
@@ -1531,13 +1576,18 @@ export class Bilibili extends Base {
           Referer: 'https://www.bilibili.com'
         }
 
-        const bmp4Raw = await downloadFile(
-          this.Type === 'one_video' ? playUrlData.data?.dash?.video[0].base_url : playUrlData.result.dash.video[0].base_url,
-          {
-            title: `Bil_V_${this.Type === 'one_video' ? infoData && infoData.data.bvid : infoData && infoData.result.season_id}.m4s`,
-            headers: downloadHeaders
-          }
-        )
+        /**
+         * 直链候选：`base_url`（常是 mcdn/PCDN 节点）+ `backup_url` 镜像。
+         * 排在前面的先试，坏源由下载器自动换掉 —— 不然一个死节点就能让整个解析卡死。
+         */
+        const videoUrls = buildDashUrlCandidates(videoStream)
+        if (videoUrls.length === 0) throw new Error('没有拿到视频流直链（playurl 返回里没有 base_url）')
+
+        const bmp4Raw = await downloadFile(videoUrls[0], {
+          title: `Bil_V_${this.Type === 'one_video' ? infoData && infoData.data.bvid : infoData && infoData.result.season_id}.m4s`,
+          headers: downloadHeaders,
+          backupUrls: videoUrls.slice(1)
+        })
 
         // 修复 m4s 文件为标准 MP4
         const videoPath =
@@ -1551,8 +1601,11 @@ export class Bilibili extends Base {
         // 删除原始 m4s 文件
         await Common.removeFile(bmp4Raw.filepath, true)
 
-        const audioUrl =
-          this.Type === 'one_video' ? playUrlData.data?.dash?.audio?.[0]?.base_url : playUrlData.result.dash.audio?.[0]?.base_url
+        const audioStream: DashStreamUrls | undefined =
+          this.Type === 'one_video' ? playUrlData.data?.dash?.audio?.[0] : playUrlData.result.dash.audio?.[0]
+        /** 音频候选同样带镜像，理由见上面视频那段 */
+        const audioUrls = buildDashUrlCandidates(audioStream)
+        const audioUrl = audioUrls[0]
         logger.debug('音频 URL:', audioUrl)
 
         /** 没有音频流（如纯视频稿件）时为 undefined，此时无从合成，直接发视频流 */
@@ -1560,7 +1613,8 @@ export class Bilibili extends Base {
         if (audioUrl) {
           const bmp3Raw = await downloadFile(audioUrl, {
             title: `Bil_A_${this.Type === 'one_video' ? infoData && infoData.data.bvid : infoData && infoData.result.season_id}.m4s`,
-            headers: downloadHeaders
+            headers: downloadHeaders,
+            backupUrls: audioUrls.slice(1)
           })
 
           // 修复音频 m4s 文件为 m4a（AAC 音频不能直接转为 MP3 容器）

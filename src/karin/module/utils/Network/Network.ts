@@ -24,6 +24,7 @@ export class Network {
   private filepath: string
   private maxRetries: number
   private throttleConfig?: Partial<ThrottleConfig>
+  private backupUrls: string[]
 
   /**
    * 创建网络请求实例
@@ -35,7 +36,7 @@ export class Network {
    *
    * @param data - 配置对象
    */
-  constructor(data: NetworksConfigType & { throttle?: Partial<ThrottleConfig> }) {
+  constructor(data: NetworksConfigType & { throttle?: Partial<ThrottleConfig>; backupUrls?: string[] }) {
     this.headers = data.headers ? Object.fromEntries(Object.entries(data.headers).map(([key, value]) => [key, String(value)])) : {}
 
     // 合并默认头
@@ -52,6 +53,7 @@ export class Network {
     this.filepath = data.filepath ?? ''
     this.maxRetries = data.maxRetries ?? 3
     this.throttleConfig = data.throttle
+    this.backupUrls = data.backupUrls ?? []
 
     // 创建 axios 实例
     this.axiosInstance = axios.create({
@@ -120,7 +122,9 @@ export class Network {
       this.headers,
       this.timeout,
       this.maxRetries,
-      this.throttleConfig
+      this.throttleConfig,
+      // 拷贝一份：下载器内部会 shift 掉已经试过的地址
+      [...this.backupUrls]
     )
 
     return downloader.download(progressCallback, retryCount)

@@ -100,6 +100,14 @@ export type downLoadFileOptions = {
   headers?: (RawAxiosRequestHeaders & MethodsHeaders) | AxiosHeaders
   /** 文件保存路径 */
   filepath?: string
+  /**
+   * 备用直链（按顺序尝试）。
+   *
+   * B站 dash 的 `backup_url` 就是干这个用的：`base_url` 常常指向
+   * `*.mcdn.bilivideo.cn` 这类 PCDN 节点，连得上却不吐数据；
+   * 把镜像地址带上，下载器就能在坏源上自动换过去。
+   */
+  backupUrls?: string[]
 }
 
 /**
@@ -526,15 +534,26 @@ export const downloadFile = async (videoUrl: string, opt: downLoadFileOptions): 
     minSpeed: (uploadConfig.downloadMinSpeed ?? 1) * 1024 * 1024 // MB/s -> bytes/s
   }
 
+  /**
+   * 速度采样点。速度必须按「两次回调之间的增量」算，不能按「累计字节 ÷ 总耗时」：
+   * 后者把重试的退避等待也算进分母，断点续传时分子还会被重置回续传点，
+   * 于是明明在正常下载也会显示成 `0.0 MB/s 剩余: 661min`（用户实测反馈）。
+   */
+  let lastSampleBytes = 0
+  let lastSampleAt = startTime
+  /** 平滑后的速度（byte/s） */
+  let smoothSpeed = 0
+
   try {
     // 使用 networks 类进行文件下载，并通过回调函数实时更新下载进度
     const { filepath, totalBytes } = await new Networks({
       url: videoUrl,
       headers: opt.headers ?? baseHeaders,
       filepath: opt.filepath ?? Common.tempDri.video + opt.title,
-      timeout: 60000, // 增加超时时间
+      timeout: 60000, // 空闲超时（连续 60s 没有新数据才算超时），传输途中会不断续期
       maxRetries: 3, // 增加重试次数
-      throttle: throttleConfig
+      throttle: throttleConfig,
+      backupUrls: opt.backupUrls
     }).downloadStream((downloadedBytes, totalBytes) => {
       // 定义进度条长度及生成进度条字符串的函数
       const barLength = 45
@@ -552,16 +571,27 @@ export const downloadFile = async (videoUrl: string, opt: downLoadFileOptions): 
       const red = Math.floor(255 - (255 * progressPercentage) / 100) // 红色分量随进度减少
       const coloredPercentage = logger.chalk.rgb(red, 255, 0)(`${progressPercentage.toFixed(1)}%`)
 
-      // 计算下载速度（MB/s）
-      const elapsedTime = (Date.now() - startTime) / 1000
-      const speed = downloadedBytes / elapsedTime
+      // 计算下载速度（MB/s）：增量法 + 一点平滑，避免数字乱跳
+      const sampleAt = Date.now()
+      const elapsedSinceSample = (sampleAt - lastSampleAt) / 1000
+      if (elapsedSinceSample >= 0.2) {
+        // 断点续传时 downloadedBytes 会往回退，增量按 0 处理
+        const instant = Math.max(0, downloadedBytes - lastSampleBytes) / elapsedSinceSample
+        smoothSpeed = smoothSpeed > 0 ? smoothSpeed * 0.6 + instant * 0.4 : instant
+        lastSampleBytes = downloadedBytes
+        lastSampleAt = sampleAt
+      }
+      const speed = smoothSpeed
       const formattedSpeed = (speed / 1048576).toFixed(1) + ' MB/s'
 
-      // 计算剩余时间
+      // 计算剩余时间（速度还没出来时不瞎猜）
       const remainingBytes = totalBytes - downloadedBytes // 剩余字节数
-      const remainingTime = remainingBytes / speed // 剩余时间（秒）
-      const formattedRemainingTime =
-        remainingTime > 60 ? `${Math.floor(remainingTime / 60)}min ${Math.floor(remainingTime % 60)}s` : `${remainingTime.toFixed(0)}s`
+      const remainingTime = speed > 1024 ? remainingBytes / speed : Number.POSITIVE_INFINITY
+      const formattedRemainingTime = !Number.isFinite(remainingTime)
+        ? '--'
+        : remainingTime > 60
+          ? `${Math.floor(remainingTime / 60)}min ${Math.floor(remainingTime % 60)}s`
+          : `${remainingTime.toFixed(0)}s`
 
       // 计算已下载和总下载的文件大小（MB）
       const downloadedSizeMB = (downloadedBytes / 1048576).toFixed(1)

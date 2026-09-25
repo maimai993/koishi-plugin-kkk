@@ -34,7 +34,7 @@ import {
 } from '@/module'
 import { bilibiliFetcher } from '@/module/utils/amagiClient'
 import { Config } from '@/module/utils/Config'
-import { bilibiliProcessVideos, generateDecorationCard, getvideosize, parseAdditionalCard, TimeFormatter } from '@/platform/bilibili'
+import { bilibiliProcessVideos, buildDashUrlCandidates, generateDecorationCard, getvideosize, parseAdditionalCard, TimeFormatter } from '@/platform/bilibili'
 import {
   buildBilibiliArticleRichText,
   buildBilibiliDynamicRichText,
@@ -903,14 +903,20 @@ export class Bilibilipush extends Base {
                   const infoData = await this.amagi.bilibili.fetcher.fetchVideoInfo({
                     bvid: data[dynamicId].Dynamic_Data.modules.module_dynamic.major.archive.bvid
                   })
-                  const mp4File = await downloadFile(playUrlData.data?.data?.dash?.video[0].base_url, {
+                  /** 直链候选：base_url（可能是 mcdn/PCDN 节点）+ backup_url 镜像，坏源由下载器自动换 */
+                  const videoUrls = buildDashUrlCandidates(playUrlData.data?.data?.dash?.video[0])
+                  const audioUrls = buildDashUrlCandidates(playUrlData.data?.data?.dash?.audio?.[0])
+                  if (videoUrls.length === 0) break
+                  const mp4File = await downloadFile(videoUrls[0], {
                     title: `Bil_V_${infoData.data.data.bvid}.mp4`,
-                    headers: bilibiliBaseHeaders
+                    headers: bilibiliBaseHeaders,
+                    backupUrls: videoUrls.slice(1)
                   })
-                  const mp3File = audioUrl
-                    ? await downloadFile(audioUrl, {
+                  const mp3File = audioUrls.length > 0
+                    ? await downloadFile(audioUrls[0], {
                         title: `Bil_A_${infoData.data.data.bvid}.mp3`,
-                        headers: bilibiliBaseHeaders
+                        headers: bilibiliBaseHeaders,
+                        backupUrls: audioUrls.slice(1)
                       })
                     : undefined
 
