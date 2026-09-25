@@ -11,6 +11,8 @@ import {
   markOnlinePlayerOverride,
   publishOnlinePlayer,
   shouldRedirectOversizeToPlayer,
+  type PlayerStoryNode,
+  type PlayerStorySource,
   type PlayerWorkInfo
 } from '../../../player'
 import { ParseSteps, SendTasks } from '@/module/utils/ParseSteps'
@@ -263,6 +265,16 @@ export class Bilibili extends Base {
           this.interactive = { bvid: String(iddata.bvid ?? infoData.data.data.bvid ?? ''), cid: targetCid }
           logger.info('[互动视频] 检测到互动视频（bv=' + this.interactive.bvid + ' cid=' + targetCid + '）')
         }
+        /**
+         * 这次解析的是不是「互动视频的一段」（首段 + 剧情续播的每一段）。
+         *
+         * 这类稿件本身就是一小段一小段的切片，单段体积远到不了上限，而按整稿估体积的
+         * 那次探测（两次 HEAD）对切片毫无意义 —— 实测它还会在 PCDN 直链上白等 15 秒。
+         * 所以互动切片：
+         *   · 不做体积探测、卡片上不显示体积、不按体积提前拦截；
+         *   · 体积只在**音视频合成完成、拿到真实文件之后**检查一次（见 rejectOversizeSlice）。
+         */
+        const storySlice = !!this.interactive || this.storyOnly
         const playUrlData = await this.amagi.bilibili.fetcher.fetchVideoStreamUrl({
           avid: infoData.data.data.aid,
           cid: targetCid
@@ -415,8 +427,10 @@ export class Bilibili extends Base {
           )
           playUrlData.data.data.dash.video = correctList.videoList
           playUrlData.data.data.accept_description = correctList.accept_description
-          /** 获取第一个视频流的大小 */
-          videoSize = await getvideosize(correctList.videoList[0].base_url, audioUrl, infoData.data.data.bvid)
+          /** 获取第一个视频流的大小（互动切片不探测：省两次 HEAD，也避开坏直链的 15 秒超时） */
+          videoSize = storySlice
+            ? ''
+            : await getvideosize(correctList.videoList[0].base_url, audioUrl, infoData.data.data.bvid)
         } else {
           /**
            * 免登录直链分支：体积取自 html5 播放接口的 `durl[0].size`。
@@ -444,8 +458,14 @@ export class Bilibili extends Base {
          *   3. 其余情况：老规矩（全局上限 + 不压缩）。
          */
         const onlinePlayerNow = isOnlinePlayerRequest()
-        /** 全局口径的「太大了」（原来的判定） */
-        const globalOversize = !!Config.app.usefilelimit && Number(videoSize) > Number(Config.app.filelimit) && !Config.app.compress
+        /**
+         * 全局口径的「太大了」（原来的判定）。
+         *
+         * 互动切片不参与：它的体积根本没探测（videoSize 为空），拿它去比只会得到 0；
+         * 真正的体积检查挪到合成完成之后（用户要求）。
+         */
+        const globalOversize = !storySlice &&
+          !!Config.app.usefilelimit && Number(videoSize) > Number(Config.app.filelimit) && !Config.app.compress
         /** 在线播放自己的体积上限（「在线播放最大文件」，留空 / 0 = 跟随全局；0 = 不限制） */
         const playerLimitMB = effectivePlayerSizeLimitMB(Config.app.usefilelimit ? Number(Config.app.filelimit) : 0)
         /** 这一档体积在线播放接不接受 */
@@ -590,8 +610,10 @@ export class Bilibili extends Base {
                   useAnonymousQuality
                     ? (nockData?.data?.accept_description?.slice(-1)[0] ?? '免登录 360P')
                     : (playUrlData.data?.data?.accept_description?.[0] ?? '未知画质'),
-                VideoSize:
-                  useAnonymousQuality
+                /** 互动切片不显示体积（探测都跳过了，显示出来只会是个空值/0） */
+                VideoSize: storySlice
+                  ? undefined
+                  : useAnonymousQuality
                     ? Common.formatFileSize(((nockData?.data?.durl?.[0]?.size ?? 0) / (1024 * 1024)).toFixed(2))
                     : Common.formatFileSize(videoSize),
                 ImageLength: 0,
@@ -626,8 +648,14 @@ export class Bilibili extends Base {
             sends.add('发送视频', async () => {
               await downloadTask
               await this.sendPreparedVideo()
-              /** 互动视频：视频发完再发剧情（后台跑，不阻塞解析主流程） */
-              if (this.interactive) void this.startInteractiveStory()
+              /**
+               * 互动视频：视频发完再发剧情（后台跑，不阻塞解析主流程）。
+               *
+               * 例外：这次走的是**在线播放**（视频没发进群里，用户在看播放页）时不跑 ——
+               * 选项已经浮在播放页的画面上了（见 sendPreparedVideo 里的 story），
+               * 再在群里同步跑一套，用户会被两处剧情各问一遍。
+               */
+              if (this.interactive && !this.publishedStory) void this.startInteractiveStory()
             })
           }
         }
@@ -1545,6 +1573,26 @@ export class Bilibili extends Base {
   protected preparedVideo: { filepath: string; totalBytes: number; originTitle: string; videoUrl?: string; audioPath?: string } | null = null
 
   /**
+   * 互动剧情是不是已经交给播放页了（见 sendPreparedVideo 里的 story）。
+   *
+   * 只有它为 true 时才跳过群里的选项流程 —— 播放页没拿到剧情（接口抖动 / 登记失败）时
+   * 照旧在群里玩，不然用户会两边都没有选项可点。
+   */
+  private publishedStory = false
+
+  /**
+   * 取走准备好的视频（取完即清空）。
+   *
+   * 互动视频在播放页里「按需下载某一段」时会临时 new 一个 storyOnly 实例，
+   * 下完就从这里把产物拿走 —— 不会走 sendPreparedVideo，也就不该留着引用。
+   */
+  takePreparedVideo (): { filepath: string; totalBytes: number; originTitle: string; videoUrl?: string; audioPath?: string } | null {
+    const prepared = this.preparedVideo
+    this.preparedVideo = null
+    return prepared
+  }
+
+  /**
    * 下载视频（含合成音轨、烧录弹幕），**不发送**。
    *
    * 解析流程按用户要求改成「先下载视频、再渲染卡片」：下载最慢、又最不能失败，先做掉；
@@ -1688,10 +1736,21 @@ export class Bilibili extends Base {
              * B站的音视频是分离的，以前这里必定调一次 ffmpeg 合成（几分钟的视频也要几秒到几十秒，
              * 低配机器更久）。改成：画面和声音**各自留一份**，播放页用 `<video muted>` + `<audio>`
              * 同时播；只有用户在播放页点「服务器合并后下载」时才按需合成（见 player/server.ts）。
+             *
+             * 例外：**互动视频**照常合成一条 mp4 —— 播放器要在选项点完之后直接换 `src` 续播下一段，
+             * 那一条链路上不能同时管两份文件（画面 + 声音的同步逻辑会跟着翻倍，容易出错）。
              */
-            success = true
-            sourcePath = bmp4.filepath
-            logger.mark('[在线播放] 跳过音视频合成：画面与声音分开存，浏览器端同时播放')
+            if (!!this.interactive || this.storyOnly) {
+              success = await withDownloadStage(DOWNLOAD_STAGES.merging, () =>
+                mergeVideoAudio(bmp4.filepath, bmp3.filepath, resultPath)
+              )
+              sourcePath = resultPath
+              logger.mark('[在线播放] 互动视频：仍合成一条 mp4，方便播放页按选项续播')
+            } else {
+              success = true
+              sourcePath = bmp4.filepath
+              logger.mark('[在线播放] 跳过音视频合成：画面与声音分开存，浏览器端同时播放')
+            }
           } else {
             success = await mergeVideoAudio(bmp4.filepath, bmp3.filepath, resultPath)
             sourcePath = resultPath
@@ -1722,8 +1781,20 @@ export class Bilibili extends Base {
 
               const stats = fs.statSync(filePath)
               const fileSizeInMB = Number((stats.size / (1024 * 1024)).toFixed(2))
-              // 本地合成的没有视频直链，交给 sendPreparedVideo 上传
-              this.preparedVideo = { filepath: filePath, totalBytes: fileSizeInMB, originTitle: this.downloadfilename }
+              /**
+               * 互动切片：**合成完成、拿到真实文件之后**才检查一次体积（用户要求）。
+               *
+               * 互动稿子是一段段小切片，按整稿预估体积去卡既没意义又容易误伤，
+               * 所以前面不做探测、不做拦截，这里拿真实体积把最后一道关。
+               */
+              const storySlice = !!this.interactive || this.storyOnly
+              const blocked = storySlice && await this.rejectOversizeSlice(fileSizeInMB)
+              if (blocked) {
+                await Common.removeFile(filePath, true)
+              } else {
+                // 本地合成的没有视频直链，交给 sendPreparedVideo 上传
+                this.preparedVideo = { filepath: filePath, totalBytes: fileSizeInMB, originTitle: this.downloadfilename }
+              }
             }
           } else {
             await Common.removeFile(bmp4.filepath, true)
@@ -1859,6 +1930,73 @@ export class Bilibili extends Base {
   }
 
   /**
+   * 给播放页准备互动剧情（当前这一段的题目 + 选项，外加按需取节点 / 取分段的能力）。
+   *
+   * 拿不到节点就返回 undefined —— 播放页那边「没有剧情」= 普通播放页，比一个空面板好。
+   */
+  private async buildPlayerStory (): Promise<{ node: PlayerStoryNode; source: PlayerStorySource } | undefined> {
+    const interactive = this.interactive
+    if (!interactive) return undefined
+    try {
+      const source = buildPlayerStorySource({
+        e: this.e,
+        bvid: interactive.bvid,
+        rootCid: interactive.cid,
+        headers: (this.headers ?? {}) as Record<string, string>,
+        islogin: this.islogin
+      })
+      if (!source.node) return undefined
+      const node = await source.node({ cid: interactive.cid })
+      if (!node) {
+        logger.debug('[互动视频] 播放页拿不到第一段的剧情，这次不挂互动面板')
+        return undefined
+      }
+      logger.mark('[互动视频] 播放页已挂上互动剧情（' + node.choices.length + ' 个选项）')
+      return { node, source }
+    } catch (error: any) {
+      logger.warn('[互动视频] 播放页剧情准备失败: ' + String(error?.message ?? error))
+      return undefined
+    }
+  }
+
+  /**
+   * 互动切片：**合成完成后**检查一次真实体积（用户要求）。
+   *
+   * 互动视频是一段段切片，按整稿预估体积去卡既没意义又容易误伤（探测接口对切片本就不准），
+   * 所以体积检查挪到这里 —— 此时拿到的是「画面 + 声音」合成产物的真实大小。
+   *
+   * 超限时的处理沿用老规矩：
+   *   · 开着「超限转在线播放」→ 把本次解析改标成在线播放，链接由 sendPreparedVideo 回；
+   *   · 否则删掉文件、回一句提示，别把超大文件硬塞给 QQ。
+   *
+   * @param sizeMB 合成产物的真实体积（MB）
+   * @returns true 表示这一段被拦下（不要再发到群里）
+   */
+  private async rejectOversizeSlice (sizeMB: number): Promise<boolean> {
+    if (!Config.app.usefilelimit || Config.app.compress) return false
+    const limit = Number(Config.app.filelimit)
+    if (!Number.isFinite(limit) || limit <= 0 || sizeMB <= limit) return false
+
+    if (shouldRedirectOversizeToPlayer() && !isOnlinePlayerRequest()) {
+      markOnlinePlayerOverride()
+      logger.mark('[互动视频] 这一段合成后 ' + sizeMB + 'MB 超过 ' + limit + 'MB，按「超限转在线播放」继续')
+      return false
+    }
+
+    logger.warn('[互动视频] 这一段合成后 ' + sizeMB + 'MB 超过设定的 ' + limit + 'MB，不发送到群里')
+    try {
+      await withoutForwardCollect(() => this.e.reply(
+        '这一段视频合成后有 ' + sizeMB + 'MB，超过设定的最大上传大小 ' + limit + 'MB\n' +
+        '互动视频本来就是一段段切片，这一段就不发了，剧情还能接着玩~',
+        { reply: true }
+      ))
+    } catch (error: any) {
+      logger.debug('[互动视频] 超限提示发送失败: ' + String(error?.message ?? error))
+    }
+    return true
+  }
+
+  /**
    * 把 {@link prepareVideo} 下好的视频发出去。
    *
    * 放在流程末尾调用：此时信息卡、评论区都已经发完，视频最后出场；
@@ -1877,6 +2015,13 @@ export class Bilibili extends Base {
      * 登记失败就往下走老流程（照常上传视频），在线播放器出问题不能连累整条解析。
      */
     if (isOnlinePlayerRequest()) {
+      /**
+       * 互动视频：把剧情一起交给播放页（用户要求：播放器里要能直接选剧情）。
+       *
+       * 这里现问一次「第一段的题目与选项」——拿不到（接口抖动 / 不是互动稿）就不带剧情，
+       * 播放页自然退化成普通播放页，绝不让它变成一个点不动的空面板。
+       */
+      const story = this.interactive ? await this.buildPlayerStory() : undefined
       const published = await publishOnlinePlayer(this.e, {
         videoPath: filepath,
         // 分离音轨：一起交给播放页（默认不合成，浏览器里同时播）
@@ -1884,9 +2029,14 @@ export class Bilibili extends Base {
         title: originTitle || this.downloadfilename || this.workInfo?.title,
         platform: 'bilibili',
         danmaku: this.danmakuList,
-        work: this.workInfo
+        work: this.workInfo,
+        story
       })
-      if (published) return true
+      if (published) {
+        /** 剧情真的挂上去了，群里的选项流程就可以省了（见上面 story 的说明） */
+        this.publishedStory = !!story
+        return true
+      }
       logger.warn('[在线播放] 播放会话登记失败，退回直接发送视频文件')
     }
     if (totalBytes > Config.app.groupfilevalue) {
@@ -1962,6 +2112,105 @@ export const TimeFormatter = {
     } catch (error) {
       logger.warn('当前时间格式化失败:', error)
       return new Date().toISOString()
+    }
+  }
+}
+
+/**
+ * 互动视频在**播放页**里的剧情来源（用户要求：在线播放器要能直接选剧情）。
+ *
+ * 播放页那边只有一串 JSON，真正的两件事必须由这里兜：
+ *   1. `node()`   —— 问 B站 要「这一段的题目与选项」（edgeinfo_v2，要带剧情图版本号）；
+ *   2. `segment()` —— 把某一段的视频**按需下下来**（取流 → 下载（带镜像回退）→ 合成），
+ *      返回本地文件；播放器会把它搬进会话目录，下一次直接命中。
+ *
+ * 剧情图版本号问一次就缓存住（同一个稿子不会变），避免每段都多打一次播放器接口。
+ *
+ * @param params 事件 / bvid / 根 cid（第一段的 cid）/ 请求头（带 Cookie 才能解锁全部结局）/ 是否登录
+ */
+export const buildPlayerStorySource = (params: {
+  e: Message
+  bvid: string
+  rootCid: number
+  headers: Record<string, string>
+  islogin: boolean
+}): PlayerStorySource => {
+  const { e, bvid, rootCid, headers, islogin } = params
+  /** 剧情图版本号（0 = 还没问到 / 问不到） */
+  let graphVersion = 0
+
+  const ensureGraphVersion = async (): Promise<number> => {
+    if (graphVersion > 0) return graphVersion
+    const info = await fetchInteractiveInfo({ bvid, cid: rootCid, headers })
+    graphVersion = Number(info?.graphVersion ?? 0)
+    return graphVersion
+  }
+
+  const trim = (node: InteractiveNode): PlayerStoryNode => ({
+    cid: Number(node.cid),
+    question: String(node.question ?? ''),
+    isLeaf: node.isLeaf === true,
+    choices: (node.choices ?? []).map((choice) => ({
+      label: choice.label,
+      text: choice.text,
+      cid: Number(choice.cid),
+      edgeId: Number(choice.edgeId)
+    }))
+  })
+
+  return {
+    node: async ({ cid, edgeId }) => {
+      const version = await ensureGraphVersion()
+      if (!version) return null
+      const node = await fetchInteractiveNode({
+        bvid,
+        graphVersion: version,
+        cid,
+        edgeId,
+        headers
+      })
+      return node ? trim(node) : null
+    },
+    segment: async (cid) => {
+      /**
+       * 借一次「续播解析」把这一段下下来：storyOnly 的实例只下视频、不发卡片，
+       * 合成走的是和主流程同一条链路（音视频合并成一条 mp4，播放器换个 src 就能续播）。
+       */
+      const story = new Bilibili(e, { type: 'one_video', bvid, cid }, { storyOnly: true })
+      story.islogin = islogin
+      story.headers = { ...story.headers, ...headers }
+      /** 没开「缓存删除」时主流程用 downloadfilename 当文件名，这里也得给一个像样的 */
+      story.downloadfilename = 'Bil_Story_' + cid + '_' + Date.now()
+      try {
+        const infoData = await story.amagi.bilibili.fetcher.fetchVideoInfo({ bvid })
+        const playUrlData = await story.amagi.bilibili.fetcher.fetchVideoStreamUrl({
+          avid: infoData.data.data.aid,
+          cid
+        })
+        /** 选流：和主流程同一套（每个清晰度只留一条 + 按配置的画质挑一路） */
+        const simplify = (playUrlData.data.data.dash.video as any[]).filter((item, index, self) =>
+          self.findIndex((row: { id: number }) => row.id === item.id) === index
+        )
+        playUrlData.data.data.dash.video = simplify
+        const audioUrl = playUrlData.data.data.dash.audio?.[0]?.base_url
+        const corpus = await bilibiliProcessVideos({
+          accept_description: playUrlData.data.data.accept_description,
+          bvid,
+          qn: Config.bilibili.videoQuality
+        }, simplify, audioUrl)
+        playUrlData.data.data.dash.video = corpus.videoList
+        playUrlData.data.data.accept_description = corpus.accept_description
+        /** 播放页那一段不带弹幕烧录（弹幕由播放页自己画） */
+        const ok = await story.prepareVideo({ infoData, playUrlData, danmakuList: [] })
+        if (!ok) return null
+        const prepared = story.takePreparedVideo()
+        if (!prepared?.filepath) return null
+        logger.mark('[互动视频] 播放页分段已下好 cid=' + cid + '（' + Number(prepared.totalBytes || 0).toFixed(2) + 'MB）')
+        return { filepath: prepared.filepath }
+      } catch (error: any) {
+        logger.warn('[互动视频] 播放页分段下载失败（cid=' + cid + '）: ' + String(error?.message ?? error))
+        return null
+      }
     }
   }
 }

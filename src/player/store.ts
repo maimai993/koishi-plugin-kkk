@@ -99,6 +99,13 @@ export interface PlayerSession {
   publishedAt?: number
   /** 视频时长（秒） */
   durationSeconds?: number
+  /**
+   * 互动视频的**当前这一段**的剧情（B站互动稿才有）。
+   *
+   * 有它 = 播放页要出「选项」覆盖层：视频放完把这一道题和选项浮在画面上，
+   * 用户点了就换到那一段继续播（分段由 getPlayerStorySource 按需下载）。
+   */
+  story?: PlayerStoryNode
 }
 
 /**
@@ -125,6 +132,47 @@ export interface PlayerWorkInfo {
   durationSeconds?: number
 }
 
+/* ------------------------------------------------------------------ *
+ * 互动视频（B站互动稿）在播放页里的剧情数据
+ * ------------------------------------------------------------------ */
+
+/** 播放页上的一个剧情选项 */
+export interface PlayerStoryChoice {
+  /** 选项标签：A / B / C…（B站 下发的前缀已经洗掉，标签是我们按顺序排的） */
+  label: string
+  /** 选项文字（已经洗过，直接显示） */
+  text: string
+  /** 选了之后要播的那一段 cid（前端拿它去请求 /segment/<cid>） */
+  cid: number
+  /** 请求下一组选项时要带的边 id */
+  edgeId: number
+}
+
+/** 播放页上的一个剧情节点（= 一段视频 + 一道题） */
+export interface PlayerStoryNode {
+  /** 这一段的 cid */
+  cid: number
+  /** 题目（B站 有时给空串） */
+  question: string
+  /** 结局段（没有选项可选） */
+  isLeaf: boolean
+  choices: PlayerStoryChoice[]
+}
+
+/**
+ * 剧情数据的**实时来源**（登记会话时由平台注入）。
+ *
+ * 为什么不落盘：剧情节点要现问接口、分段视频要现下载，都是「平台侧的能力」，存不进 JSON。
+ * 插件重启后这里就是空的 —— 播放页会退化成普通播放页（视频照常能看），这是有意的降级：
+ * 宁可没有选项，也不能给出一排点了没反应的按钮。
+ */
+export interface PlayerStorySource {
+  /** 取某个节点：不带 edgeId = 这一段自己的题目；带 = 从 cid 走这条边之后落地的节点 */
+  node?: (params: { cid: number; edgeId?: number }) => Promise<PlayerStoryNode | null>
+  /** 按需准备某一段的视频（下载 + 合成），返回本地文件路径 */
+  segment?: (cid: number) => Promise<{ filepath: string } | null>
+}
+
 /** 把可能为空的数字洗干净（拿不到就 undefined，别在页面上显示 NaN/undefined） */
 function optionalNumber (value: unknown): number | undefined {
   const num = Number(value)
@@ -140,6 +188,24 @@ const SWEEP_INTERVAL_MS = 60 * 1000
 
 /** 合法的令牌：只允许小写字母和数字 —— 顺带把路径穿越挡在门外 */
 export const PLAYER_TOKEN_PATTERN = /^[0-9a-z]{8,64}$/
+
+/**
+ * 剧情来源表：token → 平台注入的取节点 / 取分段的能力。
+ *
+ * 刻意放在 store（而不是 player/index.ts）：server.ts 要用它，而 index.ts 又要 import server.ts，
+ * 放 index 会形成环。这里只存「回调」，不含任何 HTTP 逻辑。
+ */
+const storySources = new Map<string, PlayerStorySource>()
+
+/** 绑定一条会话的剧情来源（登记时调用；会话删除时一起清掉） */
+export function bindPlayerStorySource (token: string, source: PlayerStorySource): void {
+  if (isValidPlayerToken(token)) storySources.set(String(token), source)
+}
+
+/** 取一条会话的剧情来源（没有 = 这条会话没有剧情，播放页就当普通播放页） */
+export function getPlayerStorySource (token: unknown): PlayerStorySource | undefined {
+  return isValidPlayerToken(token) ? storySources.get(String(token)) : undefined
+}
 
 let storeDir = ''
 let indexFile = ''
@@ -295,6 +361,11 @@ export function registerPlayerSession (input: {
   coverPath?: string
   /** 链接是否只有本机 / 内网能打开（没配「播放器公网地址」），播放页会提示一句 */
   localOnly?: boolean
+  /**
+   * 互动视频的剧情（B站互动稿才有）：当前这一段的题目与选项 + 按需取节点/取分段的能力。
+   * 给了它就等于「这条链接是个互动播放页」。
+   */
+  story?: { node: PlayerStoryNode; source?: PlayerStorySource }
 }): PlayerSession | null {
   if (!storeDir) {
     logger.warn('[在线播放] 存储尚未初始化，无法登记播放会话')
@@ -342,6 +413,20 @@ export function registerPlayerSession (input: {
     const danmaku = Array.isArray(input.danmaku) ? input.danmaku : []
     fs.writeFileSync(path.join(dir, 'danmaku.json'), JSON.stringify({ total: danmaku.length, items: danmaku }))
 
+    /**
+     * 互动剧情：把「当前这一段」的题目 / 选项写进会话目录（和弹幕同一套做法）。
+     * 剧情来源（回调）只常驻内存，重启后取不到 —— 那时页面退化成普通播放页。
+     */
+    let story: PlayerStoryNode | undefined
+    if (input.story?.node) {
+      story = normalizeStoryNode(input.story.node)
+      try {
+        fs.writeFileSync(path.join(dir, 'story.json'), JSON.stringify(story))
+      } catch (error: any) {
+        logger.debug('[在线播放] 剧情数据落盘失败（不影响播放）: ' + String(error?.message ?? error))
+      }
+    }
+
     // 封面：复制进会话目录，页面用同源地址取（不引外链，断网/内网也能看）
     let cover: string | undefined
     if (input.coverPath && fs.existsSync(input.coverPath)) {
@@ -380,9 +465,11 @@ export function registerPlayerSession (input: {
       shares: optionalNumber(work.shares),
       comments: optionalNumber(work.comments),
       publishedAt: optionalNumber(work.publishedAt),
-      durationSeconds: optionalNumber(work.durationSeconds)
+      durationSeconds: optionalNumber(work.durationSeconds),
+      story
     }
     sessions.set(token, session)
+    if (story && input.story?.source) bindPlayerStorySource(token, input.story.source)
     persistIndex()
     logger.mark('[在线播放] 已登记播放会话 ' + token + '（' + (session.title || '无标题')
       + (session.author ? ' / ' + session.author : '') + '，' + danmaku.length + ' 条弹幕，'
@@ -440,6 +527,85 @@ export function resolvePlayerCover (token: unknown): { path: string, type: strin
         : ext === '.gif' ? 'image/gif' : 'image/jpeg'
     return { path: file, type }
   } catch {
+    return null
+  }
+}
+
+/** 洗一遍剧情节点：字段缺 / 类型歪都不要紧，别把脏数据发给页面 */
+function normalizeStoryNode (node: PlayerStoryNode): PlayerStoryNode {
+  const raw = Array.isArray(node?.choices) ? node.choices : []
+  const choices: PlayerStoryChoice[] = raw
+    .filter((choice) => isValidStoryCid(choice?.cid))
+    .map((choice, index) => ({
+      label: String(choice?.label ?? '').trim() || String(index + 1),
+      text: String(choice?.text ?? '').trim() || ('选项 ' + (index + 1)),
+      cid: Number(choice.cid),
+      edgeId: Number(choice?.edgeId) || 0
+    }))
+  return {
+    cid: Number(node?.cid) || 0,
+    question: String(node?.question ?? ''),
+    // 选项全被过滤掉 = 这道题没法往下走，按结局处理（前端会显示「走到结局」）
+    isLeaf: node?.isLeaf === true || choices.length === 0,
+    choices
+  }
+}
+
+/** 读剧情数据（会话目录里的 story.json；没有就 null） */
+export function readPlayerStory (token: unknown): PlayerStoryNode | null {
+  const session = getPlayerSession(token)
+  if (!session) return null
+  try {
+    const raw = readJsonFile(path.join(session.dir, 'story.json'))
+    return raw && typeof raw === 'object' ? normalizeStoryNode(raw as PlayerStoryNode) : null
+  } catch (error: any) {
+    logger.debug('[在线播放] 读取剧情失败: ' + String(error?.message ?? error))
+    return null
+  }
+}
+
+/** cid 只允许正整数：它会拼进文件名，必须把路径穿越挡死 */
+export function isValidStoryCid (cid: unknown): boolean {
+  const value = Number(cid)
+  return Number.isInteger(value) && value > 0 && value < 1e12
+}
+
+/** 取某一分段的文件（会话目录里的 seg-<cid>.mp4；没有就 null，路由再去按需下载） */
+export function resolvePlayerSegment (token: unknown, cid: number): { path: string, size: number } | null {
+  const session = getPlayerSession(token)
+  if (!session || !isValidStoryCid(cid)) return null
+  try {
+    const file = path.join(session.dir, 'seg-' + cid + '.mp4')
+    const stat = fs.statSync(file)
+    return stat.isFile() ? { path: file, size: stat.size } : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 把「按需下好的某一段」搬进会话目录（seg-<cid>.mp4），下一次直接命中。
+ *
+ * 和登记会话时搬视频同一套逻辑：同分区改名、跨分区复制 + 删源；
+ * 搬进会话目录还有个好处 —— 到期清目录时它会跟着一起消失，不用单独记账。
+ */
+export function adoptPlayerSegment (token: unknown, cid: number, sourcePath: string): { path: string, size: number } | null {
+  const session = getPlayerSession(token)
+  if (!session || !isValidStoryCid(cid)) return null
+  if (!sourcePath || !fs.existsSync(sourcePath)) return null
+  const target = path.join(session.dir, 'seg-' + cid + '.mp4')
+  try {
+    try {
+      fs.renameSync(sourcePath, target)
+    } catch {
+      fs.copyFileSync(sourcePath, target)
+      fs.rmSync(sourcePath, { force: true })
+    }
+    const size = Number(fs.statSync(target).size) || 0
+    logger.mark('[在线播放] 互动分段已就绪 cid=' + cid + '（' + (size / 1024 / 1024).toFixed(1) + 'MB）')
+    return { path: target, size }
+  } catch (error: any) {
+    logger.warn('[在线播放] 互动分段搬进会话目录失败: ' + String(error?.message ?? error))
     return null
   }
 }
@@ -512,6 +678,7 @@ export async function deletePlayerSession (token: string): Promise<boolean> {
   const session = sessions.get(token)
   if (!session) return false
   sessions.delete(token)
+  storySources.delete(String(token))
   persistIndex()
   await removePlayerFiles(session)
   return true
@@ -529,6 +696,7 @@ export async function sweepExpiredPlayers (now = Date.now()): Promise<number> {
   if (!expired.length) return 0
   for (const session of expired) {
     sessions.delete(session.token)
+    storySources.delete(session.token)
     logger.info('[在线播放] 链接已过期，清理会话 ' + session.token + '（' + session.title + '）')
     await removePlayerFiles(session)
   }

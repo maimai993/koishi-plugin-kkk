@@ -8,6 +8,8 @@
  *   GET /kkk/player/:token/merged    **按需**用 ffmpeg 合成音视频后下载/播放（第一次会慢一两秒）
  *   GET /kkk/player/:token/download  等价于 `/video?download=1`（带 Content-Disposition）
  *   GET /kkk/player/:token/danmaku   弹幕 JSON
+ *   GET /kkk/player/:token/story     互动视频的当前剧情（题目 + 选项；带 ?cid=&edge= 取下一段）
+ *   GET /kkk/player/:token/segment/:cid  互动视频某一段的视频（没下过就按需下载，支持 Range）
  *
  * 两种落地方式：
  *   - `playerPort` 为 0（默认）：挂到 Koishi 自己的 `ctx.server` 上，不额外占端口；
@@ -28,13 +30,18 @@ import { tryGetRuntime } from '../compat/runtime'
 
 import { renderExpiredPage, renderPlayerPage } from './page'
 import {
+  adoptPlayerSegment,
   getPlayerSession,
+  getPlayerStorySource,
   isValidPlayerToken,
+  isValidStoryCid,
   markPlayerMerged,
   readPlayerDanmaku,
+  readPlayerStory,
   resolvePlayerAudio,
   resolvePlayerCover,
   resolvePlayerMerged,
+  resolvePlayerSegment,
   resolvePlayerVideo
 } from './store'
 
@@ -293,6 +300,93 @@ function danmakuResponse (token: string): PlayerHttpResponse {
   }
 }
 
+/** 一段 JSON（互动剧情的节点数据走它） */
+function jsonResponse (payload: unknown): PlayerHttpResponse {
+  return {
+    status: 200,
+    headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
+    body: Buffer.from(JSON.stringify(payload))
+  }
+}
+
+/**
+ * 互动剧情：当前这一段的题目 + 选项。
+ *
+ * 不带查询 = 会话登记时存下来的那份（第一段的题目）；
+ * 带 `?cid=<从哪一段>&edge=<走的哪条边>` = 现问平台要下一段。
+ * 没有剧情 / 取不到节点都回 404 —— 播放页据此就知道「这里没有互动」，按普通播放页来。
+ */
+async function storyResponse (token: string, query: URLSearchParams): Promise<PlayerHttpResponse> {
+  const session = getPlayerSession(token)
+  if (!session?.story) return notFound(false)
+  const rawCid = query.get('cid')
+  const edgeId = Number(query.get('edge')) || 0
+  /** 没有 cid（或问的就是当前这一段、也没带边）→ 直接用会话里那份，不必再问接口 */
+  if (!rawCid || (!edgeId && Number(rawCid) === Number(session.story.cid))) {
+    return jsonResponse(readPlayerStory(token) ?? session.story)
+  }
+  const cid = Number(rawCid)
+  const source = getPlayerStorySource(token)
+  if (!isValidStoryCid(cid) || !source?.node) return notFound(false)
+  try {
+    const node = await source.node({ cid, edgeId: edgeId || undefined })
+    return node ? jsonResponse(node) : notFound(false)
+  } catch (error: any) {
+    logger.warn('[在线播放] 取互动剧情节点失败: ' + String(error?.message ?? error))
+    return notFound(false)
+  }
+}
+
+/** 正在下载的分段任务：同一条会话 + 同一个 cid 只下一次，用户连点也不会把带宽打满 */
+const segmentJobs = new Map<string, Promise<{ filepath: string } | null>>()
+
+function segmentJob (token: string, cid: number, run: () => Promise<{ filepath: string } | null>): Promise<{ filepath: string } | null> {
+  const key = token + ':' + cid
+  const running = segmentJobs.get(key)
+  if (running) return running
+  const job = run().finally(() => { segmentJobs.delete(key) })
+  segmentJobs.set(key, job)
+  return job
+}
+
+/**
+ * 互动视频的某一段：当前这一段直接发会话里的主视频，其它段**按需下载**（下完留在会话目录里）。
+ *
+ * @param cid 目标分段的 cid
+ */
+async function segmentResponse (
+  token: string,
+  cid: number,
+  range?: string,
+  head = false,
+  download = false
+): Promise<PlayerHttpResponse> {
+  const session = getPlayerSession(token)
+  if (!session?.story || !isValidStoryCid(cid)) return notFound(false)
+  /** 当前这一段就是会话里的主视频，不用绕路也不用下载 */
+  if (Number(session.story.cid) === Number(cid)) {
+    const current = resolvePlayerVideo(token)
+    if (current) return fileResponse(token, current, 'video/mp4', range, head, download, '.mp4')
+  }
+  const cached = resolvePlayerSegment(token, cid)
+  if (cached) return fileResponse(token, cached, 'video/mp4', range, head, download, '.mp4')
+
+  const source = getPlayerStorySource(token)
+  if (!source?.segment) return notFound(false)
+  const started = Date.now()
+  logger.mark('[在线播放] 正在准备互动分段 cid=' + cid + '（' + token + '）')
+  const prepared = await segmentJob(token, cid, () => source.segment!(cid))
+  /**
+   * 并发同一个分段时两个请求等的是同一个任务，**文件只该被搬一次**：
+   * 先看一眼缓存（另一个请求可能已经搬进去了），没有再自己搬。
+   */
+  const ready = resolvePlayerSegment(token, cid) ??
+    (prepared?.filepath ? adoptPlayerSegment(token, cid, prepared.filepath) : null)
+  if (!ready) return notFound(false)
+  logger.mark('[在线播放] 互动分段准备完成 cid=' + cid + '（' + (Date.now() - started) + 'ms）')
+  return fileResponse(token, ready, 'video/mp4', range, head, download, '.mp4')
+}
+
 /**
  * 分发一条请求。
  * @param request 请求（路径 + Range）
@@ -314,7 +408,9 @@ export async function handlePlayerRequest (request: PlayerHttpRequest): Promise<
   const parts = rest.split('/').filter((item) => item !== '')
   const token = parts[0] ?? ''
   const action = parts[1] ?? ''
-  if (parts.length > 2 || !isValidPlayerToken(token)) return notFound(!action)
+  /** 第三段：目前只有 /segment/<cid> 用得上 */
+  const sub = parts[2] ?? ''
+  if (parts.length > 3 || !isValidPlayerToken(token)) return notFound(!action)
   // 会话不存在 / 已过期：页面回「链接已过期」的 404 页，接口回纯文本 404
   if (!getPlayerSession(token)) return notFound(action === '')
 
@@ -342,6 +438,9 @@ export async function handlePlayerRequest (request: PlayerHttpRequest): Promise<
   if (action === 'download') return videoResponse(token, request.range, method === 'HEAD', true)
   if (action === 'danmaku') return danmakuResponse(token)
   if (action === 'cover') return coverResponse(token)
+  // 互动视频：当前剧情（题目 + 选项）与分段视频
+  if (action === 'story') return storyResponse(token, query)
+  if (action === 'segment') return segmentResponse(token, Number(sub), request.range, method === 'HEAD', wantDownload)
   return notFound(false)
 }
 
@@ -443,19 +542,34 @@ function registerOnKoishi (ctx: any, disposers: Array<() => void>): void {
     logger.warn('[在线播放] 当前宿主没有 server 服务，播放链接无法访问；可把 playerPort 设成一个独立端口')
     return
   }
-  const route = async (koa: any, token: string, action: string): Promise<void> => {
+  /** 把 koa 上的这一段请求交给统一的处理函数；sub 是第三段（目前只有 /segment/<cid> 用） */
+  const route = async (koa: any, token: string, action: string, sub = ''): Promise<void> => {
     const response = await handlePlayerRequest({
       method: String(koa.method ?? 'GET'),
-      path: PLAYER_ROUTE_PREFIX + token + (action ? '/' + action : ''),
+      path: PLAYER_ROUTE_PREFIX + token + (action ? '/' + action : '') + (sub ? '/' + sub : ''),
       range: String(koa.headers?.range ?? ''),
       // koa.search 形如 '?download=1'；旧的 querystring 不带问号也没关系（handlePlayerRequest 会去掉）
       query: String(koa.search ?? koa.querystring ?? '')
     })
     await writeKoa(koa, response)
   }
-  server.get('/kkk/player/:token', (koa: any) => route(koa, String(koa.params?.token ?? ''), ''))
-  server.get('/kkk/player/:token/video', (koa: any) => route(koa, String(koa.params?.token ?? ''), 'video'))
-  server.get('/kkk/player/:token/download', (koa: any) => route(koa, String(koa.params?.token ?? ''), 'download'))
-  server.get('/kkk/player/:token/danmaku', (koa: any) => route(koa, String(koa.params?.token ?? ''), 'danmaku'))
+  const base = '/kkk/player/:token'
+  server.get(base, (koa: any) => route(koa, String(koa.params?.token ?? ''), ''))
+  /**
+   * 其余动作逐个注册。
+   *
+   * 以前这里只挂了 video / download / danmaku 三条，于是 playerPort=0（复用 Koishi 端口）时
+   * `/audio`、`/merged`、`/cover` **全是 404** —— 音视频分离的播放页会「有画面没声音」、
+   * 下载按钮点了报错。现在按 handlePlayerRequest 支持的动作表统一挂一遍，不再漏。
+   */
+  for (const action of ['video', 'audio', 'merged', 'download', 'danmaku', 'cover', 'story']) {
+    server.get(base + '/' + action, (koa: any) => route(koa, String(koa.params?.token ?? ''), action))
+  }
+  server.get(base + '/segment/:cid', (koa: any) => route(
+    koa,
+    String(koa.params?.token ?? ''),
+    'segment',
+    String(koa.params?.cid ?? '')
+  ))
   logger.info('[在线播放] 播放路由已挂到 Koishi 端口：/kkk/player/:token')
 }

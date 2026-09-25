@@ -30,6 +30,8 @@ import {
   startPlayerSweeper,
   stopPlayerSweeper,
   type PlayerDanmakuItem,
+  type PlayerStoryNode,
+  type PlayerStorySource,
   type PlayerWorkInfo
 } from './store'
 
@@ -477,6 +479,13 @@ export async function publishOnlinePlayer (e: any, input: {
   work?: PlayerWorkInfo
   /** 已经下到本地的封面文件（优先用它，其次才去下 work.coverUrl） */
   coverPath?: string
+  /**
+   * 互动视频的剧情（B站互动稿才有）：当前这一段的题目 + 选项，外加「按需取节点 / 取分段」的能力。
+   *
+   * 给了它就等于这条链接是**互动播放页** —— 页面会把选项浮在视频上，
+   * 用户点一条就按需把那一段下下来接着播（见 server.ts 的 story / segment 路由）。
+   */
+  story?: { node: PlayerStoryNode; source?: PlayerStorySource }
 }): Promise<boolean> {
   // 允许「只开在线看按钮」的部署：那种配置下弹幕不走播放器，但「在线看」这条要能落库
   if (!isPlayerAvailable()) return false
@@ -531,7 +540,8 @@ export async function publishOnlinePlayer (e: any, input: {
       expireMinutes: minutes,
       work: input.work,
       coverPath: coverPath ?? undefined,
-      localOnly
+      localOnly,
+      story: input.story
     })
     if (!session) {
       await reply('在线播放准备失败（详情见日志），这里直接发送视频')
@@ -542,7 +552,8 @@ export async function publishOnlinePlayer (e: any, input: {
      * 否则用户点了打不开，只会以为「插件坏了」（用户实测就这么以为过）。
      */
     await reply('在线播放：' + buildPlayerLink(session.token)
-      + '\n链接 ' + minutes + ' 分钟内有效，弹幕就在网页里，过期后自动清理。'
+      + '\n链接 ' + minutes + ' 分钟内有效' + (session.story ? '，这是互动视频：在播放器里直接选剧情就能接着看' : '，弹幕就在网页里')
+      + '，过期后自动清理。'
       + (localOnly ? '\n（未配置公网地址，仅本机可访问；公网用户请让管理员在「在线播放器设置 → 播放器公网地址」里填上域名）' : ''))
     return true
   } catch (error: any) {
