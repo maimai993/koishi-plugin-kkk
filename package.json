@@ -1,6 +1,6 @@
 {
   "name": "koishi-plugin-kkk",
-  "version": "3.7.0",
+  "version": "3.7.1",
   "description": "抖音 / B站 / 快手 / 小红书 视频解析与动态推送，带 QQ 交互面板与弹幕烧录（karin-plugin-kkk 的 Koishi 移植版）",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",

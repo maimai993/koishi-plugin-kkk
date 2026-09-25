@@ -24,11 +24,29 @@ import {
 // 解析阶段（「下载进度」指令读的就是这里登记的状态）
 import { DOWNLOAD_STAGES, clearParseStage, updateDownloadStage } from './Network/Downloader'
 
+/** 发送结果里把消息 ID 抠出来（不同适配器返回的形状不一样：对象带 messageId、或者就是字符串数组） */
+const reportSent = (options: uploadFileOptions | undefined, sent: any): void => {
+  if (!options?.onSent) return
+  try {
+    const id = typeof sent === 'string'
+      ? sent
+      : (sent?.messageId ?? (Array.isArray(sent) ? sent[0] : ''))
+    if (id) options.onSent(String(id))
+  } catch { /* 拿不到 ID 不影响发送本身 */ }
+}
+
 type uploadFileOptions = {
   /** 是否使用群文件上传 */
   useGroupFile?: boolean
   /** 消息ID，如果有，则将使用该消息ID制作回复元素 */
   message_id?: string
+  /**
+   * 发出去了把消息 ID 交回来（可选）。
+   *
+   * 互动视频用它：下一段播出来之后要**撤回上一段那条视频**，群里只留当前这一段
+   * （不然点几次剧情，群里就躺着一串视频）。
+   */
+  onSent?: (messageId: string) => void
   /** 是否为主动消息 */
   active?: boolean
   /** 主动消息参数 */
@@ -351,12 +369,14 @@ export const uploadFile = async (event: Message, file: fileInfo, videoUrl: strin
         // 是群文件
         const bot = karin.getBot(String(options.activeOption?.uin))!
         logger.mark(`${logger.blue('主动消息:')} 视频大小: ${newFileSize.toFixed(1)}MB 正在通过${logger.yellow('bot.uploadFile')}回复...`)
-        await bot.uploadFile(contact, File, file.originTitle ? `${file.originTitle}.mp4` : `${File.split('/').pop()}`)
+        const sent: any = await bot.uploadFile(contact, File, file.originTitle ? `${file.originTitle}.mp4` : `${File.split('/').pop()}`)
+        reportSent(options, sent)
       } else {
         // 不是群文件
         logger.mark(`${logger.blue('主动消息:')} 视频大小: ${newFileSize.toFixed(1)}MB 正在通过${logger.yellow('karin.sendMsg')}回复...`)
         // 兼容层已经把「没拿到消息 ID」当成失败抛出（见 compat/sendError），所以这里没有异常就是发出去了
-        await karin.sendMsg(selfId, contact, [segment.video(File)], { retryCount: 0 })
+        const sent: any = await karin.sendMsg(selfId, contact, [segment.video(File)], { retryCount: 0 })
+        reportSent(options, sent)
         sendStatus = true
       }
     } else {
@@ -364,12 +384,14 @@ export const uploadFile = async (event: Message, file: fileInfo, videoUrl: strin
       if (useGroupFile) {
         // 是文件
         logger.mark(`${logger.blue('被动消息:')} 视频大小: ${newFileSize.toFixed(1)}MB 正在通过${logger.yellow('e.bot.uploadFile')}回复...`)
-        await event.bot.uploadFile(event.contact, File, file.originTitle ? `${file.originTitle}.mp4` : `${File.split('/').pop()}`)
+        const sent: any = await event.bot.uploadFile(event.contact, File, file.originTitle ? `${file.originTitle}.mp4` : `${File.split('/').pop()}`)
+        reportSent(options, sent)
       } else {
         // 不是文件
         logger.mark(`${logger.blue('被动消息:')} 视频大小: ${newFileSize.toFixed(1)}MB 正在通过${logger.yellow('e.reply')}回复...`)
         // 同上：异常才是失败（没拿到消息 ID 已经由兼容层抛出来了）
-        await event.reply(segment.video(File) || videoUrl)
+        const sent: any = await event.reply(segment.video(File) || videoUrl)
+        reportSent(options, sent)
         sendStatus = true
       }
     }

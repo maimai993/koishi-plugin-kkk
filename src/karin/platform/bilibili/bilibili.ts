@@ -85,7 +85,11 @@ import {
   buildBilibiliVideoDescRichText,
   getUsernameMetadata
 } from '@/platform/bilibili/dynamic-text'
-import { runInteractiveStory, renderInteractiveChart as renderChart } from '@/platform/bilibili/interactive-story'
+import {
+  rememberStoryVideo,
+  renderInteractiveChart as renderChart,
+  runInteractiveStory
+} from '@/platform/bilibili/interactive-story'
 import { BilibiliDataTypes } from '@/types'
 
 let img: ElementTypes[]
@@ -664,14 +668,13 @@ export class Bilibili extends Base {
               await downloadTask
               await this.sendPreparedVideo()
               /**
-               * 互动视频：**群里不再发「选择按钮」了**（用户要求）。
-               *
-               * 剧情选择整个搬到播放页上（选项贴在视频上、点完显示加载进度）；
-               * 群里如果还同步问一遍，用户会被两处剧情各问一次。
-               * 只有「视频直接发到群里、没走播放页」时，顺手补一张**剧情图**（图片，不是按钮）——
-               * 用户至少能看到这张图里有几条分支。
+               * 互动视频的剧情怎么走，看这次的视频发到哪儿：
+               *   · **走在线播放**（视频没发进群里，用户在看播放页）→ 选项在播放页上贴出来，
+               *     群里不再问一遍，免得两处各问一次（见 sendPreparedVideo 里的 story）；
+               *   · **直接发到群里**（没有播放页）→ 照旧在群里发**带按钮的选择面板**，
+               *     用户点一下播下一段，并撤回上一段视频（用户要求）。
                */
-              if (this.interactive && !this.publishedStory) void this.sendInteractiveChartOnly()
+              if (this.interactive && !this.publishedStory) void this.startInteractiveStory()
             })
           }
         }
@@ -1936,35 +1939,6 @@ export class Bilibili extends Base {
   }
 
   /**
-   * 互动视频发到群里时：只补一张**剧情图**，不问选项（用户要求：群里不要选择按钮）。
-   *
-   * 选项流程在播放页里（见 sendPreparedVideo 的 story）；这里只把「有几条分支」画出来。
-   * 失败只记日志 —— 出不了图不影响视频已经发出去这件事。
-   */
-  private async sendInteractiveChartOnly (): Promise<void> {
-    const interactive = this.interactive
-    if (!interactive) return
-    /** 没勾「流程图」就什么都不做（配置说了算） */
-    if (!Config.bilibili.sendContent.some((item) => item === 'chart')) return
-    try {
-      const info = await fetchInteractiveInfo({ bvid: interactive.bvid, cid: interactive.cid, headers: this.headers })
-      if (!info) return
-      await renderChart({
-        e: this.e,
-        bvid: interactive.bvid,
-        graphVersion: info.graphVersion,
-        cid: interactive.cid,
-        title: this.workInfo?.title ?? '互动视频',
-        notice: info.notice,
-        headers: this.headers,
-        full: true
-      })
-    } catch (error: any) {
-      logger.debug('[互动视频] 群里补剧情图失败（不影响视频）: ' + String(error?.message ?? error))
-    }
-  }
-
-  /**
    * 起一次互动剧情（后台长跑，不阻塞解析主流程）。
    *
    * 选项与等待都在 interactive-story 里；这里只负责：问一次剧情图版本号 → 跑剧情 → 续播时
@@ -2136,10 +2110,17 @@ export class Bilibili extends Base {
       }
       logger.warn('[在线播放] 播放会话登记失败，退回直接发送视频文件')
     }
+    /**
+     * 互动视频（发到群里的那种）：把这条视频的消息 ID 记下来 ——
+     * 用户点了下一个选项之后，这条要撤回，群里只留当前这一段。
+     */
+    const sentOptions = this.interactive
+      ? { onSent: (messageId: string) => rememberStoryVideo(this.e, messageId) }
+      : undefined
     if (totalBytes > Config.app.groupfilevalue) {
-      await uploadFile(this.e, { filepath, totalBytes, originTitle }, videoUrl ?? '', { useGroupFile: true })
+      await uploadFile(this.e, { filepath, totalBytes, originTitle }, videoUrl ?? '', { useGroupFile: true, ...sentOptions })
     } else {
-      await uploadFile(this.e, { filepath, totalBytes, originTitle }, videoUrl ?? '')
+      await uploadFile(this.e, { filepath, totalBytes, originTitle }, videoUrl ?? '', sentOptions)
     }
     return true
   }

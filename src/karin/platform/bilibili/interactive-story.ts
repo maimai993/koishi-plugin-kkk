@@ -41,6 +41,42 @@ export const RENDER_CHART_COMMAND = '渲染流程图'
 /** 每个频道最近一条「选项消息」，用于发下一条之前撤回 */
 const lastChoiceMessages = new Map<string, string>()
 
+/**
+ * 每个频道最近一条「剧情视频」的消息 ID。
+ *
+ * 用户要求：点一下选项，**上一段视频也要撤回** —— 不然玩几段之后群里躺着一串视频。
+ * 视频是解析链路发的（不是这里发的），所以由那边把它发出去的消息 ID 记进来。
+ */
+const lastStoryVideos = new Map<string, string>()
+
+/** 记下刚发出去的剧情视频（由解析链路在上传成功时调用） */
+export const rememberStoryVideo = (e: Message, messageId: string | undefined): void => {
+  if (!messageId) return
+  lastStoryVideos.set(sessionKeyOf(e), String(messageId))
+}
+
+/**
+ * 取出并清掉「上一条剧情视频」的消息 ID。
+ *
+ * 取出来就删：这条只该被撤回一次，撤回失败也不能反复去点。
+ */
+const takeStoryVideo = (e: Message): string | undefined => {
+  const key = sessionKeyOf(e)
+  const messageId = lastStoryVideos.get(key)
+  if (messageId) lastStoryVideos.delete(key)
+  return messageId
+}
+
+/** 撤回某条消息（失败只记日志，绝不影响剧情） */
+const recallMessage = async (e: Message, messageId: string | undefined): Promise<void> => {
+  if (!messageId) return
+  try {
+    await (e.bot as any)?.recallMsg?.(messageId, channelOf(e))
+  } catch (error: any) {
+    logger.debug('[互动视频] 撤回消息失败: ' + String(error?.message ?? error))
+  }
+}
+
 const platformOf = (e: any): string =>
   String(e?.bot?.bot?.platform ?? e?.bot?.platform ?? e?.platform ?? '')
 
@@ -358,11 +394,19 @@ export const runInteractiveStory = async (options: StoryOptions): Promise<StoryR
     currentCid = choice.cid
 
     if (play) {
+      /**
+       * 用户要求：点一下选项，**上一段视频也要撤回**（群里只留当前这一段）。
+       *
+       * 顺序是「发新的 → 撤旧的」：先取走旧 ID（新的那条发出去时会被重新记上），
+       * 新的发完再撤旧的 —— 中间不会出现「一段视频都没有」的空档。
+       */
+      const previousVideo = takeStoryVideo(target)
       try {
         await play(currentCid, target)
       } catch (error: any) {
         logger.warn('[互动视频] 播放下一段失败（cid=' + currentCid + '）: ' + String(error?.message ?? error))
       }
+      await recallMessage(target, previousVideo)
     }
     node = { ...next, cid: currentCid }
   }

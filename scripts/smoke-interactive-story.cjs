@@ -145,6 +145,33 @@ const main = async () => {
   check('结局时撤回了上一条选项消息', state.recalled.length >= 1, JSON.stringify(state.recalled))
   check('结局有提示', state.replies.some((item) => String(item).includes('结局')), JSON.stringify(state.replies).slice(0, 200))
 
+  console.log('== 点一下选项：上一段视频也要撤回（用户要求）==')
+  {
+    const { e, state } = makeEvent('qqguild')
+    /** 解析链路发第一段视频时记下的消息 ID */
+    story.rememberStoryVideo(e, 'vid-root')
+    const playedVideo = []
+    const r = await runInteractiveStory({
+      e,
+      bvid: 'BV1xDgL6SEzk',
+      graphVersion: 1722536,
+      rootCid: 41156151510,
+      title: '史蒂夫的选择',
+      request: requestFor({ root: rootPayload, 11: leafPayload, 12: middlePayload }),
+      wait: async () => 'A',
+      play: async (cid) => {
+        playedVideo.push(cid)
+        /** 模拟解析链路：新一段视频发出去后把它的消息 ID 记进来 */
+        story.rememberStoryVideo(e, 'vid-' + cid)
+      }
+    })
+    check('选完播了下一段', playedVideo.join(',') === '101', playedVideo.join(','))
+    check('上一段视频被撤回了（群里只留当前这一段）', state.recalled.includes('vid-root'), JSON.stringify(state.recalled))
+    check('刚发出去的那一段没有被误撤', !state.recalled.includes('vid-101'), JSON.stringify(state.recalled))
+    check('同一条只撤一次（取走即清）', state.recalled.filter((id) => id === 'vid-root').length === 1, JSON.stringify(state.recalled))
+    check('剧情照常走完', r.ended === 'leaf', r.ended)
+  }
+
   console.log('== 结局那一段也要给上层画图的机会 ==')
   const endingHook = makeEvent('qqguild')
   const hookCalls = []
