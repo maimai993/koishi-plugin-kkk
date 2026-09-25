@@ -79,6 +79,8 @@ export interface PlayerSession {
   /* ---------------- 作品信息（播放页上按B站那样展示，拿不到就不显示，绝不编数据） ---------------- */
   /** UP 主 / 作者名 */
   author?: string
+  /** 平台原视频链接（播放页上给一个「去 B站看」的入口，没有就不显示） */
+  sourceUrl?: string
   /** 封面文件名（在会话目录里，页面上用同源地址 /kkk/player/<token>/cover 取） */
   cover?: string
   /** 播放量 */
@@ -119,6 +121,13 @@ export interface PlayerSession {
 export interface PlayerWorkInfo {
   title?: string
   author?: string
+  /**
+   * **平台上的原视频链接**（B站：https://www.bilibili.com/video/BV…；抖音：分享链接）。
+   *
+   * 播放页上要显示它：用户在这个页面里看到「本页链接」没有任何意义（你已经在上面了），
+   * 有意义的是「原视频在哪」—— 想去发弹幕、想看评论区、想分享给朋友，都得回平台。
+   */
+  sourceUrl?: string
   /** 封面的远程地址（登记时下载到会话目录，页面用同源地址取） */
   coverUrl?: string
   views?: number
@@ -475,6 +484,7 @@ export function registerPlayerSession (input: {
       expireAt: now + normalizeExpireMinutes(input.expireMinutes) * 60 * 1000,
       localOnly: input.localOnly === true ? true : undefined,
       author: work.author ? String(work.author) : undefined,
+      sourceUrl: work.sourceUrl ? String(work.sourceUrl) : undefined,
       cover,
       views: optionalNumber(work.views),
       platformDanmaku: optionalNumber(work.platformDanmaku),

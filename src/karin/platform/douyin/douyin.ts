@@ -692,7 +692,10 @@ export class DouYin extends Base {
             shares: optionalStat(stat.share_count),
             comments: optionalStat(stat.comment_count),
             publishedAt: Number(aweme.create_time) > 0 ? Number(aweme.create_time) * 1000 : undefined,
-            durationSeconds: Number(aweme.video?.duration) > 0 ? Math.round(Number(aweme.video.duration) / 1000) : undefined
+            durationSeconds: Number(aweme.video?.duration) > 0 ? Math.round(Number(aweme.video.duration) / 1000) : undefined,
+            /** 原视频链接：播放页上显示「去抖音看」（分享链接比 video/<id> 在手机端更好使） */
+            sourceUrl: String(aweme.share_url ?? '') ||
+              (aweme.aweme_id ? 'https://www.douyin.com/video/' + aweme.aweme_id : undefined)
           }
         }
 

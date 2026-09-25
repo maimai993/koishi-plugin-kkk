@@ -376,6 +376,26 @@ export function renderPlayerPage (info: PlayerPageInfo): string {
     + '<span class="linkhint" id="pageLinkHint"></span>'
     + '</div>'
 
+  /**
+   * 原视频链接（用户要求）。
+   *
+   * 播放页上写「本页链接」其实没什么意义 —— 用户已经站在这个页面上了；
+   * 真正有用的是「原视频在哪」：想去发弹幕、看评论区、转发给朋友，都得回平台。
+   * 所以这一行显示**平台上的原链接**（B站/抖音），点一下直接过去，也能一键复制。
+   * 平台没给链接（拿不到）就整行不渲染，绝不编一个出来。
+   */
+  const sourceRow = info.sourceUrl
+    ? '<div class="linkrow">'
+      + '<span class="linklabel">原视频</span>'
+      + '<a class="linktext" id="pageSourceLink" href="' + escapeHtml(info.sourceUrl)
+      + '" target="_blank" rel="noopener noreferrer">' + escapeHtml(info.sourceUrl) + '</a>'
+      + '<button type="button" class="linkbtn" id="pageSourceOpen">'
+      + (platform ? '在' + platform + '打开' : '打开原视频') + '</button>'
+      + '<button type="button" class="linkbtn" id="pageSourceCopy">复制原链接</button>'
+      + '<span class="linkhint" id="pageSourceHint"></span>'
+      + '</div>'
+    : ''
+
   const cover = info.cover
     ? '<div class="cover"><img src="/kkk/player/' + token + '/cover" alt="">'
       + (duration ? '<span class="dur">' + duration + '</span>' : '') + '</div>'
@@ -472,7 +492,7 @@ export function renderPlayerPage (info: PlayerPageInfo): string {
         + ICON.download + '<span>下载视频</span></a>'
         + '<span class="dlhint">保存到本机（原画质，不重新编码）</span>')
     + '</div>\n'
-    + linkRow + '\n'
+    + sourceRow + linkRow + '\n'
     + (actions ? '  <div class="actions">' + actions + '</div>\n' : '')
     + (info.localOnly
       ? '  <div class="warnlocal"><b>未配置公网地址，仅本机可访问</b>：这条链接用的是管理员机器的本机地址，'
@@ -1223,6 +1243,34 @@ const PLAYER_SCRIPT = [
   "    .catch(function (error) {",
   "      showNotice('弹幕加载失败：' + (error && error.message ? error.message : error) + '（视频仍可播放）')",
   "    })",
+  "  /* ===== 原视频链接：打开 / 复制（用户要求：这一行才有意义，本页链接用户已经在上面了） ===== */",
+  "  var sourceLinkEl = document.getElementById('pageSourceLink')",
+  "  var sourceCopyBtn = document.getElementById('pageSourceCopy')",
+  "  var sourceOpenBtn = document.getElementById('pageSourceOpen')",
+  "  var sourceHintEl = document.getElementById('pageSourceHint')",
+  "  var sourceUrl = sourceLinkEl ? sourceLinkEl.getAttribute('href') : ''",
+  "  /** 复制原视频链接（和本页链接同一套退化方案：剪贴板不可用就给可全选的文本框） */",
+  "  function copySourceLink () {",
+  "    if (!sourceUrl) return",
+  "    function done (ok) { if (sourceHintEl) sourceHintEl.textContent = ok ? '已复制' : '复制失败，请长按上面的链接手动复制' }",
+  "    function fallback () {",
+  "      var ta = document.createElement('textarea')",
+  "      ta.value = sourceUrl",
+  "      ta.style.position = 'fixed'; ta.style.opacity = '0'",
+  "      document.body.appendChild(ta)",
+  "      ta.select(); ta.setSelectionRange(0, ta.value.length)",
+  "      var ok = false",
+  "      try { ok = document.execCommand('copy') } catch (err) { ok = false }",
+  "      document.body.removeChild(ta)",
+  "      done(ok)",
+  "    }",
+  "    if (navigator.clipboard && navigator.clipboard.writeText) {",
+  "      navigator.clipboard.writeText(sourceUrl).then(function () { done(true) }, fallback)",
+  "    } else fallback()",
+  "  }",
+  "  if (sourceCopyBtn) sourceCopyBtn.addEventListener('click', copySourceLink)",
+  "  if (sourceOpenBtn && sourceUrl) sourceOpenBtn.addEventListener('click', function () { window.open(sourceUrl, '_blank', 'noopener') })",
+  "",
   "  /* ===== 本页链接：直接跳转 / 手动复制（用户要求） ===== */",
   "  var linkTextEl = document.getElementById('pageLinkText')",
   "  var linkHintEl = document.getElementById('pageLinkHint')",

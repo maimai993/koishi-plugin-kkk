@@ -242,6 +242,13 @@ export class Bilibili extends Base {
           this.workInfo = {
             title: detail.title ? String(detail.title) : undefined,
             author: detail.owner?.name ? String(detail.owner.name) : undefined,
+            /** 原视频链接：播放页上显示「去 B站看」，分 P 带上 ?p=（在线播放页要用它回平台） */
+            sourceUrl: (() => {
+              const bvid = String(iddata.bvid ?? detail.bvid ?? '')
+              if (!bvid) return undefined
+              const page = Number(iddata.p) > 1 ? '?p=' + Number(iddata.p) : ''
+              return 'https://www.bilibili.com/video/' + bvid + page
+            })(),
             coverUrl: detail.pic ? String(detail.pic) : undefined,
             views: optionalStat(stat.view),
             platformDanmaku: optionalStat(stat.danmaku),

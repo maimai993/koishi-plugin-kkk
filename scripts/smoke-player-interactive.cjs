@@ -61,6 +61,8 @@ const session = store.registerPlayerSession({
   title: '互动测试',
   platform: 'bilibili',
   danmaku: [],
+  // 原视频链接（播放页上显示「原视频」那一行 —— 用户要求：本页链接没意义，原链接才有）
+  work: { title: '互动测试', sourceUrl: 'https://www.bilibili.com/video/BV1xx411c7mD' },
   story: {
     node: firstNode,
     source: {
@@ -97,6 +99,12 @@ const main = async () => {
       /\.story\{[^}]*pointer-events:none/.test(html) && /\.story-card\{[^}]*pointer-events:auto/.test(html))
     check('有加载进度条样式（点完选项显示下载/合成进度）',
       /\.story-track\{/.test(html) && /\.story-fill\{/.test(html))
+    check('显示的是**平台原视频链接**（不是用户已经在看的本页链接）',
+      html.includes('id="pageSourceLink"') && html.includes('https://www.bilibili.com/video/BV1xx411c7mD') &&
+      html.includes('原视频') && html.includes('复制原链接'),
+      '原视频那一行')
+    check('原链接带 target/rel（新标签打开，且不留 referrer）',
+      /id="pageSourceLink"[^>]*target="_blank"[^>]*rel="noopener noreferrer"/.test(html))
     check('页面里没有 emoji（播放页一律用内联 SVG）',
       !/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(html))
     const matched = /<script>([\s\S]*?)<\/script>/.exec(html)
@@ -227,6 +235,7 @@ const main = async () => {
       story.status === 404 && segment.status === 404, story.status + ' / ' + segment.status)
     const page = await request('/kkk/player/' + plain.token)
     check('普通播放页照常有播放器（只是不显示选项）', page.status === 200 && /id="video"/.test(bodyOf(page)))
+    check('平台没给原链接时不编数据（整行不渲染）', !bodyOf(page).includes('id="pageSourceLink"'))
   }
   {
     await store.deletePlayerSession(token)
