@@ -36,10 +36,17 @@ function stripComments (text) {
 const lineOf = (text, index) => (index < 0 ? -1 : text.slice(0, index).split('\n').length)
 
 /** 每个平台：文件、渲染步骤的锚点 */
+/**
+ * 每个平台：文件 + 渲染步骤的锚点。
+ *
+ * 锚点必须跟着实现走：3.5.0 起渲染/发送改成 SendTasks 登记（`sends.add('渲染作品信息卡', …)`），
+ * 以前那个 `steps.run('渲染作品信息卡'" 的写法已经不存在了 —— 锚点不更新，这条测试就只会
+ * 一直红着报「render@-1」，看着像回归、其实是测试自己过期。
+ */
 const CASES = [
-  { name: 'B站', file: 'lib/karin/platform/bilibili/bilibili.js', render: "steps.run('渲染作品信息卡'" },
-  { name: '抖音', file: 'lib/karin/platform/douyin/douyin.js', render: "steps.run('渲染作品信息卡'" },
-  { name: '快手', file: 'lib/karin/platform/kuaishou/kuaishou.js', render: "steps.run('渲染评论区'" },
+  { name: 'B站', file: 'lib/karin/platform/bilibili/bilibili.js', render: "sends.add('渲染作品信息卡'" },
+  { name: '抖音', file: 'lib/karin/platform/douyin/douyin.js', render: "sends.add('渲染作品信息卡'" },
+  { name: '快手', file: 'lib/karin/platform/kuaishou/kuaishou.js', render: "sends.add('渲染评论区'" },
   { name: '小红书', file: 'lib/karin/platform/xiaohongshu/xiaohongshu.js', render: "'xiaohongshu/noteInfo'" },
 ]
 
