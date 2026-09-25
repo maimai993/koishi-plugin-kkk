@@ -108,6 +108,13 @@ export type downLoadFileOptions = {
    * 把镜像地址带上，下载器就能在坏源上自动换过去。
    */
   backupUrls?: string[]
+  /**
+   * 进度回调（可选）。
+   *
+   * 在线播放页的互动视频「点一段 → 显示加载进度」就靠它：播放页没法读终端的进度条，
+   * 只能把这个数字通过接口转出去。
+   */
+  onProgress?: (bytes: number, total: number) => void
 }
 
 /**
@@ -555,6 +562,8 @@ export const downloadFile = async (videoUrl: string, opt: downLoadFileOptions): 
       throttle: throttleConfig,
       backupUrls: opt.backupUrls
     }).downloadStream((downloadedBytes, totalBytes) => {
+      /** 把进度交出去（在线播放页的分段加载进度用；终端进度条不受影响） */
+      try { opt.onProgress?.(downloadedBytes, totalBytes) } catch { /* 回调出错不能连累下载 */ }
       // 定义进度条长度及生成进度条字符串的函数
       const barLength = 45
       const generateProgressBar = (progressPercentage: number) => {

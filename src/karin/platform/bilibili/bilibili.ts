@@ -1602,11 +1602,18 @@ export class Bilibili extends Base {
   async prepareVideo({
     infoData,
     playUrlData,
-    danmakuList = []
+    danmakuList = [],
+    onProgress
   }: {
     infoData?: BilibiliBangumiInfoResponse | BilibiliVideoInfoResponse
     playUrlData: BilibiliVideoStreamResponse | BiliBiliVideoPlayurlNoLogin | BilibiliBangumiStreamResponse
     danmakuList?: BiliDanmakuElem[]
+    /**
+     * 过程上报（可选）：在线播放页的互动视频点完一段要显示「加载进度」，
+     * 页面读不到服务器的终端进度条，只能由这里把数字交出去。
+     * @param stage 'video' 下画面 / 'audio' 下声音 / 'merging' 合成中
+     */
+    onProgress?: (bytes: number, total: number, stage: 'video' | 'audio' | 'merging') => void
   }) {
     /** 获取视频 => FFmpeg合成 */
     logger.debug('是否登录:', this.islogin)
@@ -1634,7 +1641,8 @@ export class Bilibili extends Base {
         const bmp4Raw = await downloadFile(videoUrls[0], {
           title: `Bil_V_${this.Type === 'one_video' ? infoData && infoData.data.bvid : infoData && infoData.result.season_id}.m4s`,
           headers: downloadHeaders,
-          backupUrls: videoUrls.slice(1)
+          backupUrls: videoUrls.slice(1),
+          onProgress: onProgress ? (bytes, total) => onProgress(bytes, total, 'video') : undefined
         })
 
         // 修复 m4s 文件为标准 MP4
@@ -1662,7 +1670,8 @@ export class Bilibili extends Base {
           const bmp3Raw = await downloadFile(audioUrl, {
             title: `Bil_A_${this.Type === 'one_video' ? infoData && infoData.data.bvid : infoData && infoData.result.season_id}.m4s`,
             headers: downloadHeaders,
-            backupUrls: audioUrls.slice(1)
+            backupUrls: audioUrls.slice(1),
+            onProgress: onProgress ? (bytes, total) => onProgress(bytes, total, 'audio') : undefined
           })
 
           // 修复音频 m4s 文件为 m4a（AAC 音频不能直接转为 MP3 容器）
@@ -1741,6 +1750,8 @@ export class Bilibili extends Base {
              * 那一条链路上不能同时管两份文件（画面 + 声音的同步逻辑会跟着翻倍，容易出错）。
              */
             if (!!this.interactive || this.storyOnly) {
+              /** 合成分不出百分比，但至少让播放页把「正在合成」显示出来 */
+              try { onProgress?.(0, 0, 'merging') } catch { /* 上报失败不影响合成 */ }
               success = await withDownloadStage(DOWNLOAD_STAGES.merging, () =>
                 mergeVideoAudio(bmp4.filepath, bmp3.filepath, resultPath)
               )
@@ -2171,7 +2182,7 @@ export const buildPlayerStorySource = (params: {
       })
       return node ? trim(node) : null
     },
-    segment: async (cid) => {
+    segment: async (cid, report) => {
       /**
        * 借一次「续播解析」把这一段下下来：storyOnly 的实例只下视频、不发卡片，
        * 合成走的是和主流程同一条链路（音视频合并成一条 mp4，播放器换个 src 就能续播）。
@@ -2200,8 +2211,18 @@ export const buildPlayerStorySource = (params: {
         }, simplify, audioUrl)
         playUrlData.data.data.dash.video = corpus.videoList
         playUrlData.data.data.accept_description = corpus.accept_description
-        /** 播放页那一段不带弹幕烧录（弹幕由播放页自己画） */
-        const ok = await story.prepareVideo({ infoData, playUrlData, danmakuList: [] })
+        /**
+         * 播放页那一段不带弹幕烧录（弹幕由播放页自己画）。
+         * `onProgress` 一路传到 downloadFile，播放页据此显示「下载 xx% / 正在合成」。
+         */
+        const ok = await story.prepareVideo({
+          infoData,
+          playUrlData,
+          danmakuList: [],
+          onProgress: report
+            ? (bytes, total, stage) => report({ stage, bytes, total })
+            : undefined
+        })
         if (!ok) return null
         const prepared = story.takePreparedVideo()
         if (!prepared?.filepath) return null

@@ -65,10 +65,13 @@ const session = store.registerPlayerSession({
     node: firstNode,
     source: {
       node: async (params) => { nodeCalls.push(params); return nodeResult },
-      segment: async (cid) => {
+      segment: async (cid, report) => {
         segmentCalls.push(cid)
-        // 模拟「下载 + 合成」：给一个临时文件，交给播放器搬进会话目录
+        // 模拟「下载 + 合成」：先报下载进度、再报合成，最后给一个临时文件让播放器搬进会话目录
+        report?.({ stage: 'video', bytes: 2048, total: 4096 })
         await new Promise((resolve) => setTimeout(resolve, 120))
+        report?.({ stage: 'merging', bytes: 0, total: 0 })
+        await new Promise((resolve) => setTimeout(resolve, 60))
         return { filepath: writeFake('seg-src-' + cid + '.mp4', 4096, cid % 251) }
       }
     }
@@ -78,7 +81,7 @@ const token = session.token
 const base = '/kkk/player/' + token
 
 const main = async () => {
-  console.log('[1] 播放页：选项覆盖层 + 「选项」按钮')
+  console.log('[1] 播放页：贴在视频上的选项卡片 + 「选项」按钮')
   {
     const page = await request(base)
     const html = bodyOf(page)
@@ -86,9 +89,14 @@ const main = async () => {
     check('页面有选项覆盖层 <div class="story" id="story" hidden>', /id="story"/.test(html) && /class="story"/.test(html))
     check('控制条上有「选项」按钮（默认隐藏，有剧情才露出来）',
       /id="storyBtn" hidden/.test(html) && html.includes('互动剧情选项'))
-    check('覆盖层样式就位（浮在画面上，全屏时跟着容器一起进去）',
-      /\.story\{[^}]*position:absolute/.test(html) && /\.story\{[^}]*z-index:5/.test(html),
+    check('卡片贴在画面底部（全屏时跟着容器一起进去）',
+      /\.story\{[^}]*position:absolute/.test(html) && /\.story\{[^}]*bottom:56px/.test(html) &&
+      /\.story\{[^}]*z-index:5/.test(html),
       'z-index 5（高于弹幕 1 / 大播放 2 / 控制条 3 / 弹幕设置 4，低于提示层 6）')
+    check('容器不吃点击（只有卡片能点，画面照常能点暂停）',
+      /\.story\{[^}]*pointer-events:none/.test(html) && /\.story-card\{[^}]*pointer-events:auto/.test(html))
+    check('有加载进度条样式（点完选项显示下载/合成进度）',
+      /\.story-track\{/.test(html) && /\.story-fill\{/.test(html))
     check('页面里没有 emoji（播放页一律用内联 SVG）',
       !/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(html))
     const matched = /<script>([\s\S]*?)<\/script>/.exec(html)
@@ -105,6 +113,15 @@ const main = async () => {
     check('脚本里有分段续播逻辑（换 /segment/<cid> 的 src）',
       scriptText.includes("'/segment/' + choice.cid") && scriptText.includes('function pickStory'),
       'picker')
+    check('点完先用 HEAD 触发下载（不急着换 src，避免黑屏）',
+      scriptText.includes("fetch(API + '/segment/' + choice.cid, { method: 'HEAD' })"))
+    check('轮询 /progress 画进度，ready 之后才换源',
+      scriptText.includes("fetch(API + '/progress?cid=' + cid)") &&
+      scriptText.includes("info.stage === 'ready'") &&
+      scriptText.includes('function switchSegment'))
+    check('快放完（剩 6 秒）就把选项贴上来，放完停在结束画面',
+      scriptText.includes('function maybeShowStory') && scriptText.includes('left <= 6') &&
+      scriptText.includes("addEventListener('timeupdate', maybeShowStory)"))
   }
 
   console.log('[2] GET /story：当前这一段的题目与选项')
@@ -160,7 +177,38 @@ const main = async () => {
       'segment 调用=' + JSON.stringify(segmentCalls))
   }
 
-  console.log('[5] 边界：非法 cid / 没有剧情 / 过期')
+  console.log('[5] GET /progress：点完选项的加载进度')
+  {
+    const before = await request(base + '/progress', undefined, '?cid=5005')
+    const beforeJson = JSON.parse(bodyOf(before) || '{}')
+    check('还没开始时是 idle（页面不用为「没开始」特判 404）',
+      before.status === 200 && beforeJson.stage === 'idle', JSON.stringify(beforeJson))
+
+    const current = await request(base + '/progress', undefined, '?cid=1001')
+    const currentJson = JSON.parse(bodyOf(current) || '{}')
+    check('当前这一段（会话主视频）直接就是 ready',
+      current.status === 200 && currentJson.stage === 'ready' && currentJson.percent === 100,
+      JSON.stringify(currentJson))
+
+    // HEAD 触发下载（不 await）：中途轮询应当看得到「在下载 / 在合成」
+    const running = request(base + '/segment/5005', 'bytes=0-0')
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    const during = JSON.parse(bodyOf(await request(base + '/progress', undefined, '?cid=5005')) || '{}')
+    check('下载过程中能看到阶段与百分比',
+      ['queued', 'video', 'audio', 'merging'].includes(during.stage) && during.percent >= 0 && during.percent <= 100,
+      JSON.stringify(during))
+    await running
+    const after = JSON.parse(bodyOf(await request(base + '/progress', undefined, '?cid=5005')) || '{}')
+    check('下完之后变成 ready（页面据此换源）',
+      after.stage === 'ready' && after.percent === 100, JSON.stringify(after))
+
+    const again = JSON.parse(bodyOf(await request(base + '/progress', undefined, '?cid=5005')) || '{}')
+    check('已经下好的分段直接回 ready（不用等一次往返）', again.stage === 'ready', JSON.stringify(again))
+    const badCid = await request(base + '/progress', undefined, '?cid=abc')
+    check('非法 cid 的进度查询 → 404', badCid.status === 404, 'status=' + badCid.status)
+  }
+
+  console.log('[6] 边界：非法 cid / 没有剧情 / 过期')
   {
     const bad = await request(base + '/segment/abc')
     const zero = await request(base + '/segment/0')

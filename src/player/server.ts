@@ -42,7 +42,8 @@ import {
   resolvePlayerCover,
   resolvePlayerMerged,
   resolvePlayerSegment,
-  resolvePlayerVideo
+  resolvePlayerVideo,
+  type SegmentReporter
 } from './store'
 
 /** 一次请求（只取用得到的字段） */
@@ -340,6 +341,60 @@ async function storyResponse (token: string, query: URLSearchParams): Promise<Pl
 /** 正在下载的分段任务：同一条会话 + 同一个 cid 只下一次，用户连点也不会把带宽打满 */
 const segmentJobs = new Map<string, Promise<{ filepath: string } | null>>()
 
+/**
+ * 分段准备的进度表：`token:cid` → 现在在哪一步、下了多少。
+ *
+ * 播放页点完选项会轮询 `/progress?cid=…` 把它显示成进度条 ——
+ * 一段视频要「取流 → 下画面 → 下声音 → ffmpeg 合成」，好几秒起步，
+ * 这段时间没有任何反馈的话用户面对的就是一块黑屏（体验非常割裂）。
+ */
+interface SegmentProgressEntry {
+  cid: number
+  stage: SegmentStage | 'idle'
+  bytes: number
+  total: number
+  at: number
+}
+const segmentProgress = new Map<string, SegmentProgressEntry>()
+/** 进度条目保留多久：够页面轮询到就行，别当成内存垃圾堆 */
+const SEGMENT_PROGRESS_TTL_MS = 10 * 60 * 1000
+
+const progressKey = (token: string, cid: number): string => token + ':' + cid
+
+function setSegmentProgress (token: string, cid: number, stage: SegmentStage, bytes = 0, total = 0): void {
+  const now = Date.now()
+  for (const [key, item] of segmentProgress) {
+    if (now - item.at > SEGMENT_PROGRESS_TTL_MS) segmentProgress.delete(key)
+  }
+  segmentProgress.set(progressKey(token, cid), { cid, stage, bytes, total, at: now })
+}
+
+/**
+ * 分段进度查询（播放页轮询它）。
+ *
+ * 已经下好的分段直接回 `ready`（页面据此立刻换源，不用等一次往返）；
+ * 没记录过就回 `idle`（页面不用为「还没开始」特判 404）。
+ */
+function progressResponse (token: string, query: URLSearchParams): PlayerHttpResponse {
+  const cid = Number(query.get('cid'))
+  const session = getPlayerSession(token)
+  if (!session?.story || !isValidStoryCid(cid)) return notFound(false)
+  const cached = resolvePlayerSegment(token, cid) ??
+    (Number(session.story.cid) === Number(cid) ? resolvePlayerVideo(token) : null)
+  /** 文件已经在会话目录里了：一律按「就绪 + 真实体积」回，页面立刻换源 */
+  if (cached) {
+    return jsonResponse({ cid, stage: 'ready', bytes: cached.size, total: cached.size, percent: 100 })
+  }
+  const item = segmentProgress.get(progressKey(token, cid))
+  return jsonResponse({
+    cid,
+    stage: item?.stage ?? 'idle',
+    bytes: item?.bytes ?? 0,
+    total: item?.total ?? 0,
+    percent: item && item.total > 0 ? Math.min(100, Math.floor((item.bytes / item.total) * 100)) : 0
+  })
+}
+
 function segmentJob (token: string, cid: number, run: () => Promise<{ filepath: string } | null>): Promise<{ filepath: string } | null> {
   const key = token + ':' + cid
   const running = segmentJobs.get(key)
@@ -375,7 +430,19 @@ async function segmentResponse (
   if (!source?.segment) return notFound(false)
   const started = Date.now()
   logger.mark('[在线播放] 正在准备互动分段 cid=' + cid + '（' + token + '）')
-  const prepared = await segmentJob(token, cid, () => source.segment!(cid))
+  setSegmentProgress(token, cid, 'queued')
+  const prepared = await segmentJob(token, cid, async () => {
+    /** 把平台侧报的进度记下来，播放页轮询 /progress 就能画出进度条 */
+    const report: SegmentReporter = (info) => setSegmentProgress(token, cid, info.stage, info.bytes, info.total)
+    try {
+      const result = await source.segment!(cid, report)
+      setSegmentProgress(token, cid, result ? 'ready' : 'failed')
+      return result
+    } catch (error) {
+      setSegmentProgress(token, cid, 'failed')
+      throw error
+    }
+  })
   /**
    * 并发同一个分段时两个请求等的是同一个任务，**文件只该被搬一次**：
    * 先看一眼缓存（另一个请求可能已经搬进去了），没有再自己搬。
@@ -441,6 +508,8 @@ export async function handlePlayerRequest (request: PlayerHttpRequest): Promise<
   // 互动视频：当前剧情（题目 + 选项）与分段视频
   if (action === 'story') return storyResponse(token, query)
   if (action === 'segment') return segmentResponse(token, Number(sub), request.range, method === 'HEAD', wantDownload)
+  // 互动视频：分段准备的进度（播放页点完选项轮询它显示加载进度）
+  if (action === 'progress') return progressResponse(token, query)
   return notFound(false)
 }
 

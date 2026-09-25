@@ -166,11 +166,30 @@ export interface PlayerStoryNode {
  * 插件重启后这里就是空的 —— 播放页会退化成普通播放页（视频照常能看），这是有意的降级：
  * 宁可没有选项，也不能给出一排点了没反应的按钮。
  */
+/** 分段准备的进度上报：stage 是阶段名（见 SegmentStage），bytes/total 是当前这一步的字节数 */
+export type SegmentReporter = (info: { stage: SegmentStage; bytes: number; total: number }) => void
+
+/**
+ * 分段准备的阶段（播放页按它显示不同的文案）：
+ * - `queued`     排队中（同一条会话同一个分段只会下一次，连点的人会看到这个）
+ * - `video`      正在下画面
+ * - `audio`      正在下声音
+ * - `merging`    正在合成（ffmpeg -c copy，通常一两秒）
+ * - `ready`      好了，可以换源播放
+ * - `failed`     失败（下载不动 / 合成失败）
+ */
+export type SegmentStage = 'queued' | 'video' | 'audio' | 'merging' | 'ready' | 'failed'
+
 export interface PlayerStorySource {
   /** 取某个节点：不带 edgeId = 这一段自己的题目；带 = 从 cid 走这条边之后落地的节点 */
   node?: (params: { cid: number; edgeId?: number }) => Promise<PlayerStoryNode | null>
-  /** 按需准备某一段的视频（下载 + 合成），返回本地文件路径 */
-  segment?: (cid: number) => Promise<{ filepath: string } | null>
+  /**
+   * 按需准备某一段的视频（下载 + 合成），返回本地文件路径。
+   *
+   * `report` 用来把「下载了多少 / 在干嘛」交出去 —— 播放页点完选项要显示加载进度，
+   * 而它只拿得到这里报的数（页面读不到服务器的终端进度条）。
+   */
+  segment?: (cid: number, report?: SegmentReporter) => Promise<{ filepath: string } | null>
 }
 
 /** 把可能为空的数字洗干净（拿不到就 undefined，别在页面上显示 NaN/undefined） */
