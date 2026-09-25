@@ -2252,7 +2252,17 @@ export const buildPlayerStorySource = (params: {
           cid
         })
         /** 选流：和主流程同一套（每个清晰度只留一条 + 按配置的画质挑一路） */
-        const simplify = (playUrlData.data.data.dash.video as any[]).filter((item, index, self) =>
+        const dashStreams = playUrlData?.data?.data?.dash?.video
+        if (!Array.isArray(dashStreams) || !dashStreams.length) {
+          /**
+           * 没有 dash 流基本只有一个原因：这次拿的是「免登录 html5」那套响应（只有 durl）。
+           * 说清楚，不然只剩一句「没拿到文件」，排查时完全看不出方向。
+           */
+          logger.warn('[互动视频] 这一段的 playurl 里没有 dash 流（cid=' + cid
+            + '），播放页的分段需要登录态（Cookie）；本次解析 islogin=' + String(islogin))
+          return null
+        }
+        const simplify = (dashStreams as any[]).filter((item, index, self) =>
           self.findIndex((row: { id: number }) => row.id === item.id) === index
         )
         playUrlData.data.data.dash.video = simplify

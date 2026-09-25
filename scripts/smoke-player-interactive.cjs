@@ -126,15 +126,19 @@ const main = async () => {
     check('脚本里有分段续播逻辑（换 /segment/<cid> 的 src）',
       scriptText.includes("'/segment/' + choice.cid") && scriptText.includes('function pickStory'),
       'picker')
-    check('点完先用 HEAD 触发下载（不急着换 src，避免黑屏）',
-      scriptText.includes("fetch(API + '/segment/' + choice.cid, { method: 'HEAD' })"))
-    check('轮询 /progress 画进度，ready 之后才换源',
-      scriptText.includes("fetch(API + '/progress?cid=' + cid)") &&
-      scriptText.includes("info.stage === 'ready'") &&
-      scriptText.includes('function switchSegment'))
+    check('点完**直接换源并重新播放**（用户要求）',
+      /function pickStory[\s\S]{0,700}?video\.setAttribute\('src', API \+ '\/segment\/' \+ choice\.cid\)/.test(scriptText) &&
+      /function pickStory[\s\S]{0,900}?video\.play\(\)/.test(scriptText))
     check('换段时音轨一起换（画面 muted、声音走 <audio>，不在服务器合成）',
-      scriptText.includes("audioTrack.setAttribute('src', API + '/segment/' + cid + '?audio=1')") &&
+      scriptText.includes("audioTrack.setAttribute('src', API + '/segment/' + choice.cid + '?audio=1')") &&
       html.includes('id="audioTrack"'))
+    check('等待期间轮询 /progress 画进度，失败时把服务端给的原因写出来',
+      scriptText.includes("fetch(API + '/progress?cid=' + cid)") &&
+      scriptText.includes('function pollProgress') &&
+      scriptText.includes("info.reason"))
+    check('下好开播后自动收起进度卡片（loadeddata / canplay）',
+      scriptText.includes('function settleStoryWait') &&
+      scriptText.includes("addEventListener('loadeddata', settleStoryWait)"))
     check('剧情一到就把选项贴出来（进页面就能看到能点的按钮）',
       scriptText.includes('if (!storyPending && !storyShown) renderStory()'))
     check('快放完（剩 6 秒）就把选项贴上来，放完停在结束画面',
@@ -236,6 +240,29 @@ const main = async () => {
     check('已经下好的分段直接回 ready（不用等一次往返）', again.stage === 'ready', JSON.stringify(again))
     const badCid = await request(base + '/progress', undefined, '?cid=abc')
     check('非法 cid 的进度查询 → 404', badCid.status === 404, 'status=' + badCid.status)
+  }
+
+  console.log('[5b] 分段准备失败：进度接口把原因带给页面')
+  {
+    const broken = store.registerPlayerSession({
+      videoPath: writeFake('broken.mp4', 1024, 5),
+      title: '坏源',
+      platform: 'bilibili',
+      danmaku: [],
+      story: {
+        node: { cid: 7007, question: '这一段没得选', isLeaf: false, choices: [{ label: 'A', text: '继续', cid: 7008, edgeId: 31 }] },
+        source: {
+          node: async () => null,
+          segment: async () => { throw new Error('测试注入：直链拿不到') }
+        }
+      }
+    })
+    const brokenBase = '/kkk/player/' + broken.token
+    const failed = await request(brokenBase + '/segment/7008')
+    check('分段准备抛异常时 → 404', failed.status === 404, 'status=' + failed.status)
+    const info = JSON.parse(bodyOf(await request(brokenBase + '/progress', undefined, '?cid=7008')) || '{}')
+    check('进度接口回 failed 且带上原因（页面据此显示给人看）',
+      info.stage === 'failed' && String(info.reason || '').includes('直链拿不到'), JSON.stringify(info))
   }
 
   console.log('[6] 边界：非法 cid / 没有剧情 / 过期')

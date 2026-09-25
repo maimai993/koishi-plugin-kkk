@@ -362,6 +362,8 @@ interface SegmentProgressEntry {
   bytes: number
   total: number
   at: number
+  /** 失败原因（页面直接把这句话显示给用户，省得用户只能看到一个「没准备好」） */
+  reason?: string
 }
 const segmentProgress = new Map<string, SegmentProgressEntry>()
 /** 进度条目保留多久：够页面轮询到就行，别当成内存垃圾堆 */
@@ -369,12 +371,19 @@ const SEGMENT_PROGRESS_TTL_MS = 10 * 60 * 1000
 
 const progressKey = (token: string, cid: number): string => token + ':' + cid
 
-function setSegmentProgress (token: string, cid: number, stage: SegmentStage, bytes = 0, total = 0): void {
+function setSegmentProgress (
+  token: string,
+  cid: number,
+  stage: SegmentStage,
+  bytes = 0,
+  total = 0,
+  reason?: string
+): void {
   const now = Date.now()
   for (const [key, item] of segmentProgress) {
     if (now - item.at > SEGMENT_PROGRESS_TTL_MS) segmentProgress.delete(key)
   }
-  segmentProgress.set(progressKey(token, cid), { cid, stage, bytes, total, at: now })
+  segmentProgress.set(progressKey(token, cid), { cid, stage, bytes, total, at: now, reason })
 }
 
 /**
@@ -399,7 +408,9 @@ function progressResponse (token: string, query: URLSearchParams): PlayerHttpRes
     stage: item?.stage ?? 'idle',
     bytes: item?.bytes ?? 0,
     total: item?.total ?? 0,
-    percent: item && item.total > 0 ? Math.min(100, Math.floor((item.bytes / item.total) * 100)) : 0
+    percent: item && item.total > 0 ? Math.min(100, Math.floor((item.bytes / item.total) * 100)) : 0,
+    /** 失败时把原因带上：页面直接显示，用户才知道到底是「下载失败」还是「没有这一段的直链」 */
+    reason: item?.reason
   })
 }
 
@@ -449,11 +460,21 @@ async function segmentResponse (
     const report: SegmentReporter = (info) => setSegmentProgress(token, cid, info.stage, info.bytes, info.total)
     try {
       const result = await source.segment!(cid, report)
-      setSegmentProgress(token, cid, result ? 'ready' : 'failed')
+      if (!result) {
+        logger.warn('[在线播放] 互动分段准备失败（平台侧没拿到文件）cid=' + cid + '，详情见上面的日志')
+        setSegmentProgress(token, cid, 'failed', 0, 0, '平台侧没拿到这一段（详见机器人控制台日志）')
+      } else {
+        setSegmentProgress(token, cid, 'ready')
+      }
       return result
-    } catch (error) {
-      setSegmentProgress(token, cid, 'failed')
-      throw error
+    } catch (error: any) {
+      /**
+       * 这里**不往上抛**：抛出去路由就变成 500（页面只会看到「媒体加载失败」），
+       * 而我们要的是「路由回 404 + 进度接口把原因带给页面」—— 用户才知道到底卡在哪一步。
+       */
+      logger.warn('[在线播放] 互动分段准备异常 cid=' + cid + '：' + String(error?.message ?? error))
+      setSegmentProgress(token, cid, 'failed', 0, 0, String(error?.message ?? error).slice(0, 120) || '准备这一段时出错')
+      return null
     }
   })
   /**
