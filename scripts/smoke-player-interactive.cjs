@@ -139,11 +139,15 @@ const main = async () => {
     check('下好开播后自动收起进度卡片（loadeddata / canplay）',
       scriptText.includes('function settleStoryWait') &&
       scriptText.includes("addEventListener('loadeddata', settleStoryWait)"))
-    check('剧情一到就把选项贴出来（进页面就能看到能点的按钮）',
-      scriptText.includes('if (!storyPending && !storyShown) renderStory()'))
-    check('快放完（剩 6 秒）就把选项贴上来，放完停在结束画面',
-      scriptText.includes('function maybeShowStory') && scriptText.includes('left <= 6') &&
-      scriptText.includes("addEventListener('timeupdate', maybeShowStory)"))
+    check('**播放完成**才显示选项（加载完不弹、播到一半也不弹）',
+      scriptText.includes('function maybeShowStory') &&
+      scriptText.includes('if (!video.ended) return') &&
+      scriptText.includes("addEventListener('ended', maybeShowStory)") &&
+      !scriptText.includes('left <= 6'))
+    check('分段失败时压过页面原来那句「链接已过期」，并给一个「重试这一段」按钮',
+      scriptText.includes("if (!storyNode && !storyPending) return") &&
+      scriptText.includes("label.textContent = '重试这一段'") &&
+      scriptText.includes('storyLastReason'))
   }
 
   console.log('[2] GET /story：当前这一段的题目与选项')
