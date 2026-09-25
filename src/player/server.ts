@@ -467,12 +467,23 @@ async function segmentResponse (
   const prepared = await segmentJob(token, cid, async () => {
     /** 把平台侧报的进度记下来，播放页轮询 /progress 就能画出进度条 */
     const report: SegmentReporter = (info) => setSegmentProgress(token, cid, info.stage, info.bytes, info.total)
+    /** 立刻标成「正在下载」：'queued' 只在极短的一瞬间有意义，停在它上面看着像卡死 */
+    report({ stage: 'video', bytes: 0, total: 0 })
     try {
       const result = await source.segment!(cid, report)
       if (!result) {
         logger.warn('[在线播放] 互动分段准备失败（平台侧没拿到文件）cid=' + cid + '，详情见上面的日志')
         setSegmentProgress(token, cid, 'failed', 0, 0, '平台侧没拿到这一段（详见机器人控制台日志）')
       } else {
+        /**
+         * **下载完立刻把两份都搬进会话目录**，而不是等各自的请求来搬。
+         *
+         * 画面和音轨是两个元素分别发起的请求：各自去搬会出现
+         * 「一个正在改名、另一个刚好 stat 不到 → 404」（音轨就是这么丢的），或者同一个文件被搬两次。
+         * 搬完再置 ready，所有等待者都直接命中缓存。
+         */
+        if (result.filepath) adoptPlayerSegment(token, cid, result.filepath, 'video')
+        if (result.audioPath) adoptPlayerSegment(token, cid, result.audioPath, 'audio')
         setSegmentProgress(token, cid, 'ready')
       }
       return result
@@ -487,22 +498,19 @@ async function segmentResponse (
     }
   })
   /**
-   * 并发同一个分段时两个请求等的是同一个任务，**文件只该被搬一次**：
-   * 先看一眼缓存（另一个请求可能已经搬进去了），没有再自己搬。
-   * 画面和音轨各搬各的（两个元素会分别来取）。
+   * 文件在任务里已经搬好了（见上面的 adopt 说明），这里直接取。
+   * 兜底再搬一次：极少数情况下（比如刚搬完就被别的东西删了）源文件其实还在。
    */
   const sourcePath = wantAudio ? prepared?.audioPath : prepared?.filepath
-  /**
-   * **一次把两份都搬进会话目录**（画面 + 音轨）。
-   *
-   * 页面上是两个元素分别来取文件的：只搬自己那份的话，另一个元素来的时候
-   * 会发现缓存里没有、于是**把整段又下一次**（同一条会话、同一个 cid 白下两遍）。
-   */
-  if (prepared?.filepath) adoptPlayerSegment(token, cid, prepared.filepath, 'video')
-  if (prepared?.audioPath) adoptPlayerSegment(token, cid, prepared.audioPath, 'audio')
   const ready = resolvePlayerSegment(token, cid, kind) ??
     (sourcePath ? adoptPlayerSegment(token, cid, sourcePath, kind) : null)
-  if (!ready) return notFound(false)
+  if (!ready) {
+    /** 任务里已经写过更具体的原因（例如平台侧抛出来的错），别拿一句笼统的话盖掉 */
+    if (segmentProgress.get(progressKey(token, cid))?.stage !== 'failed') {
+      setSegmentProgress(token, cid, 'failed', 0, 0, wantAudio ? '这一段的音轨没准备好' : '这一段的画面没准备好')
+    }
+    return notFound(false)
+  }
   logger.mark('[在线播放] 互动分段' + (wantAudio ? '音轨' : '画面') + '准备完成 cid=' + cid
     + '（' + (Date.now() - started) + 'ms）')
   return fileResponse(token, ready, type, range, head, download, ext)

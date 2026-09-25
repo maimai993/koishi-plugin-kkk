@@ -1619,7 +1619,8 @@ export class Bilibili extends Base {
     playUrlData,
     danmakuList = [],
     onProgress,
-    keepAudioSeparate = false
+    keepAudioSeparate = false,
+    nameSuffix = ''
   }: {
     infoData?: BilibiliBangumiInfoResponse | BilibiliVideoInfoResponse
     playUrlData: BilibiliVideoStreamResponse | BiliBiliVideoPlayurlNoLogin | BilibiliBangumiStreamResponse
@@ -1632,12 +1633,34 @@ export class Bilibili extends Base {
      */
     keepAudioSeparate?: boolean
     /**
+     * 临时文件名后缀（互动分段传 `_<cid>`）。
+     *
+     * 不区分的话，**同一稿件的多段会抢同一个临时文件名**（`Bil_V_<bvid>.m4s`），
+     * 并发下分段时互相覆盖（还会顺手删掉对方的文件）—— 表现就是「下完了但文件是坏的」。
+     */
+    nameSuffix?: string
+    /**
      * 过程上报（可选）：在线播放页的互动视频点完一段要显示「加载进度」，
      * 页面读不到服务器的终端进度条，只能由这里把数字交出去。
      * @param stage 'video' 下画面 / 'audio' 下声音 / 'merging' 合成中
      */
     onProgress?: (bytes: number, total: number, stage: 'video' | 'audio' | 'merging') => void
   }) {
+    /**
+     * 临时文件名里用的那段标识（稿件 bvid / 番剧 season_id），**统一在这里取 + 带上后缀**。
+     *
+     * amagi 的响应有两种形状（`data.bvid` 与 `data.data.bvid`），只读一层偶尔会拿到 undefined
+     * —— 现象是一堆 `Bil_V_undefined.m4s`：日志里看不出是哪一段，并发时还会互相覆盖。
+     */
+    const nameKey = (() => {
+      const one: any = (infoData as any)?.data
+      const two: any = one?.data
+      const raw = this.Type === 'one_video'
+        ? (one?.bvid ?? two?.bvid)
+        : (one?.season_id ?? two?.season_id)
+      return String(raw ?? 'unknown') + nameSuffix
+    })()
+
     /** 获取视频 => FFmpeg合成 */
     logger.debug('是否登录:', this.islogin)
     // 留一份给「发送」那一步：在线播放要在那里登记播放会话（见 sendPreparedVideo）
@@ -1671,7 +1694,7 @@ export class Bilibili extends Base {
         if (videoUrls.length === 0) throw new Error('没有拿到视频流直链（playurl 返回里没有 base_url）')
 
         const bmp4Raw = await downloadFile(videoUrls[0], {
-          title: `Bil_V_${this.Type === 'one_video' ? infoData && infoData.data.bvid : infoData && infoData.result.season_id}.m4s`,
+          title: `Bil_V_${nameKey}.m4s`,
           headers: downloadHeaders,
           backupUrls: videoUrls.slice(1),
           onProgress: onProgress ? (bytes, total) => onProgress(bytes, total, 'video') : undefined
@@ -1680,7 +1703,7 @@ export class Bilibili extends Base {
         // 修复 m4s 文件为标准 MP4
         const videoPath =
           Common.tempDri.video +
-          `Bil_V_${this.Type === 'one_video' ? infoData && infoData.data.bvid : infoData && infoData.result.season_id}.mp4`
+          `Bil_V_${nameKey}.mp4`
         const videoFixed = await fixM4sFile(bmp4Raw.filepath, videoPath)
         if (!videoFixed) {
           // 抛出去而不是静默 return：这样会被 steps 记成「下载视频」失败，最后统一报错
@@ -1702,7 +1725,7 @@ export class Bilibili extends Base {
         let bmp3: { filepath: string; totalBytes: number } | undefined
         if (audioUrl) {
           const bmp3Raw = await downloadFile(audioUrl, {
-            title: `Bil_A_${this.Type === 'one_video' ? infoData && infoData.data.bvid : infoData && infoData.result.season_id}.m4s`,
+            title: `Bil_A_${nameKey}.m4s`,
             headers: downloadHeaders,
             backupUrls: audioUrls.slice(1),
             onProgress: onProgress ? (bytes, total) => onProgress(bytes, total, 'audio') : undefined
@@ -1711,7 +1734,7 @@ export class Bilibili extends Base {
           // 修复音频 m4s 文件为 m4a（AAC 音频不能直接转为 MP3 容器）
           const audioPath =
             Common.tempDri.video +
-            `Bil_A_${this.Type === 'one_video' ? infoData && infoData.data.bvid : infoData && infoData.result.season_id}.m4a`
+            `Bil_A_${nameKey}.m4a`
           const audioFixed = await fixM4sFile(bmp3Raw.filepath, audioPath)
           if (!audioFixed) {
             throw new Error('音频流修复失败（m4s → m4a）')
@@ -1728,7 +1751,7 @@ export class Bilibili extends Base {
           const hasDanmaku = shouldBurnDanmaku(this.forceBurnDanmaku || Config.bilibili.burnDanmaku) && danmakuList.length > 0
           const resultPath =
             Common.tempDri.video +
-            `Bil_Result_${this.Type === 'one_video' ? infoData && infoData.data.bvid : infoData && infoData.result.season_id}.mp4`
+            `Bil_Result_${nameKey}.mp4`
           let success: boolean
           /** 最终要上传的文件：合成/烧录的产物，或没有音频流时直接用的视频流 */
           let sourcePath = bmp4.filepath
@@ -2266,8 +2289,16 @@ export const buildPlayerStorySource = (params: {
       story.downloadfilename = 'Bil_Story_' + cid + '_' + Date.now()
       try {
         const infoData = await story.amagi.bilibili.fetcher.fetchVideoInfo({ bvid })
+        /**
+         * amagi 的 info 响应有 `data.xxx` 与 `data.data.xxx` 两种形状，代码里两种写法都有过。
+         * 这里补一份到外层：`prepareVideo` 取的是 `infoData.data.bvid`（文件名用它），
+         * 不然会出现一堆 `Bil_V_undefined.m4s`。
+         */
+        const infoOuter: any = (infoData as any)?.data ?? {}
+        const infoInner: any = infoOuter?.data ?? {}
+        if (!infoOuter.bvid && infoInner.bvid) infoOuter.bvid = infoInner.bvid
         const playUrlData = await story.amagi.bilibili.fetcher.fetchVideoStreamUrl({
-          avid: infoData.data.data.aid,
+          avid: infoInner.aid ?? infoOuter.aid,
           cid
         })
         /**
@@ -2318,6 +2349,8 @@ export const buildPlayerStorySource = (params: {
           danmakuList: [],
           /** 画面和声音分开存（不跑 ffmpeg）：播放页换段时两个 src 一起换，点完少等一两秒 */
           keepAudioSeparate: true,
+          /** 临时文件名按 cid 区分：并发下两段时不会互相覆盖（也不会有 Bil_V_undefined.m4s 这种） */
+          nameSuffix: '_' + cid,
           onProgress: report
             ? (bytes, total, stage) => report({ stage, bytes, total })
             : undefined
