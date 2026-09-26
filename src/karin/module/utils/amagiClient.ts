@@ -1,3 +1,16 @@
+/**
+ * 解析库（`@ikenxuan/amagi`）的版本要求：**必须 ≥ 7**（当前钉在 7.0.0-beta.5）。
+ *
+ * 线上故障（用户反馈「抖音解析改炸了，同一个 cookie 上游代码能正常解析」）：
+ * 抖音现在要求 web 接口带上 `uifid` 与 `x-secsdk-web-signature`（Argus 风控 SDK 的签名），
+ * 而 npm 上的 **latest 6.6.0 完全没有这套东西**，于是每个抖音接口都被拦成
+ * `403 Blocked by ArgusSecurityPlugin Uifid Not Found`。amagi 把这个响应包成
+ * `{code:500,message:"抖音数据获取失败"}`，插件再翻译成一句「Cookie 失效 / 被风控」——
+ * 用户怎么换 cookie 都没用。
+ *
+ * secsdk / uifid 的实现只存在于 7.x（上游 karin-plugin-kkk 也是把这份新 amagi 打进包里的），
+ * 所以这里**故意钉在 beta 上**：latest 反而是坏的。升级解析库时请一并确认抖音能解析。
+ */
 import Client, {
   type AmagiError as AmagiErrorContract,
   type AmagiFailure,
@@ -135,36 +148,45 @@ const isFailureEnvelope = (value: unknown): value is AmagiFailure => {
 const isThenable = (value: unknown): value is PromiseLike<unknown> =>
   !!value && (typeof value === 'object' || typeof value === 'function') && typeof (value as PromiseLike<unknown>).then === 'function'
 
-/**
- * 递归代理一个 fetcher 对象，把失败信封转成 `throw AmagiError`。返回类型与入参同形 ——
- * 「只保留成功分支」是**类型层**由 {@link ThrowingClient} 声明的，这里只管运行时行为。
- */
-const throwOnFailure = <T extends object>(target: T): T =>
-  new Proxy(target, {
-    get(obj: any, prop: string | symbol) {
-      const value = obj[prop]
+const throwOnFailure = <T extends object>(target: T): T => {
+  /**
+   * **摊平成普通对象，而不是再套一层 Proxy。**
+   *
+   * amagi 自己的 fetcher 就是「带 `ownKeys` / `getOwnPropertyDescriptor` trap、方法按需物化」
+   * 的 Proxy。我们再包一层 Proxy 的话，外面只要做一次 `Object.getOwnPropertyDescriptor`
+   * （打桩时最常见的 `client.douyin.fetcher.parseWork = fn` 就会走到）就会进到里层 trap，
+   * 触发 V8 的 Proxy 不变量检查并抛：
+   *
+   *     TypeError: 'getOwnPropertyDescriptor' on proxy: trap returned descriptor for property
+   *     'parseWork' that is incompatible with the existing property in the proxy target
+   *
+   * 结果是所有「用打桩跑一遍链路」的冒烟集体炸掉（2026-09-26 升级 amagi 7 时踩到）。
+   * 摊平成普通对象既没有这个坑，也顺手把每个方法的包装**缓存**了一次，调用少一层代理。
+   */
+  const wrapped: Record<string | symbol, unknown> = {}
+  for (const key of Reflect.ownKeys(target)) {
+    const value = (target as any)[key]
 
-      if (typeof value === 'function') {
-        return (...args: unknown[]) => {
-          const returned = value.apply(obj, args)
-          // 同步方法原样放行：包成 async 会把返回值套一层 Promise，破坏语义
-          if (!isThenable(returned)) return returned
-          return returned.then((result: unknown) => {
-            if (isFailureEnvelope(result)) throw new AmagiError(result)
-            return result
-          })
-        }
+    if (typeof value === 'function') {
+      const fn = value.bind(target)
+      wrapped[key] = (...args: unknown[]) => {
+        const returned = fn(...args)
+        // 同步方法原样放行：包成 async 会把返回值套一层 Promise，破坏语义
+        if (!isThenable(returned)) return returned
+        return returned.then((result: unknown) => {
+          if (isFailureEnvelope(result)) throw new AmagiError(result)
+          return result
+        })
       }
-
-      if (value && typeof value === 'object' && !Array.isArray(value)) {
-        return throwOnFailure(value)
-      }
-
-      return value
+      continue
     }
-  })
 
-/** 解析库基类 */
+    wrapped[key] = value && typeof value === 'object' && !Array.isArray(value)
+      ? throwOnFailure(value)
+      : value
+  }
+  return wrapped as T
+}
 export class AmagiBase {
   /**
    * 原始 v7 客户端。

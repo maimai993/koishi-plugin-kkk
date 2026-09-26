@@ -130,6 +130,16 @@ export class DouYin extends Base {
           const code = raw.code ?? raw.data?.code
           const message = raw.message ?? raw.msg ?? raw.data?.message ?? raw.data?.msg
           logger.error('[抖音] 接口没有返回作品详情: ' + JSON.stringify({ code, message, 顶层键: Object.keys(raw) }).slice(0, 300))
+          /**
+           * amagi 自己的 500 信封 = 抖音那边没给数据。最常见的成因已经**不是** cookie，
+           * 而是解析库版本太旧（新版抖音要 uifid + secsdk 签名，旧库会被 Argus 拦成空响应）。
+           * 日志里点出来，免得下一次又照着「换个 cookie」排查半天。
+           */
+          if (Number(code) === 500 && /抖音数据获取失败/.test(String(message ?? ''))) {
+            logger.mark('[抖音] 这多半是解析库版本过旧：新版抖音要求 uifid + x-secsdk-web-signature，'
+              + '旧版会被 Argus 风控拦成 403（Blocked by ArgusSecurityPlugin Uifid Not Found）。'
+              + '本插件依赖 @ikenxuan/amagi 需要 7.x（见 package.json）')
+          }
           throw new Error('抖音没有返回这条作品的数据'
             + (code !== undefined ? '（错误码 ' + String(code) + (message ? '：' + String(message) : '') + '）' : '')
             + '，常见原因：Cookie 失效、被风控，或者这条链接已经失效 / 作品已删除。')
