@@ -20,6 +20,7 @@ import { isSemverGreater } from '../karin/module/utils/semver'
 import { resolveAdapterInfo } from './adapter-info'
 import { logger } from './logger'
 import { COLLECTED_MESSAGE_ID, collectForward } from './forward-collect'
+import { imagesToMarkdown } from './imageMarkdown'
 import { UnconfirmedSendError, classifySendFailure, decorateSendError, describeSendFailure, isPassiveLimitFailure } from './sendError'
 import { commandQueue, eventQueue, getRuntime, karinPathBase, taskQueue, tryGetRuntime } from './runtime'
 import { segment } from './segment'
@@ -250,13 +251,15 @@ export class KkkBot {
     }
 
     // 退化路径：整条发一次；失败再逐个元素发，尽量把内容送出去
+    /** 退化发送 = 直接发消息，所以图片同样要改走 markdown（见 compat/imageMarkdown） */
+    const fallback = await imagesToMarkdown(payload.elements, platformOfBot(this.bot))
     try {
-      const ids = await this.bot.sendMessage(channelId, payload.elements as any)
+      const ids = await this.bot.sendMessage(channelId, fallback as any)
       return { messageId: ids[ids.length - 1] ?? '' }
     } catch (error) {
       logger.warn('整条发送失败，改为逐个元素发送: ' + String((error as any)?.message ?? error))
       let lastId = ''
-      for (const item of payload.elements) {
+      for (const item of fallback) {
         const ids = await this.bot.sendMessage(channelId, [item] as any)
         lastId = ids[ids.length - 1] ?? lastId
       }
@@ -351,10 +354,13 @@ export class KkkBot {
 
   /** 发送消息（karin 的 bot.sendMsg） */
   async sendMsg (contact: Contact | string, content: any, _options?: any): Promise<{ messageId: string }> {
+    const elements = normalizeContent(content)
     /** 解析结果合并转发：正在收集就攒起来（见 compat/forward-collect） */
-    if (collectForward(peerOf(contact), content)) return { messageId: COLLECTED_MESSAGE_ID }
+    if (collectForward(peerOf(contact), elements)) return { messageId: COLLECTED_MESSAGE_ID }
     const channelId = typeof contact === 'string' ? contact : contact.peer
-    const ids = await this.bot.sendMessage(channelId, normalizeContent(content) as any)
+    /** 图片统一改走 markdown（见 compat/imageMarkdown） */
+    const outgoing = await imagesToMarkdown(elements, platformOfBot(this.bot))
+    const ids = await this.bot.sendMessage(channelId, outgoing as any)
     // 同 reply/uploadFile：**没拿到消息 ID 就是没发出去**，别当成功返回
     const id = ids?.[ids.length - 1] ?? ''
     if (!id) {
@@ -480,13 +486,22 @@ export class Message {
    * 这时自动改用**主动消息**（不带引用，直接往频道里发），失败才把原错误抛出去。
    */
   async reply (content: any, _options?: any): Promise<{ messageId: string; rawData?: any }> {
-    const elements = normalizeContent(content)
+    const raw = normalizeContent(content)
 
     /**
      * 解析结果合并转发：正在收集就攒起来，等解析结束发一条转发（见 compat/forward-collect）。
      * 回一个假的消息 ID：调用方普遍只看「有没有拿到 ID」（例如 uploadFile 判断发送成没成功）。
      */
-    if (collectForward(this.contact?.peer ?? '', elements)) return { messageId: COLLECTED_MESSAGE_ID }
+    if (collectForward(this.contact?.peer ?? '', raw)) return { messageId: COLLECTED_MESSAGE_ID }
+
+    /**
+     * **图片统一改走 markdown**（上传拿公网地址 + 写死 `#宽px #高px`），见 compat/imageMarkdown。
+     *
+     * 放在这里是因为它是**所有回复的唯一出口** —— 业务代码一律 `e.reply(...)`，
+     * 不用一处处改业务代码。转换不成功会退回原来的图片段（绝不把图弄丢）。
+     * 上面的合并转发分支已经返回了，所以转发节点里仍然是普通图片段。
+     */
+    const elements = await imagesToMarkdown(raw, platformOfMessage(this))
 
     /**
      * 没拿到消息 ID 就是**没发出去**（对齐 qq-chat 的判法）。
@@ -583,6 +598,21 @@ function normalizeContent (content: any): any[] {
 /** 取出一个 contact 对应的频道 id（字符串直接当 id） */
 function peerOf (contact: Contact | string): string {
   return typeof contact === 'string' ? contact : String((contact as Contact)?.peer ?? '')
+}
+
+/**
+ * 适配器平台名。
+ *
+ * 发送出口要用它判断「这个平台认不认 markdown 图片」（见 compat/imageMarkdown）：
+ * KkkBot 包装上直接转发真实 Bot 的 platform，传 KkkBot 或裸 Bot 都能取到。
+ */
+function platformOfBot (bot: any): string {
+  return String(bot?.platform ?? bot?.bot?.platform ?? '')
+}
+
+/** 同上，从消息事件取（会话上就带 platform，拿不到再问 bot） */
+function platformOfMessage (message: Message): string {
+  return String(message.session?.platform ?? platformOfBot(message.bot))
 }
 
 /**
@@ -718,18 +748,22 @@ async function sendMsg (selfId: string, contact: Contact | string, content: any,
       + '），这条消息发不出去。等它重新上线后下次推送会正常发出；如果是长期不在线，检查一下适配器连接')
   }
   const channelId = peerOf(contact)
+  const elements = normalizeContent(content)
   /** 解析结果合并转发：这条也走漏斗（karin.sendMsg 是业务代码另一条常用出口） */
-  if (collectForward(channelId, normalizeContent(content))) {
+  if (collectForward(channelId, elements)) {
     return { messageId: COLLECTED_MESSAGE_ID, rawData: [] }
   }
-  const ids = await bot.bot.sendMessage(channelId, normalizeContent(content) as any)
+  /** 图片统一改走 markdown（见 compat/imageMarkdown） */
+  const outgoing = await imagesToMarkdown(elements, platformOfBot(bot.bot))
+  const ids = await bot.bot.sendMessage(channelId, outgoing as any)
   return { messageId: ids[ids.length - 1] ?? '', rawData: ids }
 }
 
 async function sendMaster (botId: string, master: string, content: any, _options?: any) {
   const bot = resolveBot(botId)
   if (!bot) throw new Error('[kkk] 没有可用的机器人实例，无法发送消息')
-  const elements = normalizeContent(content)
+  // 图片统一改走 markdown（见 compat/imageMarkdown）：私聊和群里一样，md 图片才不会被压糊
+  const elements = await imagesToMarkdown(normalizeContent(content), platformOfBot(bot.bot))
   const target = bot.bot as any
   // Satori 的 Bot 有 sendPrivateMessage；个别适配器没有，退化成私聊频道 id
   const ids = typeof target.sendPrivateMessage === 'function'
