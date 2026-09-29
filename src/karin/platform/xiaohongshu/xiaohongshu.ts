@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import { platformOf } from '@/module/utils/ImageSlice'
-import { buildMarkdownImageMessage } from '@/module/utils/QqPanel'
+import { buildMarkdownImageMessage, sendCopyJumpMessage, xiaohongshuShareUrl } from '@/module/utils/QqPanel'
 import { sendParseTip } from '@/module/utils/parseTip'
 
 import type { NoteComments, XiaohongshuEmojiListResponse } from '@ikenxuan/amagi'
@@ -61,11 +61,19 @@ export class Xiaohongshu extends Base {
    * 笔记详情拿到之前无法判定，所以留到 `XiaohongshuHandler` 里赋值。
    */
   workType?: ParseWorkType
+  /**
+   * **用户消息里原样提取出来的链接**（`xhslink.com/o/xxx` 这类 App 分享短链）。
+   *
+   * 「复制后打开小红书自动跳转」优先用这条：卡片那条带 `xsec_token` 全参数的分享链接
+   * 实测**太长、App 剪贴板识别不了**，而用户发的是小红书 App 自己生成的，一定能识别。
+   */
+  private readonly originUrl: string
 
-  constructor(e: Message, iddata: XiaohongshuIdData) {
+  constructor(e: Message, iddata: XiaohongshuIdData, originUrl = '') {
     super(e)
     this.e = e
     this.type = iddata?.type
+    this.originUrl = String(originUrl ?? '')
   }
 
   /**
@@ -124,6 +132,13 @@ export class Xiaohongshu extends Base {
      */
     const rawItem: any = Array.isArray(noteItems) ? noteItems[0] : undefined
     const noteCard: any = rawItem?.note_card ?? rawItem?.noteCard ?? rawItem
+    /**
+     * **卡片右下角的二维码与「复制跳转」必须是同一条链接**。
+     *
+     * 以前 noteInfo / comment 两个模板各拼一遍同样的字符串，跳转块再拼第三遍，
+     * 三处任何一处改动都会让它们指向不同地址。这里统一从这里取值。
+     */
+    const shareUrl = xiaohongshuShareUrl(String(data.note_id), String(data.xsec_token ?? ''))
     logger.mark('[小红书] 条目键名: ' + JSON.stringify(Object.keys(rawItem ?? {}).slice(0, 12)) +
       ' / note_card 键名: ' + JSON.stringify(Object.keys(rawItem?.note_card ?? {}).slice(0, 16)))
     if (!noteCard) {
@@ -245,7 +260,7 @@ export class Xiaohongshu extends Base {
           ?? '',
         time: noteCard.time,
         ip_location: noteCard.ip_location,
-        share_url: `https://www.xiaohongshu.com/discovery/item/${data.note_id}?source=webshare&xhsshare=pc_web&xsec_token=${data.xsec_token}&xsec_source=pc_share`,
+        share_url: shareUrl,
         image_list: noteCard.image_list?.map((image) => image.url_default) ?? [],
         is_video: Boolean(noteCard.video)
         })
@@ -395,7 +410,7 @@ export class Xiaohongshu extends Base {
               ImageLength: noteCard.image_list?.length || 0,
               // 提示直接写进卡片（模板的 ErrorText），不再单独发文字、也不带 emoji
               ErrorText: '评论数据获取失败，稍后再试试',
-              share_url: 'https://www.xiaohongshu.com/discovery/item/' + data.note_id
+              share_url: shareUrl
             })
             await this.e.reply(emptyCommentCard)
             logger.mark('[小红书] 已发出空的评论卡片（占位）')
@@ -415,7 +430,7 @@ export class Xiaohongshu extends Base {
           CommentsData: processedComments,
           CommentLength: processedComments.length,
           ImageLength: noteCard.image_list?.length || 0,
-          share_url: `https://www.xiaohongshu.com/discovery/item/${data.note_id}?source=webshare&xhsshare=pc_web&xsec_token=${data.xsec_token}&xsec_source=pc_share`
+          share_url: shareUrl
         })
         this.e.reply(commentListImg)
       }
@@ -618,6 +633,12 @@ export class Xiaohongshu extends Base {
      * 由 ErrorHandler 渲染**一张**错误卡片（此时能发的卡片/图片/视频都已经发出去了）。
      */
     await sends.settle()
+    /**
+     * 「打开原站」**单独发一条**：小红书没有清晰度面板（那套面板只有 B站 / 抖音有，
+     * 它们的跳转块挂在画质表格下面），所以这里在所有内容发完之后补一条同格式的消息。
+     * 发不出去也不影响解析（详情见 sendCopyJumpMessage）。
+     */
+    await sendCopyJumpMessage(this.e, '小红书', this.originUrl || shareUrl)
     steps.throwIfFailed()
     return true
   }

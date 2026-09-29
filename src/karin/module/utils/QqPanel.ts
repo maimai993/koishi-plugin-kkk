@@ -48,6 +48,14 @@ export interface PanelRequest {
   id: string
   /** B站分P */
   page?: number
+  /**
+   * **用户消息里原样提取出来的那条链接**，只用在「复制后打开 XX 自动跳转」里。
+   *
+   * 之前跳转块用的是这边构造的链接（`www.douyin.com/video/<id>`、带一长串参数的分享链接…），
+   * 实测**太长 App 剪贴板不认**，而用户发的那条（通常是 App 分享出来的短口令链接）
+   * 反而是 App 自家生成的、一定能识别。没有时退回 `url`。
+   */
+  jumpUrl?: string
 }
 
 /** 一个可选画质 */
@@ -343,6 +351,160 @@ export function sourceLink (label: string, url: string): string {
   return '[' + label + '](' + safe + ')'
 }
 
+/**
+ * 「复制后打开 XX 自动跳转」代码块：
+ *
+ * ```复制后打开b站自动跳转 →
+ * https://b23.tv/BV…
+ * ```
+ *
+ * 提示文案放在**围栏的信息位**（` ``` ` 后面那段，也就是 markdown 写语言的地方），
+ * 不占正文一行 —— 代码块里只有那条链接，全选复制时不会带上多余文字，
+ * 渲染出来提示仍是显示在代码块顶上的。
+ *
+ * 不用 `[打开原站](url)` 是因为那种链接能不能点取决于 adapter —— 官方 QQ 接口实测会拒收
+ * （见 `sourceLink` 的说明）。而各家 App 都认「剪贴板里有一条自家链接」：
+ * 复制整段文本后打开 App 会弹出打开询问，比点链接稳。
+ * @param appName App 名字，写进提示文案里（b站 / 抖音）
+ * @param url 目标地址（放进代码块的是纯文本，不做 markdown 编码）
+ * @returns 代码块的行数组；没地址时是空数组，调用方直接展开即可
+ */
+/**
+ * 抖音 App 的唤起口令。
+ *
+ * 抖音认的是「剪贴板里有一段带口令的文本」：光有一条链接，App 不一定弹跳转询问，
+ * 链接后接着这段口令才能保证复制后打开抖音直达作品。
+ * 这是抖音 App 生成的固定串（每条作品都一样，接口里没有对应字段），别当成模板去替换。
+ */
+const DOUYIN_JUMP_TOKEN = ':1pm Mai:/ 2237886846@qq.com'
+
+/**
+ * @param appName App 名字，写进提示文案里（b站 / 抖音）
+ * @param url 目标地址（放进代码块的是纯文本，不做 markdown 编码）
+ * @param tail 追加在链接后面的文字（抖音的唤起口令走这里）
+ */
+export function copyJumpBlock (appName: string, url: string, tail = ''): string[] {
+  if (!url) return []
+  // 链接和口令之间留两个空格：抖音的口令是独立一段，贴着链接会被当成 URL 的一部分
+  // 提示末尾的箭头指向代码块右上角的「复制」按钮 —— 复制的是整段（这里只有链接），App 才会跳转
+  return ['```' + '复制后打开' + appName + '自动跳转 →', String(url) + (tail ? '  ' + tail : ''), '```']
+}
+
+/**
+ * 抖音作品的分享链接（**给卡片右下角二维码用的**）。
+ *
+ * 优先取接口返回的 `share_url`：那是抖音 App 生成的分享链接，后面带一串参数，
+ * 扫码场景没问题（二维码不吃 URL 长度），比自己拼的裸链接更接近官方形态；
+ * 拿不到（接口改版 / 风控）才退回标准链接。
+ *
+ * 注意它**不适合作为「复制跳转」的链接** —— 参数太长，App 的剪贴板识别不了，
+ * 那种场景要用用户原样发的那条（见 `sendParsePanel` 里 `request.jumpUrl`）。
+ * @param awemeId 作品 id
+ * @param detailShareUrl 作品详情里的 `share_url`
+ */
+export function douyinShareUrl (awemeId: string, detailShareUrl?: string): string {
+  return String(detailShareUrl ?? '') || ('https://www.douyin.com/video/' + String(awemeId))
+}
+
+/**
+ * B站作品的跳转链接。
+ *
+ * 用 **b23.tv 短链**（`https://b23.tv/<bvid>`）：卡片右下角二维码走的就是这条，
+ * 扫二维码和复制跳转是同一件事，两处链接必须一致。
+ */
+export function bilibiliShareUrl (bvid: string): string {
+  return 'https://b23.tv/' + String(bvid)
+}
+
+/** 快手作品页链接（App 认的是自家域名下的链接，短链最终也是跳到这里） */
+export function kuaishouShareUrl (photoId: string): string {
+  return 'https://www.kuaishou.com/short-video/' + String(photoId)
+}
+
+/**
+ * 小红书笔记页链接。
+ *
+ * 和详情卡片的二维码**逐字符对齐**（含 `xsec_token` 那串参数）——
+ * 卡片那儿一直是这么拼的，跳转块换用同一个函数即可，别再单独拼一遍。
+ * @param noteId 笔记 id
+ * @param xsecToken 访问令牌；没有就退回到不带参数的短形式
+ */
+export function xiaohongshuShareUrl (noteId: string, xsecToken = ''): string {
+  const base = 'https://www.xiaohongshu.com/discovery/item/' + String(noteId)
+  return xsecToken
+    ? base + '?source=webshare&xhsshare=pc_web&xsec_token=' + String(xsecToken) + '&xsec_source=pc_share'
+    : base
+}
+
+/**
+ * **能真正渲染 markdown 的平台** —— 只有官方 QQ 和 QQ 频道，别的一律发纯文本。
+ *
+ * 白名单而不是黑名单：markdown 是腾讯那两个 adapter 的私货，
+ * OneBot（NapCat / Lagrange / go-cqhttp / Chronocat）、Discord、Telegram、KOOK…
+ * 都不认这东西。代码块的 ` ``` ` 围栏在它们那里会原样露出来，
+ * 用户看到的是一串反引号而不是代码块。
+ *
+ * 这些平台发**去围栏的纯文本**：提示一行 + 链接一行，照样能整段复制，App 一样认。
+ * @param platform `platformOf(e)` 拿到的适配器名
+ */
+export const supportsMarkdown = (platform: string): boolean => {
+  const name = String(platform ?? '').toLowerCase()
+  return name === 'qq' || name === 'qqguild'
+}
+
+/**
+ * **没有清晰度面板的平台**：单独发一条「复制后打开 XX 自动跳转」。
+ *
+ * B站 / 抖音那条 repeat 代码块挂在清晰度表格下面（`sendParsePanel`），
+ * 而快手、小红书压根没有可选画质的面板——本来也不发任何原站链接。
+ * 这里给它们补一条同格式的独立消息，行为和开关都跟面板里的那行一致。
+ *
+ * 发送失败**不影响解析**：跳转是锦上添花，主流程（卡片 / 图片 / 视频）都已经发出去了。
+ * @param appName App 名字（快手 / 小红书）
+ * @param url 目标地址；空则直接跳过
+ * @param tail 追加在链接后面的文字（抖音走 QqPanel 内部的口令，其它平台不用）
+ * @returns 是否发出去了
+ */
+export async function sendCopyJumpMessage (
+  e: Message,
+  appName: string,
+  url: string,
+  tail = ''
+): Promise<boolean> {
+  if (!url) return false
+  if (tryGetRuntime()?.config.qqPanelSourceLink === false) return false
+
+  const lines = copyJumpBlock(appName, url, tail)
+  /**
+   * 去掉围栏就是同内容的纯文本 —— 给不渲染 markdown 的适配器兜底。
+   * 提示行现在是 ``` 开头的（信息位写法），去掉 ``` 正好还原成一句提示。
+   */
+  const plain = lines
+    .map((line) => (line.startsWith('```') ? line.slice(3) : line))
+    .filter(Boolean)
+    .join(String.fromCharCode(10))
+  const content = supportsMarkdown(platformOf(e))
+    ? segment.markdown(lines.join(String.fromCharCode(10)))
+    : plain
+  try {
+    await e.reply(content)
+    return true
+  } catch (error: any) {
+    /**
+     * 官方 QQ 有时因为消息里的链接形式拒收整条 markdown（见 `sourceLink` 的说明），
+     * 这里退回纯文本再试一次；连纯文本都发不出去就跳过，不影响主流程。
+     */
+    logger.debug('[原站跳转] ' + appName + ' markdown 发送失败，退回纯文本: ' + String(error?.message ?? error).slice(0, 120))
+    try {
+      await e.reply(plain)
+      return true
+    } catch (retryError: any) {
+      logger.warn('[原站跳转] ' + appName + ' 发送失败，已跳过: ' + String(retryError?.message ?? retryError).slice(0, 120))
+      return false
+    }
+  }
+}
+
 export function cmdInput (command: string, show?: string): string {
   const text = encodeURIComponent(command).replace(/'/g, '%27')
   const label = encodeURIComponent(show ?? command).replace(/'/g, '%27')
@@ -465,6 +627,10 @@ async function showLoadingTip (e: Message): Promise<string | undefined> {
  *
  * 单独认出来是为了**发送失败时能摘掉它重发**：链接只是锦上添花，
  * 不能因为它（不同 adapter / 版本的链接限制不一样）把整条面板甚至整个解析搞挂。
+ *
+ * 「复制跳转」代码块（`copyJumpBlock`）也是链接行，但它跨 4 行带 ``` 围栏，
+ * 按行内容匹配容易漏（漏掉围栏会把后面的文字全包进代码块），所以那几行由调用方
+ * 用**下标范围**传给 `sendPanelMarkdown`。
  */
 const isSourceLinkLine = (line: string): boolean => /^\[[^\]]+\]\([^)]+\)\s*$/.test(line.trim())
 
@@ -477,16 +643,21 @@ const isSourceLinkLine = (line: string): boolean => /^\[[^\]]+\]\([^)]+\)\s*$/.t
  * 先照常发，失败且内容里确实有链接行时，去掉链接行再发一次，成功就当没事发生。
  * @param lines 面板的 markdown 行
  * @param send 真正发送的函数（第一次/重发都走它）
+ * @param linkRange 「打开原站」那几行在 lines 里的下标范围 [起, 止)；
+ *   不传时退回到按内容匹配 `[label](url)` 那一种写法
  * @returns 最后一次发送的结果
  */
 async function sendPanelMarkdown (
   lines: string[],
-  send: (content: any) => Promise<any>
+  send: (content: any) => Promise<any>,
+  linkRange?: [number, number]
 ): Promise<{ sent: any, droppedLink: boolean }> {
   try {
     return { sent: await send(segment.markdown(lines.join(String.fromCharCode(10)))), droppedLink: false }
   } catch (error: any) {
-    const withoutLink = lines.filter((line) => !isSourceLinkLine(line))
+    const withoutLink = linkRange
+      ? [...lines.slice(0, linkRange[0]), ...lines.slice(linkRange[1])]
+      : lines.filter((line) => !isSourceLinkLine(line))
     if (withoutLink.length === lines.length) throw error
     logger.warn('[QQ面板] 带链接的面板发送失败（' + String(error?.message ?? error).slice(0, 120) + '），去掉链接行重发一次')
     return { sent: await send(segment.markdown(withoutLink.join(String.fromCharCode(10)))), droppedLink: true }
@@ -573,7 +744,8 @@ async function uploadPanelCard (
         e,
         Detail_Data: detail,
         create_time: Number(detail?.create_time) || Math.floor(Date.now() / 1000),
-        shareLink: 'https://www.douyin.com/video/' + String(detail?.aweme_id ?? request.id),
+        // 和右下角二维码同一个链接：抖音那条带一串分享参数，App 才认
+        shareLink: douyinShareUrl(String(detail?.aweme_id ?? request.id), detail?.share_url),
         // 还没选档，所以不显示分辨率块（和分享信息图一致）
         videoSource: undefined
       } as any)
@@ -602,7 +774,7 @@ async function uploadPanelCard (
     const route = 'bilibili/videoInfo'
     const cardData: any = request.platform === 'bilibili'
       ? {
-          share_url: 'https://b23.tv/' + (detail.bvid ?? request.id),
+          share_url: bilibiliShareUrl(String(detail.bvid ?? request.id)),
           title: detail.title,
           desc: '',
           stat: detail.stat,
@@ -1009,14 +1181,35 @@ export async function sendQqParsePanel (e: Message, request: PanelRequest): Prom
    * 「打开原站」：放在表格下方（用户要求的位置）——用户看完卡片和画质后，
    * 想直接去平台看原作品时不用再翻聊天记录找链接。
    * 开关在 WebUI 的 QQ 适配器分组（qqPanelSourceLink，默认开）。
+   *
+   * B站 / 抖音给的是「复制后打开 XX 自动跳转」代码块：各家 App 都认剪贴板里的自家链接，
+   * 不依赖 QQ 会不会把 markdown 链接渲染成可点的东西。快手之类仍给普通链接。
+   *
+   * 链接**用用户原样发的那条**（`request.jumpUrl`），拼不出来才退回 `request.url`。
+   * 之前按「和卡片二维码一致」去用 `bilibiliShareUrl` / `douyinShareUrl`，实测行不通：
+   * 那种链接带一串 `xsec_token` / `u_code` 之类的参数，长到 App 的剪贴板识别压根不认。
+   * 反过来用户发出来的 `b23.tv/xxx`、`v.douyin.com/xxx` 本来就是 App 自己生成的分享形态，
+   * 最短也最容易被识别。二维码那边不受影响（扫码不吃 URL 长度），保持原来的链接不动。
    */
-  if (runtime.config.qqPanelSourceLink !== false && request.url) lines.push(sourceLink('打开原站', request.url))
+  const linkStart = lines.length
+  if (runtime.config.qqPanelSourceLink !== false && request.url) {
+    // 优先用户原样发的那条：我们拼的链接偏长，App 剪贴板识别不了；App 自家分享的短链才稳
+    const jumpUrl = request.jumpUrl || request.url
+    const block = request.platform === 'bilibili'
+      ? copyJumpBlock('b站', jumpUrl)
+      : request.platform === 'douyin'
+        ? copyJumpBlock('抖音', jumpUrl, DOUYIN_JUMP_TOKEN)
+        : [sourceLink('打开原站', jumpUrl)]
+    lines.push(...block)
+  }
   // 带链接发不出去时自动去掉链接行重发（不然整条面板、整个解析都会被一个链接拖死）
+  // 代码块连围栏共 3 行，所以按**下标范围**整块摘，不能只删中间那行
+  const linkRange: [number, number] | undefined = lines.length > linkStart ? [linkStart, lines.length] : undefined
   const { sent } = await sendPanelMarkdown(lines, async (content) => {
     // 卡片已经撤过「加载中…」了；卡片没发出去（或渲染失败）时这里补撤一次
     if (!cardSent) await recallMessageById(e, loadingId)
     return await e.reply(content)
-  })
+  }, linkRange)
   rememberPanelMessage(e, sent?.messageId)
   logger.debug('[QQ面板] 已发送解析面板: ' + request.platform + ' ' + request.id + '（' + shown.length + '/' + info.options.length + ' 档画质）')
   return true

@@ -208,7 +208,13 @@ const handleDouyin = withParseForward(wrapWithErrorHandler(
      * 面板按钮里继续用**原始分享链接**：`getDouyinID` 是靠跟随跳转拿 aweme_id 的，
      * 换成 `www.douyin.com/video/{id}` 反而可能撞上抖音的验证页。
      */
-    if (iddata.type === 'one_work' && await tryQqPanel(e, { platform: 'douyin', url, id: String(iddata.aweme_id) }, flags)) {
+    if (iddata.type === 'one_work' && await tryQqPanel(e, {
+      platform: 'douyin',
+      url,
+      id: String(iddata.aweme_id),
+      // 跳转块用用户原样发的那条（App 分享出来的短链，识别率最高）
+      jumpUrl: url
+    }, flags)) {
       return
     }
 
@@ -313,7 +319,12 @@ const handleBilibili = withParseForward(wrapWithErrorHandler(
         platform: 'bilibili',
         url: 'https://www.bilibili.com/video/' + iddata.bvid + (iddata.p ? '?p=' + iddata.p : ''),
         id: String(iddata.bvid),
-        page: iddata.p
+        page: iddata.p,
+        /**
+         * 跳转块用**用户发出来的那条**（通常是 b23.tv 短链）：
+         * 上面那条规范链接带 ?p= 参数，长度上去了 App 剪贴板就认不出来。
+         */
+        jumpUrl: String(url)
       }, flags)
     ) {
       return
@@ -388,7 +399,13 @@ const handleKuaishou = withParseForward(wrapWithErrorHandler(
     }
     const iddata = await getKuaishouID(String(kuaishouUrl))
     const WorkData = await fetchKuaishouData(iddata.type, iddata)
-    const kuaishou = new Kuaishou(e, iddata)
+    /**
+     * 跳转块要用**用户发出来的那条**：`match(...g)` 拿到的是数组，
+     * `String(数组)` 会把多条链接用逗号拼成一串（一条链接时碰巧正确），
+     * 这里显式取第一个，保证只发出一条干净的原链接。
+     */
+    const kuaishouOrigin = Array.isArray(kuaishouUrl) && kuaishouUrl.length ? String(kuaishouUrl[0]) : String(kuaishouUrl ?? '')
+    const kuaishou = new Kuaishou(e, iddata, kuaishouOrigin)
     await runWithParseOverride(
       {
         ...flags.override,
@@ -437,7 +454,7 @@ const handleXiaohongshu = withParseForward(wrapWithErrorHandler(
       return
     }
     const iddata = await getXiaohongshuID(url)
-    const xiaohongshu = new Xiaohongshu(e, iddata)
+    const xiaohongshu = new Xiaohongshu(e, iddata, url)
     await runWithParseOverride(
       {
         ...flags.override,

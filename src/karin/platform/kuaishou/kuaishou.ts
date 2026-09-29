@@ -6,6 +6,7 @@ import { ParseSteps, SendTasks } from '@/module/utils/ParseSteps'
 // sendParseTip 单独导入：它在一个无依赖的叶子模块里，避免和平台模块形成循环 import
 import { sendParseTip } from '@/module/utils/parseTip'
 import type { ParseWorkType } from '@/module/db'
+import { kuaishouShareUrl, sendCopyJumpMessage } from '@/module/utils/QqPanel'
 import { Config } from '@/module/utils/Config'
 // 注意用相对写法：@/ 别名在仓库里指向 karin/，@/player 会被解析成不存在的 karin/player
 import { applyForceOnlinePlayer } from '../../../player'
@@ -39,10 +40,20 @@ export class Kuaishou extends Base {
    * 本插件只解析视频，图集/单图会在下面提前返回，那时保持 undefined。
    */
   workType?: ParseWorkType
-  constructor(e: Message, iddata: ExtendedKuaishouOptionsType) {
+  /** ID 解析结果：里面的 photoId 用来兜底拼作品页链接 */
+  private readonly iddata: ExtendedKuaishouOptionsType
+  /**
+   * **用户消息里原样提取出来的链接**（`v.kuaishou.com/xxx` 这类 App 分享短链）。
+   * 「复制后打开快手自动跳转」优先用这条 —— 它是快手 App 自己生成的，识别率最高；
+   * 我们拼的长链接（哪怕只是 `short-video/<photoId>`）App 未必认。
+   */
+  private readonly originUrl: string
+  constructor(e: Message, iddata: ExtendedKuaishouOptionsType, originUrl = '') {
     super(e)
     this.e = e
     this.type = iddata?.type
+    this.iddata = iddata
+    this.originUrl = String(originUrl ?? '')
   }
 
   async KuaishouHandler(data: KuaishouDataResult) {
@@ -101,6 +112,20 @@ export class Kuaishou extends Base {
       return true
     }
     this.workType = 'video'
+    /**
+     * 卡片右下角二维码与「复制后打开快手自动跳转」共用**同一条作品页链接**。
+     *
+     * 原来这里给模板的是 `video_url`（CDN 视频直链），扫出来是一段播放地址、
+     * 不是作品页；快手 App 认的是自家域名下的链接，所以统一改成 `short-video/<photoId>`。
+     */
+    const photoId = String(work?.photo?.id ?? this.iddata?.photoId ?? '')
+    /**
+     * 取不到 photoId 时**不能给空串**：模板拿不到二维码内容会整张卡渲染不出来，
+     * 那种情况下退回 CDN 直链（原来的行为），至少卡片照常出、只是二维码还是播放地址。
+     * 「复制跳转」不受影响——它用自己的那份 shareUrl，取不到就不发。
+     */
+    const shareUrl = photoId ? kuaishouShareUrl(photoId) : ''
+    const cardShareUrl = shareUrl || video_url
     /** 本次解析的步骤容器：单步失败只跳过、不中断，最后统一渲染一张错误卡片（见 ParseSteps） */
     const steps = new ParseSteps()
     /** 发送任务组：评论区与视频各走一条线，谁先就绪谁先发 */
@@ -140,7 +165,7 @@ export class Kuaishou extends Base {
       viewCount: work.photo.viewCount,
       CommentsData,
       CommentLength: CommentsData?.length ?? 0,
-      share_url: video_url,
+      share_url: cardShareUrl,
       VideoSize: fileSizeInMB,
       likeCount: work.photo.likeCount
     })
@@ -161,6 +186,12 @@ export class Kuaishou extends Base {
     })
 
     await sends.settle()
+    /**
+     * 「打开原站」**单独发一条**：快手没有清晰度面板（那套面板只有 B站 / 抖音有，
+     * 它们的跳转块挂在画质表格下面），所以这里在所有内容发完之后补一条同格式的消息。
+     * 发不出去也不影响解析（详情见 sendCopyJumpMessage）。
+     */
+    await sendCopyJumpMessage(this.e, '快手', this.originUrl || shareUrl)
     steps.throwIfFailed()
     return true
   }
