@@ -10,6 +10,15 @@
  * `createdAt` / `updatedAt` **仍然存 ISO 字符串**（而不是 timestamp / Date）：
  * 上层几百处读的都是字符串（比如 `createdAt < 截止日期` 这种字典序比较），
  * 换成 Date 要全改一遍，没必要。
+ *
+ * ## 为什么索引字段都写了明确长度
+ *
+ * MySQL InnoDB 的单个索引总长上限是 3072 字节，utf8mb4 下每个字符 4 字节，
+ * 也就是**一个索引最多 768 个字符**。字符串字段不给长度时，驱动按 VARCHAR(255) 建，
+ * 复合索引很容易爆：比如作品缓存表原本 `aweme_id + sec_uid + groupId + pushType`
+ * 四个 255 字段就是 1020 字符 = 4080 字节，直接 `ER_TOO_LONG_KEY`。
+ * 所以凡是进了 primary / unique 的字段，都按实际数据长度写死（群号、QQ 号这类
+ * 给 64 已经很宽裕），不进索引的字段（备注、昵称之类）保持默认。
  */
 import { Context } from 'koishi'
 
@@ -245,6 +254,15 @@ declare module 'koishi' {
 
 /* ------------------------------ 建表 ------------------------------ */
 
+/**
+ * 定长字符串字段。
+ *
+ * 走索引的字段必须给长度（见文件头「为什么索引字段都写了明确长度」），
+ * 这里的数字都是按实际数据留的余量：群号 / QQ 号 / 作品 id 这类最多几十个字符，
+ * 抖音 sec_uid 最长见过 76，给 128。
+ */
+const str = (length: number) => ({ type: 'string', length }) as const
+
 /** 进程内只建一次（插件热重载时 apply 会再跑一遍，重复 extend 没意义） */
 let modelsReady = false
 
@@ -258,182 +276,182 @@ export const extendModels = (ctx: Context): void => {
 
   // ---------- 抖音 ----------
   ctx.model.extend(TABLE.douyinBot, {
-    id: 'string',
-    createdAt: 'string',
-    updatedAt: 'string',
+    id: str(64),
+    createdAt: str(32),
+    updatedAt: str(32),
   }, { primary: 'id' })
 
   ctx.model.extend(TABLE.douyinGroup, {
-    id: 'string',
-    botId: 'string',
-    createdAt: 'string',
-    updatedAt: 'string',
+    id: str(64),
+    botId: str(64),
+    createdAt: str(32),
+    updatedAt: str(32),
   }, { primary: ['id', 'botId'] })
 
   ctx.model.extend(TABLE.douyinUser, {
-    sec_uid: 'string',
-    short_id: 'string',
+    sec_uid: str(128),
+    short_id: str(64),
     remark: 'string',
     living: 'boolean',
-    filterMode: 'string',
-    createdAt: 'string',
-    updatedAt: 'string',
+    filterMode: str(16),
+    createdAt: str(32),
+    updatedAt: str(32),
   }, { primary: 'sec_uid' })
 
   ctx.model.extend(TABLE.douyinSubscription, {
-    groupId: 'string',
-    sec_uid: 'string',
-    createdAt: 'string',
-    updatedAt: 'string',
+    groupId: str(64),
+    sec_uid: str(128),
+    createdAt: str(32),
+    updatedAt: str(32),
   }, { primary: ['groupId', 'sec_uid'] })
 
   ctx.model.extend(TABLE.douyinAwemeCache, {
     id: 'unsigned',
-    aweme_id: 'string',
-    sec_uid: 'string',
-    groupId: 'string',
-    pushType: 'string',
-    createdAt: 'string',
-    updatedAt: 'string',
+    aweme_id: str(64),
+    sec_uid: str(128),
+    groupId: str(64),
+    pushType: str(32),
+    createdAt: str(32),
+    updatedAt: str(32),
   }, { autoInc: true, unique: [['aweme_id', 'sec_uid', 'groupId', 'pushType']] })
 
   ctx.model.extend(TABLE.douyinFilterWord, {
     id: 'unsigned',
-    sec_uid: 'string',
-    word: 'string',
-    createdAt: 'string',
-    updatedAt: 'string',
+    sec_uid: str(128),
+    word: str(128),
+    createdAt: str(32),
+    updatedAt: str(32),
   }, { autoInc: true, unique: [['sec_uid', 'word']] })
 
   ctx.model.extend(TABLE.douyinFilterTag, {
     id: 'unsigned',
-    sec_uid: 'string',
-    tag: 'string',
-    createdAt: 'string',
-    updatedAt: 'string',
+    sec_uid: str(128),
+    tag: str(128),
+    createdAt: str(32),
+    updatedAt: str(32),
   }, { autoInc: true, unique: [['sec_uid', 'tag']] })
 
   ctx.model.extend(TABLE.douyinListSnapshot, {
     id: 'unsigned',
-    sec_uid: 'string',
-    pushType: 'string',
-    aweme_id: 'string',
-    createdAt: 'string',
-    updatedAt: 'string',
+    sec_uid: str(128),
+    pushType: str(32),
+    aweme_id: str(64),
+    createdAt: str(32),
+    updatedAt: str(32),
   }, { autoInc: true, unique: [['sec_uid', 'pushType', 'aweme_id']] })
 
   // ---------- B站 ----------
   ctx.model.extend(TABLE.bilibiliBot, {
-    id: 'string',
-    createdAt: 'string',
-    updatedAt: 'string',
+    id: str(64),
+    createdAt: str(32),
+    updatedAt: str(32),
   }, { primary: 'id' })
 
   ctx.model.extend(TABLE.bilibiliGroup, {
-    id: 'string',
-    botId: 'string',
-    createdAt: 'string',
-    updatedAt: 'string',
+    id: str(64),
+    botId: str(64),
+    createdAt: str(32),
+    updatedAt: str(32),
   }, { primary: ['id', 'botId'] })
 
   ctx.model.extend(TABLE.bilibiliUser, {
     host_mid: 'unsigned',
     remark: 'string',
-    filterMode: 'string',
-    createdAt: 'string',
-    updatedAt: 'string',
+    filterMode: str(16),
+    createdAt: str(32),
+    updatedAt: str(32),
   }, { primary: 'host_mid' })
 
   ctx.model.extend(TABLE.bilibiliSubscription, {
-    groupId: 'string',
+    groupId: str(64),
     host_mid: 'unsigned',
-    createdAt: 'string',
-    updatedAt: 'string',
+    createdAt: str(32),
+    updatedAt: str(32),
   }, { primary: ['groupId', 'host_mid'] })
 
   ctx.model.extend(TABLE.bilibiliDynamicCache, {
     id: 'unsigned',
-    dynamic_id: 'string',
+    dynamic_id: str(64),
     host_mid: 'unsigned',
-    groupId: 'string',
-    dynamic_type: 'string',
-    createdAt: 'string',
-    updatedAt: 'string',
+    groupId: str(64),
+    dynamic_type: str(32),
+    createdAt: str(32),
+    updatedAt: str(32),
   }, { autoInc: true, unique: [['dynamic_id', 'host_mid', 'groupId']] })
 
   ctx.model.extend(TABLE.bilibiliFilterWord, {
     id: 'unsigned',
     host_mid: 'unsigned',
-    word: 'string',
-    createdAt: 'string',
-    updatedAt: 'string',
+    word: str(128),
+    createdAt: str(32),
+    updatedAt: str(32),
   }, { autoInc: true, unique: [['host_mid', 'word']] })
 
   ctx.model.extend(TABLE.bilibiliFilterTag, {
     id: 'unsigned',
     host_mid: 'unsigned',
-    tag: 'string',
-    createdAt: 'string',
-    updatedAt: 'string',
+    tag: str(128),
+    createdAt: str(32),
+    updatedAt: str(32),
   }, { autoInc: true, unique: [['host_mid', 'tag']] })
 
   // ---------- 统计 ----------
   ctx.model.extend(TABLE.statsParse, {
     id: 'unsigned',
-    groupId: 'string',
-    userId: 'string',
-    platform: 'string',
+    groupId: str(64),
+    userId: str(64),
+    platform: str(32),
     parseCount: 'unsigned',
-    createdAt: 'string',
-    updatedAt: 'string',
+    createdAt: str(32),
+    updatedAt: str(32),
   }, { autoInc: true, unique: [['groupId', 'userId', 'platform']] })
 
   ctx.model.extend(TABLE.statsHistory, {
     id: 'unsigned',
-    date: 'string',
+    date: str(16),
     totalParses: 'unsigned',
     douyin: 'unsigned',
     bilibili: 'unsigned',
     kuaishou: 'unsigned',
     xiaohongshu: 'unsigned',
-    createdAt: 'string',
+    createdAt: str(32),
   }, { autoInc: true, unique: [['date']] })
 
   ctx.model.extend(TABLE.statsGlobal, {
-    key: 'string',
+    key: str(64),
     value: 'unsigned',
-    updatedAt: 'string',
+    updatedAt: str(32),
   }, { primary: 'key' })
 
   ctx.model.extend(TABLE.statsGroupHistory, {
-    groupId: 'string',
-    date: 'string',
-    platform: 'string',
+    groupId: str(64),
+    date: str(16),
+    platform: str(32),
     parseCount: 'unsigned',
-    updatedAt: 'string',
+    updatedAt: str(32),
   }, { primary: ['groupId', 'date', 'platform'] })
 
   ctx.model.extend(TABLE.statsHour, {
-    groupId: 'string',
+    groupId: str(64),
     hour: 'unsigned',
-    platform: 'string',
+    platform: str(32),
     parseCount: 'unsigned',
-    updatedAt: 'string',
+    updatedAt: str(32),
   }, { primary: ['groupId', 'hour', 'platform'] })
 
   ctx.model.extend(TABLE.statsWorkType, {
-    groupId: 'string',
-    platform: 'string',
-    workType: 'string',
+    groupId: str(64),
+    platform: str(32),
+    workType: str(32),
     parseCount: 'unsigned',
-    updatedAt: 'string',
+    updatedAt: str(32),
   }, { primary: ['groupId', 'platform', 'workType'] })
 
   ctx.model.extend(TABLE.statsMetric, {
-    groupId: 'string',
-    metric: 'string',
-    bucket: 'string',
+    groupId: str(64),
+    metric: str(32),
+    bucket: str(32),
     parseCount: 'unsigned',
-    updatedAt: 'string',
+    updatedAt: str(32),
   }, { primary: ['groupId', 'metric', 'bucket'] })
 }

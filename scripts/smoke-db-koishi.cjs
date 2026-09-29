@@ -157,6 +157,49 @@ const main = async () => {
   const removed = await statisticsDB.getRecentHistory(30)
   ok('二次读取稳定', removed.length === 1)
 
+  // ---------------- MySQL 索引长度自检 ----------------
+  // InnoDB 单个索引上限 3072 字节，utf8mb4 下每字符 4 字节（最多 768 字符）。
+  // 本地冒烟只能跑 sqlite，MySQL 的 ER_TOO_LONG_KEY 在这儿触发不了，
+  // 所以直接从模型定义把每个索引的字节数算出来，超了就失败。
+  const LIMIT = 3072
+  const CHARSET_BYTES = 4
+  // 字符串不给长度时，驱动按 VARCHAR(255) 建
+  const DEFAULT_STRING_LENGTH = 255
+  const NUMERIC_BYTES = { unsigned: 4, integer: 4, bigint: 8, float: 4, double: 8, decimal: 8, boolean: 1, date: 8, time: 8, timestamp: 8 }
+
+  // 索引定义分散在三处：primary（主键）、unique（唯一键）、indexes（显式索引）
+  const collectIndexes = (model) => {
+    const list = []
+    if (model.primary) list.push({ kind: 'primary', keys: [].concat(model.primary) })
+    for (const item of model.unique ?? []) list.push({ kind: 'unique', keys: [].concat(item) })
+    for (const item of model.indexes ?? []) list.push({ kind: 'index', keys: Object.keys(item.keys ?? {}) })
+    return list
+  }
+
+  let worst = { label: '', bytes: 0 }
+  let checked = 0
+  for (const [name, model] of Object.entries(ctx.model.tables ?? {})) {
+    if (!name.startsWith('kkk.')) continue
+    for (const index of collectIndexes(model)) {
+      let bytes = 0
+      for (const key of index.keys) {
+        const field = model.fields?.[key]
+        const type = typeof field === 'string' ? field : (field?.deftype ?? field?.type?.type)
+        if (type === 'string' || type === 'text') {
+          bytes += (typeof field === 'object' && field.length ? field.length : DEFAULT_STRING_LENGTH) * CHARSET_BYTES
+        } else {
+          bytes += NUMERIC_BYTES[type] ?? 8
+        }
+      }
+      checked++
+      const label = name + ' [' + index.keys.join(', ') + ']'
+      if (bytes > worst.bytes) worst = { label, bytes }
+      ok('索引长度 ' + index.kind + ' ' + label + ' = ' + bytes + 'B', bytes <= LIMIT)
+    }
+  }
+  ok('索引自检覆盖到表', checked >= 20, checked)
+  console.log('  最宽索引：' + worst.label + ' = ' + worst.bytes + ' 字节（MySQL InnoDB 上限 ' + LIMIT + '）')
+
   await ctx.stop()
   fs.rmSync(path.dirname(dbFile), { recursive: true, force: true })
 
