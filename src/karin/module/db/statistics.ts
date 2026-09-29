@@ -1,36 +1,25 @@
-import fs from 'node:fs'
-import path from 'node:path'
-
+import { $, Context } from 'koishi'
 import { logger } from 'node-karin'
-import { karinPathBase } from 'node-karin/root'
-import sqlite3, { sqlite3 as sqlite3Types } from 'node-karin/sqlite3'
 
-// 直接吃 @/root 而不是 @/module/utils 桶：桶会把 ./Common 拖进来，
-// 而 Common 又回头 import @/module（含本文件），形成环。
-import { Root } from '@/root'
+import {
+  TABLE,
+  type GroupParseHistoryRow,
+  type ParseHistoryRow,
+  type ParseHourStatsRow,
+  type ParseMetric,
+  type ParseMetricStatsRow,
+  type ParsePlatform,
+  type ParseStatisticsRow,
+  type ParseWorkType,
+  type ParseWorkTypeStatsRow
+} from './model'
 
-import { MigrationManager } from './migration'
-
-/** 统计覆盖的平台 */
-export type ParsePlatform = 'douyin' | 'bilibili' | 'kuaishou' | 'xiaohongshu'
-
-/**
- * 解析内容形态。
- *
- * 跨平台取统一值域，便于出「平台 × 形态」的对比图：
- * 抖音走 `getWorkTypeInfo()`，B站取链接解析出的类型，快手/小红书按作品数据里有无视频流判定。
- * `unknown` 只是兜底，正常路径不应落进来。
- */
-export type ParseWorkType = 'video' | 'gallery' | 'collection' | 'article' | 'live' | 'bangumi' | 'dynamic' | 'music' | 'unknown'
-
-/**
- * 解析过程里采到的量化指标。
- *
- * 目前只保留「解析耗时」—— 作品时长、作品点赞属于**内容**属性，不是解析服务本身的表现，
- * 放进这张海报会跑题；而且它们的单位在各平台并不统一（抖音毫秒、B站秒、快手/小红书未知），
- * 口径本来也站不住。全部按分桶存（见 `METRIC_BUCKETS`），避免行数随解析次数无限增长。
- */
-export type ParseMetric = 'duration'
+export type { ParseMetric, ParsePlatform, ParseWorkType } from './model'
+export type {
+  GroupParseHistoryRow as GroupParseHistory,
+  ParseHourStatsRow as ParseHourStats,
+  ParseWorkTypeStatsRow as ParseWorkTypeStats
+} from './model'
 
 /**
  * 指标的分桶边界（左闭右开）。`duration` 单位毫秒。
@@ -104,48 +93,6 @@ interface ParseStatistics {
   updatedAt: string
 }
 
-/** 群维度日粒度统计（群趋势图的数据源） */
-export interface GroupParseHistory {
-  /** 群组ID */
-  groupId: string
-  /** 日期 (YYYY-MM-DD) */
-  date: string
-  /** 平台类型 */
-  platform: ParsePlatform
-  /** 当日解析次数 */
-  parseCount: number
-  /** 更新时间 */
-  updatedAt: string
-}
-
-/** 小时粒度统计（活跃时段图的数据源） */
-export interface ParseHourStats {
-  /** 群组ID */
-  groupId: string
-  /** 小时 (0-23，服务器本地时区) */
-  hour: number
-  /** 平台类型 */
-  platform: ParsePlatform
-  /** 解析次数 */
-  parseCount: number
-  /** 更新时间 */
-  updatedAt: string
-}
-
-/** 内容形态统计（平台 × 形态图的数据源） */
-export interface ParseWorkTypeStats {
-  /** 群组ID */
-  groupId: string
-  /** 平台类型 */
-  platform: ParsePlatform
-  /** 内容形态 */
-  workType: ParseWorkType
-  /** 解析次数 */
-  parseCount: number
-  /** 更新时间 */
-  updatedAt: string
-}
-
 /**
  * 解析历史接口 - 存储每日解析统计数据
  */
@@ -168,42 +115,32 @@ interface ParseHistory {
   createdAt: string
 }
 
-/**
- * 全局统计接口 - 存储插件全局统计数据
- */
-interface GlobalStatistics {
-  /** 统计键 */
-  key: string
-  /** 统计值 */
-  value: string
-  /** 更新时间 */
-  updatedAt: string
-}
+/** UTC 日期（YYYY-MM-DD），与旧版 sqlite 里 `date('now')` 的口径一致 */
+const today = (): string => new Date().toISOString().split('T')[0]
 
-/** 统计数据库操作类 */
+/** 当前时间戳（ISO 字符串） */
+const now = () => new Date().toISOString()
+
+/** 统计数据库操作类（基于 Koishi 原生数据库服务） */
 export class StatisticsDBBase {
-  private db!: sqlite3Types['Database']
-  private dbPath: string
-  private migrationManager: MigrationManager
+  private ctx: Context
 
-  /**
-   * @param dbPath 数据库文件路径；缺省用插件数据目录。
-   *   显式传入只为测试：生产链路由 `getStatisticsDB()` 单例统一构造，不该走这个参数。
-   */
-  constructor(dbPath?: string) {
-    this.dbPath = dbPath ?? path.join(`${karinPathBase}/${Root.pluginName}/data`, 'statistics.db')
-    this.migrationManager = new MigrationManager(this.dbPath)
+  constructor(ctx: Context) {
+    this.ctx = ctx
+  }
+
+  private get db() {
+    return this.ctx.database
   }
 
   /**
    * 关闭数据库连接。
-   * 生产链路上进程退出即可，不需要显式调用；测试里必须关，否则 Windows 下临时目录删不掉。
+   *
+   * 现在连接由 Koishi 的数据库服务统一管理，这里不需要做任何事；
+   * 保留这个方法只是为了兼容老调用方（测试脚本会调）。
    */
   async close(): Promise<void> {
-    if (!this.db) return
-    await new Promise<void>((resolve, reject) => {
-      this.db.close((err) => (err ? reject(err) : resolve()))
-    })
+    /* 由 Koishi 托管，无需手动关闭 */
   }
 
   /**
@@ -212,15 +149,7 @@ export class StatisticsDBBase {
   async init(): Promise<StatisticsDBBase> {
     try {
       logger.debug(logger.green('--------------------------[StatisticsDB] 开始初始化数据库--------------------------'))
-      logger.debug('[StatisticsDB] 正在连接数据库...')
-
-      // 创建数据库连接
-      fs.mkdirSync(path.dirname(this.dbPath), { recursive: true })
-      this.db = new sqlite3.Database(this.dbPath)
-
-      // 创建表结构
-      await this.createTables()
-
+      logger.debug('[StatisticsDB] 使用 Koishi 原生数据库服务，表已由 ctx.model.extend 注册')
       logger.debug('[StatisticsDB] 数据库模型同步成功')
 
       // 初始化全局统计数据
@@ -239,145 +168,14 @@ export class StatisticsDBBase {
   }
 
   /**
-   * 创建数据库表结构
-   */
-  private async createTables(): Promise<void> {
-    const queries = [
-      // 创建解析统计表
-      `CREATE TABLE IF NOT EXISTS ParseStatistics (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        groupId TEXT NOT NULL,
-        userId TEXT NOT NULL,
-        platform TEXT NOT NULL,
-        parseCount INTEGER DEFAULT 0,
-        createdAt TEXT DEFAULT CURRENT_TIMESTAMP,
-        updatedAt TEXT DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(groupId, userId, platform)
-      )`,
-
-      // 创建解析历史表
-      `CREATE TABLE IF NOT EXISTS ParseHistory (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        date TEXT NOT NULL UNIQUE,
-        totalParses INTEGER DEFAULT 0,
-        douyin INTEGER DEFAULT 0,
-        bilibili INTEGER DEFAULT 0,
-        kuaishou INTEGER DEFAULT 0,
-        xiaohongshu INTEGER DEFAULT 0,
-        createdAt TEXT DEFAULT CURRENT_TIMESTAMP
-      )`,
-
-      // 创建全局统计表
-      `CREATE TABLE IF NOT EXISTS GlobalStatistics (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL,
-        updatedAt TEXT DEFAULT CURRENT_TIMESTAMP
-      )`,
-
-      // 群维度日粒度：ParseHistory 只有全局日粒度，画不出单群趋势
-      `CREATE TABLE IF NOT EXISTS GroupParseHistory (
-        groupId TEXT NOT NULL,
-        date TEXT NOT NULL,
-        platform TEXT NOT NULL,
-        parseCount INTEGER DEFAULT 0,
-        updatedAt TEXT DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (groupId, date, platform)
-      )`,
-
-      // 小时粒度活跃分布：行数有界（群数 × 24 × 4），可以按小时永久聚合
-      `CREATE TABLE IF NOT EXISTS ParseHourStats (
-        groupId TEXT NOT NULL,
-        hour INTEGER NOT NULL,
-        platform TEXT NOT NULL,
-        parseCount INTEGER DEFAULT 0,
-        updatedAt TEXT DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (groupId, hour, platform)
-      )`,
-
-      // 内容形态分布：支撑「平台 × 形态」图
-      `CREATE TABLE IF NOT EXISTS ParseWorkTypeStats (
-        groupId TEXT NOT NULL,
-        platform TEXT NOT NULL,
-        workType TEXT NOT NULL,
-        parseCount INTEGER DEFAULT 0,
-        updatedAt TEXT DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (groupId, platform, workType)
-      )`,
-
-      // 解析耗时 / 作品时长 / 作品点赞的分桶分布。
-      // 存桶而不是原值：原值每次解析都不同，行数会随解析次数无限涨；
-      // 分桶后行数上界是 群数 × 指标数 × 桶数。
-      `CREATE TABLE IF NOT EXISTS ParseMetricStats (
-        groupId TEXT NOT NULL,
-        metric TEXT NOT NULL,
-        bucket TEXT NOT NULL,
-        parseCount INTEGER DEFAULT 0,
-        updatedAt TEXT DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (groupId, metric, bucket)
-      )`
-    ]
-
-    for (const query of queries) {
-      await this.runQuery(query)
-    }
-  }
-
-  /**
    * 初始化全局统计数据
    */
   private async initGlobalStatistics(): Promise<void> {
-    const keys = ['totalGroups', 'totalParses']
-    for (const key of keys) {
-      const exists = await this.getQuery<GlobalStatistics>('SELECT * FROM GlobalStatistics WHERE key = ?', [key])
-      if (!exists) {
-        await this.runQuery('INSERT INTO GlobalStatistics (key, value, updatedAt) VALUES (?, ?, ?)', [key, '0', new Date().toISOString()])
-      }
+    for (const key of ['totalGroups', 'totalParses']) {
+      const [row] = await this.db.get(TABLE.statsGlobal, { key })
+      if (row) continue
+      await this.db.create(TABLE.statsGlobal, { key, value: 0, updatedAt: now() })
     }
-  }
-
-  /**
-   * 执行SQL查询
-   */
-  private runQuery(sql: string, params: any[] = []): Promise<any> {
-    return new Promise((resolve, reject) => {
-      this.db.run(sql, params, function (err) {
-        if (err) {
-          reject(err)
-        } else {
-          resolve({ lastID: this.lastID, changes: this.changes })
-        }
-      })
-    })
-  }
-
-  /**
-   * 执行SQL查询并获取单个结果
-   */
-  private getQuery<T>(sql: string, params: any[] = []): Promise<T | undefined> {
-    return new Promise((resolve, reject) => {
-      this.db.get(sql, params, (err, row) => {
-        if (err) {
-          reject(err)
-        } else {
-          resolve(row as T)
-        }
-      })
-    })
-  }
-
-  /**
-   * 执行SQL查询并获取所有结果
-   */
-  private allQuery<T>(sql: string, params: any[] = []): Promise<T[]> {
-    return new Promise((resolve, reject) => {
-      this.db.all(sql, params, (err, rows) => {
-        if (err) {
-          reject(err)
-        } else {
-          resolve(rows as T[])
-        }
-      })
-    })
   }
 
   /**
@@ -394,34 +192,32 @@ export class StatisticsDBBase {
     platform: ParsePlatform,
     options: { workType?: ParseWorkType; durationMs?: number } = {}
   ): Promise<void> {
-    const now = new Date().toISOString()
-    const today = new Date().toISOString().split('T')[0]
+    const time = now()
+    const date = today()
 
     // 检查是否已存在该用户在该群组的统计记录
-    const existing = await this.getQuery<ParseStatistics>(
-      'SELECT * FROM ParseStatistics WHERE groupId = ? AND userId = ? AND platform = ?',
-      [groupId, userId, platform]
-    )
+    const [existing] = await this.db.get(TABLE.statsParse, { groupId, userId, platform })
 
     if (existing) {
       // 更新解析次数
-      await this.runQuery(
-        'UPDATE ParseStatistics SET parseCount = parseCount + 1, updatedAt = ? WHERE groupId = ? AND userId = ? AND platform = ?',
-        [now, groupId, userId, platform]
-      )
+      await this.db.set(TABLE.statsParse, { groupId, userId, platform }, (row: any) => ({
+        parseCount: $.add($.ifNull(row.parseCount, 0), 1),
+        updatedAt: time
+      }))
     } else {
       // 创建新记录
-      await this.runQuery(
-        'INSERT INTO ParseStatistics (groupId, userId, platform, parseCount, createdAt, updatedAt) VALUES (?, ?, ?, 1, ?, ?)',
-        [groupId, userId, platform, now, now]
-      )
+      await this.db.create(TABLE.statsParse, {
+        groupId,
+        userId,
+        platform,
+        parseCount: 1,
+        createdAt: time,
+        updatedAt: time
+      })
 
       // 检查是否是新群组
-      const groupExists = await this.getQuery<{ count: number }>(
-        'SELECT COUNT(DISTINCT groupId) as count FROM ParseStatistics WHERE groupId = ?',
-        [groupId]
-      )
-      if (groupExists && groupExists.count === 1) {
+      const groupRows = await this.db.get(TABLE.statsParse, { groupId }, { limit: 2 })
+      if (groupRows.length === 1) {
         await this.incrementTotalGroups()
       }
     }
@@ -430,11 +226,11 @@ export class StatisticsDBBase {
     await this.incrementTotalParses()
 
     // 更新每日历史记录
-    await this.updateDailyHistory(today, platform)
+    await this.updateDailyHistory(date, platform)
 
     // 以下是本次新增的维度。任何一张写失败都不该让解析主流程或其它维度受影响，
     // 所以逐条兜住，只记日志。
-    await this.safeIncrement('群维度日粒度', () => this.incrementGroupHistory(groupId, today, platform))
+    await this.safeIncrement('群维度日粒度', () => this.incrementGroupHistory(groupId, date, platform))
     await this.safeIncrement('活跃时段', () => this.incrementHourStats(groupId, new Date().getHours(), platform))
     if (options.workType) {
       await this.safeIncrement('内容形态', () => this.incrementWorkTypeStats(groupId, platform, options.workType!))
@@ -464,44 +260,52 @@ export class StatisticsDBBase {
    * 群维度日粒度自增
    */
   private async incrementGroupHistory(groupId: string, date: string, platform: ParsePlatform): Promise<void> {
-    await this.runQuery(
-      `INSERT INTO GroupParseHistory (groupId, date, platform, parseCount, updatedAt) VALUES (?, ?, ?, 1, ?)
-       ON CONFLICT(groupId, date, platform) DO UPDATE SET parseCount = parseCount + 1, updatedAt = excluded.updatedAt`,
-      [groupId, date, platform, new Date().toISOString()]
-    )
+    await this.db.upsert(TABLE.statsGroupHistory, (row: any) => [{
+      groupId,
+      date,
+      platform,
+      parseCount: $.add($.ifNull(row.parseCount, 0), 1),
+      updatedAt: now()
+    }])
   }
 
   /**
    * 小时粒度自增
    */
   private async incrementHourStats(groupId: string, hour: number, platform: ParsePlatform): Promise<void> {
-    await this.runQuery(
-      `INSERT INTO ParseHourStats (groupId, hour, platform, parseCount, updatedAt) VALUES (?, ?, ?, 1, ?)
-       ON CONFLICT(groupId, hour, platform) DO UPDATE SET parseCount = parseCount + 1, updatedAt = excluded.updatedAt`,
-      [groupId, hour, platform, new Date().toISOString()]
-    )
+    await this.db.upsert(TABLE.statsHour, (row: any) => [{
+      groupId,
+      hour,
+      platform,
+      parseCount: $.add($.ifNull(row.parseCount, 0), 1),
+      updatedAt: now()
+    }])
   }
 
   /**
    * 内容形态自增
    */
   private async incrementWorkTypeStats(groupId: string, platform: ParsePlatform, workType: ParseWorkType): Promise<void> {
-    await this.runQuery(
-      `INSERT INTO ParseWorkTypeStats (groupId, platform, workType, parseCount, updatedAt) VALUES (?, ?, ?, 1, ?)
-       ON CONFLICT(groupId, platform, workType) DO UPDATE SET parseCount = parseCount + 1, updatedAt = excluded.updatedAt`,
-      [groupId, platform, workType, new Date().toISOString()]
-    )
+    await this.db.upsert(TABLE.statsWorkType, (row: any) => [{
+      groupId,
+      platform,
+      workType,
+      parseCount: $.add($.ifNull(row.parseCount, 0), 1),
+      updatedAt: now()
+    }])
   }
 
   /**
    * 指标分桶自增
    */
   private async incrementMetricStats(groupId: string, metric: ParseMetric, bucket: string): Promise<void> {
-    await this.runQuery(
-      `INSERT INTO ParseMetricStats (groupId, metric, bucket, parseCount, updatedAt) VALUES (?, ?, ?, 1, ?)
-       ON CONFLICT(groupId, metric, bucket) DO UPDATE SET parseCount = parseCount + 1, updatedAt = excluded.updatedAt`,
-      [groupId, metric, bucket, new Date().toISOString()]
-    )
+    await this.db.upsert(TABLE.statsMetric, (row: any) => [{
+      groupId,
+      metric,
+      bucket,
+      parseCount: $.add($.ifNull(row.parseCount, 0), 1),
+      updatedAt: now()
+    }])
   }
 
   /**
@@ -510,25 +314,24 @@ export class StatisticsDBBase {
    * @param platform 平台类型
    */
   private async updateDailyHistory(date: string, platform: ParsePlatform): Promise<void> {
-    const now = new Date().toISOString()
-
     try {
-      const existing = await this.getQuery<ParseHistory>('SELECT * FROM ParseHistory WHERE date = ?', [date])
+      const [existing] = await this.db.get(TABLE.statsHistory, { date })
 
       if (existing) {
-        await this.runQuery(`UPDATE ParseHistory SET totalParses = totalParses + 1, ${platform} = ${platform} + 1 WHERE date = ?`, [date])
+        await this.db.set(TABLE.statsHistory, { date }, (row: any) => ({
+          totalParses: $.add($.ifNull(row.totalParses, 0), 1),
+          [platform]: $.add($.ifNull(row[platform], 0), 1)
+        }))
       } else {
-        await this.runQuery(
-          'INSERT INTO ParseHistory (date, totalParses, douyin, bilibili, kuaishou, xiaohongshu, createdAt) VALUES (?, 1, ?, ?, ?, ?, ?)',
-          [
-            date,
-            platform === 'douyin' ? 1 : 0,
-            platform === 'bilibili' ? 1 : 0,
-            platform === 'kuaishou' ? 1 : 0,
-            platform === 'xiaohongshu' ? 1 : 0,
-            now
-          ]
-        )
+        await this.db.create(TABLE.statsHistory, {
+          date,
+          totalParses: 1,
+          douyin: platform === 'douyin' ? 1 : 0,
+          bilibili: platform === 'bilibili' ? 1 : 0,
+          kuaishou: platform === 'kuaishou' ? 1 : 0,
+          xiaohongshu: platform === 'xiaohongshu' ? 1 : 0,
+          createdAt: now()
+        })
       }
     } catch (error) {
       logger.error('[StatisticsDB] 更新每日历史记录失败:', error)
@@ -540,7 +343,10 @@ export class StatisticsDBBase {
    * @param days 天数，默认30天
    */
   async getRecentHistory(days: number = 30): Promise<ParseHistory[]> {
-    return await this.allQuery<ParseHistory>('SELECT * FROM ParseHistory ORDER BY date DESC LIMIT ?', [days])
+    return (await this.db.get(TABLE.statsHistory, {}, {
+      sort: { date: 'desc' },
+      limit: days
+    })) as ParseHistoryRow[]
   }
 
   /**
@@ -549,15 +355,12 @@ export class StatisticsDBBase {
   async syncHistoryFromStats(): Promise<void> {
     try {
       // 检查 ParseHistory 表是否为空
-      const historyCount = await this.getQuery<{ count: number }>('SELECT COUNT(*) as count FROM ParseHistory')
-
+      const historyRows = await this.db.get(TABLE.statsHistory, {}, { limit: 1 })
       // 如果已有历史数据，不需要同步
-      if (historyCount && historyCount.count > 0) {
-        return
-      }
+      if (historyRows.length) return
 
       // 获取所有统计数据
-      const allStats = await this.getAllStatistics()
+      const allStats: ParseStatisticsRow[] = await this.db.get(TABLE.statsParse, {})
 
       // 按日期和平台聚合
       const dateMap = new Map<
@@ -574,26 +377,28 @@ export class StatisticsDBBase {
         const date = stat.createdAt.split('T')[0]
 
         if (!dateMap.has(date)) {
-          dateMap.set(date, {
-            douyin: 0,
-            bilibili: 0,
-            kuaishou: 0,
-            xiaohongshu: 0
-          })
+          dateMap.set(date, { douyin: 0, bilibili: 0, kuaishou: 0, xiaohongshu: 0 })
         }
 
         const dateData = dateMap.get(date)!
-        dateData[stat.platform] += stat.parseCount
+        if (stat.platform in dateData) {
+          (dateData as any)[stat.platform] += stat.parseCount ?? 0
+        }
       }
 
       // 插入历史记录
       for (const [date, platforms] of dateMap.entries()) {
         const totalParses = platforms.douyin + platforms.bilibili + platforms.kuaishou + platforms.xiaohongshu
 
-        await this.runQuery(
-          'INSERT OR IGNORE INTO ParseHistory (date, totalParses, douyin, bilibili, kuaishou, xiaohongshu, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
-          [date, totalParses, platforms.douyin, platforms.bilibili, platforms.kuaishou, platforms.xiaohongshu, new Date().toISOString()]
-        )
+        await this.db.create(TABLE.statsHistory, {
+          date,
+          totalParses,
+          douyin: platforms.douyin,
+          bilibili: platforms.bilibili,
+          kuaishou: platforms.kuaishou,
+          xiaohongshu: platforms.xiaohongshu,
+          createdAt: now()
+        })
       }
 
       logger.info(`[StatisticsDB] 已同步 ${dateMap.size} 天的历史数据`)
@@ -607,7 +412,9 @@ export class StatisticsDBBase {
    * @param groupId 群组ID
    */
   async getGroupStatistics(groupId: string): Promise<ParseStatistics[]> {
-    return await this.allQuery<ParseStatistics>('SELECT * FROM ParseStatistics WHERE groupId = ? ORDER BY platform, userId', [groupId])
+    return (await this.db.get(TABLE.statsParse, { groupId }, {
+      sort: { platform: 'asc', userId: 'asc' }
+    })) as ParseStatisticsRow[]
   }
 
   /**
@@ -615,25 +422,25 @@ export class StatisticsDBBase {
    * @param groupId 群组ID
    */
   async getGroupUniqueUsers(groupId: string): Promise<number> {
-    const result = await this.getQuery<{ count: number }>('SELECT COUNT(DISTINCT userId) as count FROM ParseStatistics WHERE groupId = ?', [
-      groupId
-    ])
-    return result?.count || 0
+    const rows: ParseStatisticsRow[] = await this.db.get(TABLE.statsParse, { groupId })
+    return new Set(rows.map((row) => row.userId)).size
   }
 
   /**
    * 获取全局唯一用户数
    */
   async getTotalUniqueUsers(): Promise<number> {
-    const result = await this.getQuery<{ count: number }>('SELECT COUNT(DISTINCT userId) as count FROM ParseStatistics')
-    return result?.count || 0
+    const rows: ParseStatisticsRow[] = await this.db.get(TABLE.statsParse, {})
+    return new Set(rows.map((row) => row.userId)).size
   }
 
   /**
    * 获取所有群组的解析统计
    */
   async getAllStatistics(): Promise<ParseStatistics[]> {
-    return await this.allQuery<ParseStatistics>('SELECT * FROM ParseStatistics ORDER BY groupId, platform')
+    return (await this.db.get(TABLE.statsParse, {}, {
+      sort: { groupId: 'asc', platform: 'asc' }
+    })) as ParseStatisticsRow[]
   }
 
   /**
@@ -641,27 +448,26 @@ export class StatisticsDBBase {
    * @param platform 平台类型
    */
   async getPlatformTotalParses(platform: ParsePlatform): Promise<number> {
-    const result = await this.getQuery<{ total: number }>('SELECT SUM(parseCount) as total FROM ParseStatistics WHERE platform = ?', [
-      platform
-    ])
-    return result?.total || 0
+    const rows: ParseStatisticsRow[] = await this.db.get(TABLE.statsParse, { platform })
+    return rows.reduce((sum, row) => sum + (Number(row.parseCount) || 0), 0)
   }
 
   /**
    * 获取某个群最近 N 天的日粒度记录（按日期升序，便于直接喂折线图）
    *
-   * 日期口径与写入端一致，都取 `toISOString()` 的 UTC 日期；
-   * SQLite 的 `date('now')` 同样是 UTC，两边不会错位。
+   * 日期口径与写入端一致，都取 `toISOString()` 的 UTC 日期。
    * @param groupId 群组ID
    * @param days 天数，默认 30 天
    */
   async getGroupRecentHistory(groupId: string, days: number = 30): Promise<GroupParseHistory[]> {
-    return await this.allQuery<GroupParseHistory>(
-      `SELECT * FROM GroupParseHistory
-       WHERE groupId = ? AND date >= date('now', ?)
-       ORDER BY date`,
-      [groupId, `-${Math.max(0, days - 1)} days`]
-    )
+    const from = new Date()
+    from.setUTCDate(from.getUTCDate() - Math.max(0, days - 1))
+    const cutoff = from.toISOString().split('T')[0]
+
+    return (await this.db.get(TABLE.statsGroupHistory, {
+      groupId,
+      date: { $gte: cutoff }
+    }, { sort: { date: 'asc' } })) as GroupParseHistoryRow[]
   }
 
   /**
@@ -669,11 +475,8 @@ export class StatisticsDBBase {
    * @param groupId 群组ID
    */
   async getGroupActiveDays(groupId: string): Promise<number> {
-    const result = await this.getQuery<{ count: number }>(
-      'SELECT COUNT(DISTINCT date) as count FROM GroupParseHistory WHERE groupId = ?',
-      [groupId]
-    )
-    return result?.count || 0
+    const rows: GroupParseHistoryRow[] = await this.db.get(TABLE.statsGroupHistory, { groupId })
+    return new Set(rows.map((row) => row.date)).size
   }
 
   /**
@@ -681,7 +484,7 @@ export class StatisticsDBBase {
    * @param groupId 群组ID
    */
   async getGroupHourStats(groupId: string): Promise<ParseHourStats[]> {
-    return await this.allQuery<ParseHourStats>('SELECT * FROM ParseHourStats WHERE groupId = ? ORDER BY hour', [groupId])
+    return (await this.db.get(TABLE.statsHour, { groupId }, { sort: { hour: 'asc' } })) as ParseHourStatsRow[]
   }
 
   /**
@@ -689,20 +492,33 @@ export class StatisticsDBBase {
    * @param groupId 群组ID
    */
   async getGroupWorkTypeStats(groupId: string): Promise<ParseWorkTypeStats[]> {
-    return await this.allQuery<ParseWorkTypeStats>(
-      'SELECT * FROM ParseWorkTypeStats WHERE groupId = ? ORDER BY parseCount DESC',
-      [groupId]
-    )
+    return (await this.db.get(TABLE.statsWorkType, { groupId }, {
+      sort: { parseCount: 'desc' }
+    })) as ParseWorkTypeStatsRow[]
   }
 
   /**
    * 获取全局内容形态分布（按平台 × 形态聚合）
    */
   async getGlobalWorkTypeStats(): Promise<ParseWorkTypeStats[]> {
-    return await this.allQuery<ParseWorkTypeStats>(
-      `SELECT groupId, platform, workType, SUM(parseCount) as parseCount, MAX(updatedAt) as updatedAt
-       FROM ParseWorkTypeStats GROUP BY platform, workType ORDER BY platform, parseCount DESC`
-    )
+    const rows: ParseWorkTypeStatsRow[] = await this.db.get(TABLE.statsWorkType, {})
+    const map = new Map<string, ParseWorkTypeStatsRow>()
+
+    for (const row of rows) {
+      const key = row.platform + ' ' + row.workType
+      const current = map.get(key)
+      if (current) {
+        current.parseCount += Number(row.parseCount) || 0
+        if ((row.updatedAt ?? '') > (current.updatedAt ?? '')) current.updatedAt = row.updatedAt
+      } else {
+        map.set(key, { ...row, parseCount: Number(row.parseCount) || 0 })
+      }
+    }
+
+    return [...map.values()].sort((a, b) => {
+      if (a.platform !== b.platform) return a.platform < b.platform ? -1 : 1
+      return (Number(b.parseCount) || 0) - (Number(a.parseCount) || 0)
+    })
   }
 
   /**
@@ -710,57 +526,63 @@ export class StatisticsDBBase {
    * @param groupId 群组ID
    */
   async getGroupMetricStats(groupId: string): Promise<ParseMetricBucketRow[]> {
-    return await this.allQuery<ParseMetricBucketRow>(
-      'SELECT metric, bucket, SUM(parseCount) as count FROM ParseMetricStats WHERE groupId = ? GROUP BY metric, bucket',
-      [groupId]
-    )
+    const rows: ParseMetricStatsRow[] = await this.db.get(TABLE.statsMetric, { groupId })
+    return aggregateMetrics(rows)
   }
 
   /**
    * 获取全局指标分桶分布（耗时 / 作品时长 / 点赞）
    */
   async getGlobalMetricStats(): Promise<ParseMetricBucketRow[]> {
-    return await this.allQuery<ParseMetricBucketRow>(
-      'SELECT metric, bucket, SUM(parseCount) as count FROM ParseMetricStats GROUP BY metric, bucket'
-    )
+    const rows: ParseMetricStatsRow[] = await this.db.get(TABLE.statsMetric, {})
+    return aggregateMetrics(rows)
   }
 
   /**
    * 取全局日粒度趋势里「数据可信」的起始日期。
    * @returns 可信起始日（YYYY-MM-DD）；一行可信数据都没有时返回 undefined
    */
-  async getHistoryCompleteFrom(): Promise<string | undefined> {    // 老库回填（syncHistoryFromStats）会把用户的历史总次数全记在他首次解析那天，
+  async getHistoryCompleteFrom(): Promise<string | undefined> {
+    // 老库回填（syncHistoryFromStats）会把用户的历史总次数全记在他首次解析那天，
     // 那批行的特征是 date 与写入时间 createdAt 不在同一天；
     // 增量写入的行两者必然同天（都取 UTC）。据此切出可信区间的起点。
-    const result = await this.getQuery<{ date: string | null }>(
-      'SELECT MIN(date) as date FROM ParseHistory WHERE date = substr(createdAt, 1, 10)'
-    )
-    return result?.date || undefined
+    const rows: ParseHistoryRow[] = await this.db.get(TABLE.statsHistory, {})
+    let min: string | undefined
+    for (const row of rows) {
+      if (!row.date || row.date !== String(row.createdAt ?? '').slice(0, 10)) continue
+      if (!min || row.date < min) min = row.date
+    }
+    return min
   }
 
   /**
    * 获取每个群首次被记录解析的日期（群增长曲线的数据源）
    */
   async getGroupFirstSeen(): Promise<Array<{ groupId: string; firstSeen: string }>> {
-    return await this.allQuery<{ groupId: string; firstSeen: string }>(
-      'SELECT groupId, MIN(createdAt) as firstSeen FROM ParseStatistics GROUP BY groupId'
-    )
+    const rows: ParseStatisticsRow[] = await this.db.get(TABLE.statsParse, {})
+    const map = new Map<string, string>()
+    for (const row of rows) {
+      if (!row.createdAt) continue
+      const current = map.get(row.groupId)
+      if (!current || row.createdAt < current) map.set(row.groupId, row.createdAt)
+    }
+    return [...map.entries()].map(([groupId, firstSeen]) => ({ groupId, firstSeen }))
   }
 
   /**
    * 获取总群组数
    */
   async getTotalGroups(): Promise<number> {
-    const result = await this.getQuery<{ count: number }>('SELECT COUNT(DISTINCT groupId) as count FROM ParseStatistics')
-    return result?.count || 0
+    const rows: ParseStatisticsRow[] = await this.db.get(TABLE.statsParse, {})
+    return new Set(rows.map((row) => row.groupId)).size
   }
 
   /**
    * 获取总解析次数
    */
   async getTotalParses(): Promise<number> {
-    const result = await this.getQuery<GlobalStatistics>('SELECT value FROM GlobalStatistics WHERE key = ?', ['totalParses'])
-    return parseInt(result?.value || '0', 10)
+    const [row] = await this.db.get(TABLE.statsGlobal, { key: 'totalParses' })
+    return Number(row?.value ?? 0) || 0
   }
 
   /**
@@ -768,21 +590,20 @@ export class StatisticsDBBase {
    */
   private async incrementTotalGroups(): Promise<void> {
     const totalGroups = await this.getTotalGroups()
-    await this.runQuery('UPDATE GlobalStatistics SET value = ?, updatedAt = ? WHERE key = ?', [
-      totalGroups.toString(),
-      new Date().toISOString(),
-      'totalGroups'
-    ])
+    await this.db.set(TABLE.statsGlobal, { key: 'totalGroups' }, {
+      value: totalGroups,
+      updatedAt: now()
+    })
   }
 
   /**
    * 增加总解析次数
    */
   private async incrementTotalParses(): Promise<void> {
-    await this.runQuery('UPDATE GlobalStatistics SET value = value + 1, updatedAt = ? WHERE key = ?', [
-      new Date().toISOString(),
-      'totalParses'
-    ])
+    await this.db.set(TABLE.statsGlobal, { key: 'totalParses' }, (row: any) => ({
+      value: $.add($.ifNull(row.value, 0), 1),
+      updatedAt: now()
+    }))
   }
 
   /**
@@ -814,4 +635,16 @@ export class StatisticsDBBase {
       platformStats
     }
   }
+}
+
+/** 把指标分桶行按 `metric + bucket` 聚合求和 */
+function aggregateMetrics (rows: ParseMetricStatsRow[]): ParseMetricBucketRow[] {
+  const map = new Map<string, ParseMetricBucketRow>()
+  for (const row of rows) {
+    const key = row.metric + ' ' + row.bucket
+    const current = map.get(key)
+    if (current) current.count += Number(row.parseCount) || 0
+    else map.set(key, { metric: row.metric as ParseMetric, bucket: row.bucket, count: Number(row.parseCount) || 0 })
+  }
+  return [...map.values()]
 }

@@ -80,13 +80,18 @@ try {
 export const name = 'kkk'
 
 export const inject = {
+  // database：**必选**。订阅关系、推送缓存、解析统计全走 Koishi 原生数据库服务
+  // （表由 ctx.model.extend 注册，落在宿主自己的库里，插件不再自己开 sqlite 文件）。
+  // 之前它是 optional，因为那会儿插件自己建库；现在没有数据库服务就没有地方存数据，
+  // 直接声明成必选，让 Koishi 在没有配置数据库插件时明确地不加载本插件。
+  required: ['database'],
   // server 只给「插件自带控制台」用，已经移除；这里留着不需要的服务反而会拖慢加载
   // ffmpeg：由 koishi-plugin-ffmpeg-path 提供，兼容层的 ffmpeg()/ffprobe() 会优先用它
   // assets：koishi-plugin-assets-qqbot-part-file 之类提供的图床服务，
   // 面板卡片要上传成 https 地址才能放进 QQ 的 markdown 图片里
   // 渲染：只用浏览器渲染服务（koishi-plugin-puppeteer 或同类插件）
   // 3.5.0 起不再支持 shotkit 内核（它在 Windows 上加载不了 https 资源，卡片会缺图）
-  optional: ['puppeteer', 'database', 'http', 'ffmpeg', 'assets', 'server', 'console']
+  optional: ['puppeteer', 'http', 'ffmpeg', 'assets', 'server', 'console']
 }
 
 export interface Config {
@@ -1098,11 +1103,11 @@ export async function apply (ctx: Context, rawConfig: Config) {
     }
   }
 
-  // 初始化数据库实例（对应 Karin 版 setup.ts 的 initAllDatabases）
+  // 初始化数据库实例（走 Koishi 原生数据库服务 ctx.database）
   // 原实现用顶层 await 立即初始化，CJS 下改成在这里显式引导，否则 module/db 导出的实例是 null
   try {
     const { bootstrapDatabases } = await import('./karin/module/db')
-    const { douyinDB, bilibiliDB, statisticsDB } = await bootstrapDatabases()
+    const { douyinDB, bilibiliDB, statisticsDB } = await bootstrapDatabases(ctx)
     logger.debug('数据库初始化完成：%s / %s / %s', douyinDB.constructor.name, bilibiliDB.constructor.name, statisticsDB.constructor.name)
   } catch (error: any) {
     logger.error('数据库初始化失败: %s', error?.stack ?? error)

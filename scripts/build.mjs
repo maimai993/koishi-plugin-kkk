@@ -9,7 +9,7 @@
  *    - node-karin[/sub] → 兼容层实现（这样产物自带兼容层，不依赖 node_modules 里的转发包）
  */
 import { execFileSync } from 'node:child_process'
-import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -27,10 +27,20 @@ if (configFile.error) {
 const parsed = ts.parseJsonConfigFileContent(configFile.config, ts.sys, root)
 const options = { ...parsed.options, noCheck: true, incremental: false }
 
-if (existsSync(outDir)) rmSync(outDir, { recursive: true, force: true })
+/**
+ * 记录本次 emit 写出的文件，用于构建后清理残留。
+ *
+ * 以前是 emit 前直接 rmSync 掉整个 lib（一次删几百个文件），现在改成事后比对清理：
+ * 只删「上次产物里有、这次没被重写」的文件，正常情况下是 0 个。
+ */
+const emitted = new Set()
+const recordAndWrite = (fileName, text, writeByteOrderMark) => {
+  emitted.add(path.resolve(fileName))
+  ts.sys.writeFile(fileName, text, writeByteOrderMark)
+}
 
 const program = ts.createProgram(parsed.fileNames, options)
-const emitResult = program.emit()
+const emitResult = program.emit(undefined, recordAndWrite)
 
 const diagnostics = ts.getPreEmitDiagnostics(program).filter((item) => item.category === ts.DiagnosticCategory.Error)
 if (diagnostics.length) {
@@ -49,10 +59,32 @@ if (emitResult.emitSkipped) {
   process.exit(1)
 }
 
+/** 递归收集目录下的文件（只用于找残留产物） */
+const walkFiles = (dir, out = []) => {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name)
+    if (entry.isDirectory()) walkFiles(full, out)
+    else if (entry.isFile()) out.push(full)
+  }
+  return out
+}
+
+/** 清掉这次没被重写的旧产物（比如删除源文件后 lib 里留下的孤儿 .js） */
+const cleanStaleArtifacts = () => {
+  const stale = walkFiles(outDir).filter((file) => {
+    if (!/\.(js|cjs|mjs|d\.ts|map)$/.test(file)) return false
+    return !emitted.has(path.resolve(file))
+  })
+  for (const file of stale) {
+    rmSync(file, { force: true })
+    console.log('  清理残留 ' + path.relative(outDir, file).split(path.sep).join('/'))
+  }
+  return stale.length
+}
+
 /** 顺序敏感：子路径必须排在 node-karin 之前 */
 const ALIASES = [
   { prefix: 'node-karin/root', target: 'compat/root', exact: true },
-  { prefix: 'node-karin/sqlite3', target: 'compat/sqlite3', exact: true },
   { prefix: 'node-karin/axios', target: 'compat/axios', exact: true },
   { prefix: 'node-karin/yaml', target: 'compat/yaml', exact: true },
   { prefix: 'node-karin/express', target: 'compat/express', exact: true },
@@ -161,5 +193,6 @@ if (offenders.length) {
   for (const item of offenders) console.error('  - ' + item)
   process.exit(1)
 }
-console.log('构建完成：输出到 ' + path.relative(root, outDir) + '，重写别名文件 ' + rewritten + ' 个')
+const stale = cleanStaleArtifacts()
+console.log('构建完成：输出到 ' + path.relative(root, outDir) + '，重写别名文件 ' + rewritten + ' 个，清理残留 ' + stale + ' 个')
 console.log('构建信息：v' + buildMetadata.version + ' · ' + (buildMetadata.shortCommitHash || '无 commit') + ' · ' + buildMetadata.buildTime)

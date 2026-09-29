@@ -1,10 +1,14 @@
+import { Context } from 'koishi'
+
 import { BilibiliDBBase } from './bilibili'
 import { DouyinDBBase } from './douyin'
+import { extendModels } from './model'
 import { StatisticsDBBase } from './statistics'
 
 export * from './bilibili'
 export * from './douyin'
 export * from './statistics'
+export { TABLE, extendModels } from './model'
 
 /** 抖音数据库实例 */
 let douyinDB: DouyinDBBase | null = null
@@ -17,6 +21,27 @@ let bilibiliInitializing = false
 /** 统计数据库实例 */
 let statisticsDB: StatisticsDBBase | null = null
 let statisticsInitializing = false
+
+/**
+ * 数据库用的是 **Koishi 原生数据库服务**（`ctx.database`），
+ * 插件自己不再开 sqlite 文件。这里存的就是插件启动时传进来的那个 ctx。
+ */
+let dbCtx: Context | null = null
+
+/**
+ * 绑定数据库上下文并注册表结构。
+ * 插件 apply 阶段调用一次；之后所有数据库实例都从这个 ctx 上取 `ctx.database`。
+ */
+export const setDatabaseContext = (ctx: Context): void => {
+  dbCtx = ctx
+  extendModels(ctx)
+}
+
+/** 取数据库上下文；还没绑定就抛一个说得清楚的错 */
+const requireCtx = (name: string): Context => {
+  if (!dbCtx) throw new Error('[' + name + '] 数据库尚未初始化，请先等待插件启动完成')
+  return dbCtx
+}
 
 /**
  * 获取或初始化 DouyinDB 实例（单例模式）
@@ -34,7 +59,7 @@ export const getDouyinDB = async (): Promise<DouyinDBBase> => {
 
   douyinInitializing = true
   try {
-    douyinDB = await new DouyinDBBase().init()
+    douyinDB = await new DouyinDBBase(requireCtx('DouyinDB')).init()
     return douyinDB
   } finally {
     douyinInitializing = false
@@ -57,7 +82,7 @@ export const getBilibiliDB = async (): Promise<BilibiliDBBase> => {
 
   bilibiliInitializing = true
   try {
-    bilibiliDB = await new BilibiliDBBase().init()
+    bilibiliDB = await new BilibiliDBBase(requireCtx('BilibiliDB')).init()
     return bilibiliDB
   } finally {
     bilibiliInitializing = false
@@ -80,7 +105,7 @@ export const getStatisticsDB = async (): Promise<StatisticsDBBase> => {
 
   statisticsInitializing = true
   try {
-    statisticsDB = await new StatisticsDBBase().init()
+    statisticsDB = await new StatisticsDBBase(requireCtx('StatisticsDB')).init()
     return statisticsDB
   } finally {
     statisticsInitializing = false
@@ -134,7 +159,8 @@ export const bilibiliDBInstance: BilibiliDBBase = bilibiliDB
 export const statisticsDBInstance: StatisticsDBBase = statisticsDB
 
 /** 初始化并填充所有数据库实例（插件启动时调用一次） */
-export const bootstrapDatabases = async () => {
+export const bootstrapDatabases = async (ctx: Context) => {
+  setDatabaseContext(ctx)
   const result = await initAllDatabases()
   douyinDBReal = result.douyinDB
   bilibiliDBReal = result.bilibiliDB

@@ -4,7 +4,6 @@ import karin, { AdapterType, BOT_CONNECT, config, ImageElement, logger, Message,
 import { karinPathBase } from 'node-karin/root'
 
 import { Common, Render, Root } from '@/module'
-import { initAllDatabases } from '@/module/db'
 
 import { isSemverGreater } from './module/utils/semver'
 
@@ -67,9 +66,8 @@ if (process.env.NODE_ENV !== 'development' && isSemverGreater(requireVersion, Ro
 }
 
 // ----------------- DATABASE INIT -----------------
-await initAllDatabases().catch((err) => {
-  logger.error(`[koishi-plugin-kkk] 数据库初始化失败: ${err.message}`)
-})
+// 数据库走 Koishi 原生服务（ctx.database），由插件入口在 apply 阶段调用
+// bootstrapDatabases(ctx) 引导，这里不再初始化任何自有的 sqlite 文件。
 
 // ------------------- MAIN INIT -------------------
 mkdirSync(`${karinPathBase}/${Root.pluginName}/data`)
