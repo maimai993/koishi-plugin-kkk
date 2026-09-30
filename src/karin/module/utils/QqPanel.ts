@@ -407,13 +407,18 @@ export function douyinShareUrl (awemeId: string, detailShareUrl?: string): strin
 }
 
 /**
- * B站作品的跳转链接。
+ * B站的跳转链接：**固定用标准视频页** `https://www.bilibili.com/video/<bvid>`。
  *
- * 用 **b23.tv 短链**（`https://b23.tv/<bvid>`）：卡片右下角二维码走的就是这条，
- * 扫二维码和复制跳转是同一件事，两处链接必须一致。
+ * 试过 b23.tv 短链（`https://b23.tv/<bvid>`），实测 B站 App 认不出来 —— 复制后打开 App
+ * 没反应，必须是完整的 `www.bilibili.com/video/BV…` 这种形态。分 P 走 `?p=N` 查询参数。
+ *
+ * 卡片右下角的二维码也走这条（扫码不受长度影响，和跳转块保持一致）。
+ * @param bvid BV 号
+ * @param page 分 P（1 表示第一 P，不用带参数）
  */
-export function bilibiliShareUrl (bvid: string): string {
-  return 'https://b23.tv/' + String(bvid)
+export function bilibiliShareUrl (bvid: string, page?: number): string {
+  const url = 'https://www.bilibili.com/video/' + String(bvid)
+  return page && page > 1 ? url + '?p=' + page : url
 }
 
 /** 快手作品页链接（App 认的是自家域名下的链接，短链最终也是跳到这里） */
@@ -1185,18 +1190,20 @@ export async function sendQqParsePanel (e: Message, request: PanelRequest): Prom
    * B站 / 抖音给的是「复制后打开 XX 自动跳转」代码块：各家 App 都认剪贴板里的自家链接，
    * 不依赖 QQ 会不会把 markdown 链接渲染成可点的东西。快手之类仍给普通链接。
    *
-   * 链接**用用户原样发的那条**（`request.jumpUrl`），拼不出来才退回 `request.url`。
-   * 之前按「和卡片二维码一致」去用 `bilibiliShareUrl` / `douyinShareUrl`，实测行不通：
-   * 那种链接带一串 `xsec_token` / `u_code` 之类的参数，长到 App 的剪贴板识别压根不认。
-   * 反过来用户发出来的 `b23.tv/xxx`、`v.douyin.com/xxx` 本来就是 App 自己生成的分享形态，
-   * 最短也最容易被识别。二维码那边不受影响（扫码不吃 URL 长度），保持原来的链接不动。
+   * 链接**优先用用户原样发的那条**（`request.jumpUrl`）：我们拼的链接往往偏长，
+   * App 剪贴板识别不了；用户发出来的 `v.douyin.com/xxx`、`v.kuaishou.com/xxx` 本来就是
+   * 各家 App 自己生成的分享形态，最短也最容易被识别。
+   *
+   * **B站是唯一的例外**：它反过来 —— b23.tv 短链 App 不认，必须是完整的
+   * `www.bilibili.com/video/BV…`，所以那支固定走 `bilibiliShareUrl()`，不用用户发的那条。
+   * 二维码（卡片右下角）不受影响，和上面各平台一样保持自己的链接。
    */
   const linkStart = lines.length
   if (runtime.config.qqPanelSourceLink !== false && request.url) {
-    // 优先用户原样发的那条：我们拼的链接偏长，App 剪贴板识别不了；App 自家分享的短链才稳
     const jumpUrl = request.jumpUrl || request.url
     const block = request.platform === 'bilibili'
-      ? copyJumpBlock('b站', jumpUrl)
+      // B站固定用 BV 规范链接（短链 App 不识别），分 P 靠 request.page 带上
+      ? copyJumpBlock('b站', bilibiliShareUrl(String(request.id), request.page))
       : request.platform === 'douyin'
         ? copyJumpBlock('抖音', jumpUrl, DOUYIN_JUMP_TOKEN)
         : [sourceLink('打开原站', jumpUrl)]

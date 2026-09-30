@@ -319,12 +319,11 @@ const handleBilibili = withParseForward(wrapWithErrorHandler(
         platform: 'bilibili',
         url: 'https://www.bilibili.com/video/' + iddata.bvid + (iddata.p ? '?p=' + iddata.p : ''),
         id: String(iddata.bvid),
-        page: iddata.p,
+        page: iddata.p
         /**
-         * 跳转块用**用户发出来的那条**（通常是 b23.tv 短链）：
-         * 上面那条规范链接带 ?p= 参数，长度上去了 App 剪贴板就认不出来。
+         * B站**不传 jumpUrl**：跳转块固定用 `www.bilibili.com/video/<bvid>` 这种标准形态
+         * （b23.tv 短链 App 复制了不跳转），由面板自己按 bvid + 分P 拼，见 `bilibiliShareUrl`。
          */
-        jumpUrl: String(url)
       }, flags)
     ) {
       return
