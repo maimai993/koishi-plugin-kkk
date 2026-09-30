@@ -1,6 +1,5 @@
 import fs from 'node:fs'
-import { platformOf } from '@/module/utils/ImageSlice'
-import { buildMarkdownImageMessage, sendCopyJumpMessage, xiaohongshuShareUrl } from '@/module/utils/QqPanel'
+import { sendCopyJumpMessage, xiaohongshuShareUrl } from '@/module/utils/QqPanel'
 import { sendParseTip } from '@/module/utils/parseTip'
 
 import type { NoteComments, XiaohongshuEmojiListResponse } from '@ikenxuan/amagi'
@@ -274,30 +273,12 @@ export class Xiaohongshu extends Base {
     }
 
     /**
-     * **图文笔记的图片要发出来**（用户要求）。
+     * **图集只发一次，由下面 `sendContent.includes('image')` 那块统一负责**（含实况图处理）。
      *
-     * 之前只发了详情卡片，正文里的图片一张都没发 —— 用户看到的就是
-     * 「解析出来了图文，但图呢？」。这里和抖音图集一样：合并成**一条 markdown**
-     * （图片紧贴渲染，一条消息装完整套图）。
+     * 这里以前还有一段「图文图片合并成一条 markdown 发出去」的兜底，它**不看 sendContent 开关**，
+     * 于是勾了「图片」的部署会收到**两套图集**：先一条 markdown 全套图，紧接着又一条合并转发。
+     * 现在删掉了 —— 图集由下面那块按开关发，关掉「图片」就真的不发了（原来关掉照样发一份）。
      */
-    const noteImages: string[] = (noteCard.image_list ?? [])
-      .map((image: any) => String(image?.url_default ?? image?.url ?? ''))
-      .filter(Boolean)
-    if (!noteCard.video && noteImages.length) {
-      try {
-        const mdMessage = await buildMarkdownImageMessage(noteImages, 420, platformOf(this.e))
-        if (mdMessage) {
-          await this.e.reply(mdMessage)
-          logger.mark('[小红书] 图文图片已用一条 markdown 发送，共 ' + noteImages.length + ' 张')
-        } else {
-          // md 生成失败就逐张发，总比一张不发好
-          for (const imageUrl of noteImages) await this.e.reply(segment.image(imageUrl))
-          logger.mark('[小红书] md 生成失败，图文图片改为逐张发送，共 ' + noteImages.length + ' 张')
-        }
-      } catch (error: any) {
-        logger.warn('[小红书] 发送图文图片失败: ' + String(error?.message ?? error).slice(0, 120))
-      }
-    }
 
     /**
      * 带「先提示、再宽限」的超时包装（和图片发送那边同一套口径，见 ImageSlice 的 SEND_* 常量）。
@@ -585,20 +566,28 @@ export class Xiaohongshu extends Base {
         Config.app.fakeForward ? this.e.sender.nick : this.e.bot.account.name
       )
 
-      if (processedImages.length === 1) {
-        await this.e.reply(processedImages[0])
-      } else if (processedImages.length > 1) {
-        try {
+      /**
+       * 发图集是**唯一一次**发送图集的地方（另一处已删，见上面注释），所以失败要记进 steps：
+       * 让它只跳过这一步、照常走后面的视频 / 错误卡片，而不是把整条解析掀翻。
+       */
+      try {
+        if (processedImages.length === 1) {
+          await this.e.reply(processedImages[0])
+        } else if (processedImages.length > 1) {
           await this.e.bot.sendForwardMsg(this.e.contact, res, {
             source: '图片合集',
             summary: `查看${res.length}张图片/视频消息`,
             prompt: '小红书图集解析结果',
             news: [{ text: '点击查看解析结果' }]
           })
-        } finally {
-          for (const item of temp) {
-            await Common.removeFile(item.filepath, true)
-          }
+        }
+        logger.mark('[小红书] 图集已发送，共 ' + processedImages.length + ' 张')
+      } catch (error: any) {
+        steps.fail('发送图集', error)
+      } finally {
+        // 临时文件（实况图生成的视频 / 静态图 / 合成封面）用完就删，失败也要删
+        for (const item of temp) {
+          await Common.removeFile(item.filepath, true)
         }
       }
     }
