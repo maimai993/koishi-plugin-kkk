@@ -7,7 +7,14 @@ import {
 } from '@/module/utils/QqPanel'
 import { replyReplacing } from '@/module/utils/QqPanel'
 import { resolveCardToUrl } from '@/module/utils/CardParser'
-import { recallCardImages, resolveCardImageKey } from '@/module/utils/CardImageCache'
+import {
+  claimCardImageExtract,
+  recallCardImageExtract,
+  recallCardImages,
+  releaseCardImageExtract,
+  resolveCardImageKey,
+  type CardImageKind
+} from '@/module/utils/CardImageCache'
 import { processImageUrls } from '@/module/utils/ImageHelper'
 
 import { Common, downloadVideo } from '@/module'
@@ -659,6 +666,21 @@ const handleCardParse = wrapWithErrorHandler(
 export const cardAPP = karin.command(/卡片消息/, handleCardParse, { name: 'kkk-卡片解析' })
 
 /**
+ * 这条指令是不是**QQ 回调按钮**点出来的。
+ *
+ * 判据是会话类型：回调按钮（`action.type = 1`）在适配器里被标成
+ * `session.type = 'interaction/button'`（见 `koishi-plugin-adapter-qq-crack` 的 `utils.ts`），
+ * 而手敲指令、以及不支持原生按钮时给的蓝字文字链（`<qqbot-cmd-input>`），
+ * 都会变成**普通消息**（`session.type = 'message'`）。
+ *
+ * 这个区别正是「限一次」的适用范围：**只有按钮才限一次**。
+ * 按钮用户看不见指令、也没法确认自己点没点过，所以由插件兜着；
+ * 手敲指令是用户主动发的，随时都能用，留一条明确的路（图发不出来时还能重试）。
+ * @param e 消息事件
+ */
+const isButtonClick = (e: any): boolean => String(e?.session?.type ?? '') === 'interaction/button'
+
+/**
  * 单独把卡片图发一遍（`kkk封面` / `kkk评论`）。
  *
  * 卡片在 QQ 上是一整条 markdown 图片消息，几张图叠在一起 —— 想单独存封面、
@@ -667,6 +689,11 @@ export const cardAPP = karin.command(/卡片消息/, handleCardParse, { name: 'k
  *
  * **不重新解析、不重新渲染**：图源是上次解析记下来的（见 CardImageCache），
  * 15 分钟过期（评论图是临时文件，会被定时清理），过期了就提示先发条链接。
+ *
+ * **按钮只放行一次**（用户要求：有人一直点，群里被同一张图刷屏、还查不出是谁）：
+ * `interaction/button` 这条路上按「作品 + 按钮种类」先占后发，重复点击**静默忽略**、
+ * 只在日志里记下是谁在点。手敲指令不受此限；重新发一次链接（新卡片）
+ * 会 `rememberCardImages` 重新武装按钮。
  */
 const handleExtractCard = wrapWithErrorHandler(
   async (e, next) => {
@@ -680,7 +707,25 @@ const handleExtractCard = wrapWithErrorHandler(
      */
     const arg = msg.replace(/^#?(?:kkk封面|kkk评论|提取封面图|提取评论区图片)/, '').trim()
     const wantComment = /评论/.test(msg)
-    const cached = recallCardImages(resolveCardImageKey(e, arg))
+    const cardKey = resolveCardImageKey(e, arg)
+    const kind: CardImageKind = wantComment ? 'comment' : 'cover'
+    const label = wantComment ? '提取评论区图片' : '提取封面图'
+    /**
+     * **拦截重复点击。**「先占后发」而不是「发成功再记」：
+     * 反过来写的话，快速连点会有好几次同时通过检查，照样能刷出好几条。
+     */
+    const fromButton = isButtonClick(e)
+    if (fromButton && !claimCardImageExtract(cardKey, kind, String(e.userId ?? ''))) {
+      const prev = recallCardImageExtract(cardKey, kind)
+      logger.mark(
+        '[提取卡片图] 忽略一次重复点击：%s 点的「%s」，这张卡片上 %s 已经点过了（同一张卡片只放行一次，想再要一次就重新发链接）',
+        String(e.userId ?? '（未知用户）'),
+        label,
+        prev?.by ? String(prev.by) : '（未知用户）'
+      )
+      return
+    }
+    const cached = recallCardImages(cardKey)
     let urls: string[] | undefined
     if (wantComment) {
       /**
@@ -705,14 +750,22 @@ const handleExtractCard = wrapWithErrorHandler(
       urls = cached?.cover ? [cached.cover] : undefined
     }
     if (!urls?.length) {
+      /** 这次没发出去，不该算「点过了」——否则图一过期按钮就彻底废了 */
+      if (fromButton) releaseCardImageExtract(cardKey, kind)
       await e.reply(wantComment
         ? '没拿到这条内容的评论区图片 —— 评论里没有用户贴图，或者已经过期（15 分钟）／临时文件被清理了，重新发一下链接再点 ~'
         : '没找到这个作品的封面 —— 可能已经过期（15 分钟），重新发一下链接再点 ~')
       return
     }
     /** 图片统一走 markdown：QQ 上不会被二次压缩，小字才看得清（见 compat/imageMarkdown） */
-    const md = await buildMarkdownImageMessage(urls, 420, platformOf(e))
-    await e.reply(md ?? urls.map((url) => segment.image(url)))
+    try {
+      const md = await buildMarkdownImageMessage(urls, 420, platformOf(e))
+      await e.reply(md ?? urls.map((url) => segment.image(url)))
+    } catch (error) {
+      /** 发送失败同样不当「点过了」：用户再点一次还能拿到图 */
+      if (fromButton) releaseCardImageExtract(cardKey, kind)
+      throw error
+    }
     logger.debug('[提取卡片图] 已发送 %s 张（%s）', urls.length, wantComment ? '评论区' : '封面')
   },
   { businessName: '提取卡片图' }

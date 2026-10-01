@@ -45,10 +45,36 @@ export interface CardImages {
 /** 缓存有效期：评论图是临时文件，别放太久 */
 const TTL_MS = 15 * 60 * 1000
 
+/** 按钮种类：封面 / 评论区 */
+export type CardImageKind = 'cover' | 'comment'
+
 /** 作品 → 图 */
 const store = new Map<string, CardImages>()
 /** 会话 → 最近一次解析的作品键（不带参数手敲指令时的兜底） */
 const lastBySession = new Map<string, string>()
+
+/**
+ * 回调按钮的「已经点过了」记录：`${作品键}|${种类}` → 谁点的、什么时候。
+ *
+ * ## 为什么需要它（用户要求）
+ *
+ * 「提取封面图 / 提取评论区图片」是 **QQ 原生回调按钮**：点一下就把载荷回调给机器人，
+ * QQ 那边不会记住「已经点过」，**按钮一直可以点**。于是有人会一直点，
+ * 群里就被同一张图刷屏（用户原话：「最多只能触发一次，不然点一直点，不知道谁在刷屏」）。
+ *
+ * 所以这里记一笔：**同一张卡片上的同一个按钮只放行一次**，后面的点击静默忽略、只记日志。
+ *   - 作用域是「作品 + 种类」，不是「人」：封面和评论区是两个按钮，互不影响；
+ *   - **重新解析会重新武装**：新卡片发出去时会 {@link rememberCardImages}（顺便清掉旧记录），
+ *     所以「想再要一次」只要重发链接，不会被永久锁死；
+ *   - 手敲指令（`kkk封面 bilibili:BV…`）**不走这里**，随时都能用，留一条明确的路；
+ *   - 跟着 {@link TTL_MS} 一起过期：图都过期了，记录留着也没意义。
+ */
+const extracted = new Map<string, { at: number, by: string }>()
+
+/** 记录键 */
+function extractedKeyOf (key: string, kind: CardImageKind): string {
+  return String(key ?? '') + '|' + kind
+}
 
 /** 会话键 */
 function sessionKeyOf (e: any): string {
@@ -72,6 +98,9 @@ function sweep (): void {
   for (const [key, item] of store) {
     if (now - item.at > TTL_MS) store.delete(key)
   }
+  for (const [key, item] of extracted) {
+    if (now - item.at > TTL_MS) extracted.delete(key)
+  }
 }
 
 /**
@@ -79,6 +108,9 @@ function sweep (): void {
  *
  * **只补传进来的那几项**：详情页发完先记封面，评论渲染完再补评论区，
  * 后一次调用不会把前一次记的封面抹掉。
+ *
+ * 顺带**重新武装**这次记的那几种图对应的按钮：新卡片要发出去了，
+ * 它下面的按钮应该可以再点一次（旧卡片上的那次点击不作数）。
  * @param key {@link cardImageKeyOf}
  * @param patch 要记录的内容
  */
@@ -88,10 +120,54 @@ export function rememberCardImages (key: string, patch: { cover?: string, commen
   const prev = store.get(key)
   const next: CardImages = prev ?? { key, at: Date.now() }
   next.at = Date.now()
-  if (patch.cover) next.cover = patch.cover
-  if (patch.comment?.length) next.comment = patch.comment
-  if (patch.commentPics?.length) next.commentPics = patch.commentPics
+  if (patch.cover) {
+    next.cover = patch.cover
+    extracted.delete(extractedKeyOf(key, 'cover'))
+  }
+  if (patch.comment?.length) {
+    next.comment = patch.comment
+    extracted.delete(extractedKeyOf(key, 'comment'))
+  }
+  if (patch.commentPics?.length) {
+    next.commentPics = patch.commentPics
+    extracted.delete(extractedKeyOf(key, 'comment'))
+  }
   store.set(key, next)
+}
+
+/**
+ * 占一次「卡片按钮已经点过了」。**只有 QQ 回调按钮走这里**（手敲指令不调）。
+ *
+ * 先占后发、发失败再 {@link releaseCardImageExtract}：
+ * 反过来「先发成功再记」的话，快速连点会有几次同时通过检查，照样能刷出好几条。
+ * @param key 作品键（{@link cardImageKeyOf}）
+ * @param kind 封面还是评论区
+ * @param by 点击者（用于日志里认出「谁在刷屏」）
+ * @returns 第一次点返回 `true`（放行）；之前已经点过返回 `false`
+ */
+export function claimCardImageExtract (key: string, kind: CardImageKind, by: string): boolean {
+  if (!key) return true
+  sweep()
+  const id = extractedKeyOf(key, kind)
+  if (extracted.has(id)) return false
+  extracted.set(id, { at: Date.now(), by: String(by ?? '') })
+  return true
+}
+
+/** 撤销一次占用（这次没发出去 —— 过期、没图、发送报错 —— 不该算「点过了」） */
+export function releaseCardImageExtract (key: string, kind: CardImageKind): void {
+  if (!key) return
+  extracted.delete(extractedKeyOf(key, kind))
+}
+
+/**
+ * 这个按钮是不是已经点过了（日志用：带上是谁点的）。
+ * @param key 作品键
+ * @param kind 封面还是评论区
+ */
+export function recallCardImageExtract (key: string, kind: CardImageKind): { at: number, by: string } | undefined {
+  if (!key) return undefined
+  return extracted.get(extractedKeyOf(key, kind))
 }
 
 /**
