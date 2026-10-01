@@ -28,6 +28,7 @@ import { Config } from '@/module/utils/Config'
 import { DouyinIdData, buildDouyinPlayUrl, douyinProcessVideos, type dyVideo, getDouyinID } from '@/platform/douyin'
 import type { DouyinListItem } from '@/platform/douyin/types'
 import { getDouyinLiveImageSendPolicy, getWorkTypeDisplayName, getWorkTypeInfo } from '@/platform/douyin/workType'
+import { parseCommandActions } from '@/module/utils/QqPanel'
 import type { douyinPushItem } from '@/types/config/pushlist'
 
 import { processFavoriteList } from './push/favorite'
@@ -362,16 +363,16 @@ export class DouYinpush extends Base {
           eventWithBot.selfId = botId
           const pushImg = img ?? []
 
-          // 仅 QQ 官方机器人支持按钮：非直播作品在卡片末尾追加「解析」回调按钮，点击后下发 #解析 + 分享链接
-          const parseButton =
-            bot?.adapter?.name === 'QQ Official Bot' && pushItem.pushType !== 'live' && pushItem.Detail_Data.share_url
-              ? [
-                  segment.button([
-                    { text: '解析', callback: true, data: `#解析${pushItem.Detail_Data.share_url}` },
-                    { text: '帮助', callback: true, data: `#kkk帮助` }
-                  ])
-                ]
-              : []
+          /**
+           * 卡片末尾追加「解析」入口（直播推送没有作品链接，不给按钮）。
+           *
+           * 以前用 `segment.button`（旧式回调按钮）且只认 `adapter.name === 'QQ Official Bot'`，
+           * 很多部署上根本不出按钮。现在和 B站推送同一套写法：
+           * QQ / QQ 频道给 markdown 按钮，其它平台给「引用这条消息发送指令」的文字提示。
+           */
+          const parseButton = pushItem.pushType !== 'live'
+            ? parseCommandActions({ bot }, pushItem.Detail_Data.share_url)
+            : []
 
           // 发送消息
           status = await karin.sendMsg(botId, Contact, [...pushImg, ...parseButton])

@@ -20,6 +20,7 @@ import React from 'react'
 import { renderToPipeableStream } from 'react-dom/server'
 
 import { importEsm } from '../../../../compat/esm'
+import { readImageSize } from '../../../../compat/imageSize'
 import { loadTemplate } from '../../../../ktr/registry'
 import { Root } from '@/module/utils'
 import { Config } from '@/module/utils/Config'
@@ -616,27 +617,18 @@ async function screenshot (htmlPath: string, selector: string, timeout: number, 
   return await puppeteer.render('', async (page: any) => capture(page))
 }
 
-export const getImageMetadata = (buffer: Buffer): ImageMetadata => {
-  if (buffer.length >= 24 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
-    return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) }
-  }
-  // JPEG：QQ 的 markdown 图片要写死「#宽px #高px」，所以必须能读出来
-  if (buffer.length > 4 && buffer[0] === 0xff && buffer[1] === 0xd8) {
-    let offset = 2
-    while (offset + 9 < buffer.length) {
-      if (buffer[offset] !== 0xff) { offset++; continue }
-      const marker = buffer[offset + 1]
-      // SOF0..SOF15（跳过 DHT/DAC 等非 SOF 标记）
-      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
-        return { height: buffer.readUInt16BE(offset + 5), width: buffer.readUInt16BE(offset + 7) }
-      }
-      const length = buffer.readUInt16BE(offset + 2)
-      if (length <= 0) break
-      offset += 2 + length
-    }
-  }
-  return {}
-}
+/**
+ * 读图片真实像素尺寸。
+ *
+ * 实现已收拢到 `compat/imageSize`（PNG / JPEG / GIF / WebP 四种都认）。
+ * 以前这里只认 PNG / JPEG —— 同一张 **WebP** 在 `compat/imageMarkdown` 那条链路上读得出来、
+ * 在这条上读不出来，读不出来的调用方只能「猜一个尺寸」填进 `#宽px #高px`，
+ * 猜出来的框和真实比例对不上 → 用户看到的就是**图片被强制拉伸**。
+ * 两处共用一份实现之后，这种「一边认得出、一边认不出」的分裂就没有了。
+ * @param buffer 图片二进制
+ * @returns 尺寸；认不出的格式返回 `{}`（调用方必须按「尺寸未知」处理，**不要猜**）
+ */
+export const getImageMetadata = (buffer: Buffer): ImageMetadata => readImageSize(buffer)
 
 /**
  * 渲染函数（上游签名）：\`Render(event, '平台/模板', data)\` → 图片消息段数组。

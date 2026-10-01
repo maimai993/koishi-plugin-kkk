@@ -434,10 +434,22 @@ const FAKE_FORWARD_DESC = '全局合并转发，优先级最高：打开时所�
   + '「开始解析 / 下载中」这类过程提示不会进去。关掉就不合并，内容一条一条发。'
   + '只对支持聊天记录的适配器有效果（QQ 官方适配器没有这个能力，会自动改成逐条发送）。'
 
+/**
+ * 「是否收集评论区的图片」的说明（B站 / 抖音各一处，同一个 label 一起换）。
+ *
+ * 用户反馈：「这个开不开都没有用啊」—— 那个开关以前确实是个**摆设**：
+ * B站视频那条路上的实现被写死成 `if (false && ...)`，整段短路了，
+ * 点开点关都一样。现在真按开关走（见 src/karin/module/utils/CommentPics.ts），
+ * 文案也把两档的区别说清楚，免得再有人以为它坏了。
+ */
+const COMMENT_IMAGE_DESC = '打开后：解析时把评论里用户贴的图片直接发一条（一条消息发完），'
+  + '卡片下面就不再挂「提取评论区图片」按钮了；关闭（默认）：不直接发，卡片下面挂「提取评论区图片」按钮，想单独存图再点一下。'
+
 const DESC_BY_LABEL = [
   ['谁可以触发扫码登录', PERM_DESC],
   ['错误日志', LOG_DESC],
   [FAKE_FORWARD_LABEL, FAKE_FORWARD_DESC],
+  ['是否收集评论区的图片', COMMENT_IMAGE_DESC],
 ]
 
 function patchDescriptions (text, name) {

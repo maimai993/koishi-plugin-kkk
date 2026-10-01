@@ -1,12 +1,20 @@
 import karin, { logger, segment, type Message } from 'node-karin'
-import { cmdInput } from '@/module/utils/QqPanel'
+import {
+  buildMarkdownImageMessage,
+  cmdInput,
+  EXTRACT_COMMENT_COMMAND,
+  EXTRACT_COVER_COMMAND
+} from '@/module/utils/QqPanel'
 import { replyReplacing } from '@/module/utils/QqPanel'
 import { resolveCardToUrl } from '@/module/utils/CardParser'
+import { recallCardImages, resolveCardImageKey } from '@/module/utils/CardImageCache'
+import { processImageUrls } from '@/module/utils/ImageHelper'
 
 import { Common, downloadVideo } from '@/module'
 import { getStatisticsDB, type ParsePlatform, type ParseWorkType } from '@/module/db'
 import { Config } from '@/module/utils/Config'
 import { acquireParseLock } from '@/module/utils/ParseLock'
+import { platformOf } from '@/module/utils/ImageSlice'
 
 /**
  * 「同一条消息」级别的去重：一次发送被投递多遍时，**在提示和网络请求之前**就挡住。
@@ -25,6 +33,31 @@ const acquireMessageLock = (e: any, platform: string): boolean => {
   const key = ['msg', platform, e?.contact?.peer ?? e?.channelId ?? '', e?.userId ?? '', content].join(':')
   if (acquireParseLock(key)) return true
   logger.debug('短时间内重复的同一条消息（%s），已忽略: %s', platform, key)
+  return false
+}
+
+/**
+ * **「封面解析」也要去重** —— 首发链接出面板那条路径。
+ *
+ * 面板（B站 / 抖音的清晰度面板，也就是「封面 + 画质表格」那条消息）原来是在作品级去重
+ * （`biliKey` / `douyinKey`）**之前**就 return 的，于是短时间内重复发同一条链接会一遍遍
+ * 重新出面板；反倒**点清晰度按钮是有去重的**（按钮命令带 `--qn` / `--q`，绕过面板走到作品级去重，
+ * 所以点两次同样画质会被挡住）—— 用户的原话就是「封面解析没有，选两次一样清晰度有」。
+ *
+ * 这里按「平台 + 会话 + 用户 + 作品 id」补一次，**画质不在键里**（面板阶段还没选画质，
+ * 选了画质走的是下面那道作品级去重，两者互不干扰）。
+ *
+ * 调用方必须只在**不带任何参数**的首次解析上用：面板按钮点出来的（--p / --qn / --panel / --bgp）
+ * 一律放行，否则「重发面板」「上一页 / 下一页」这类交互会被它自己上一次的点击挡住。
+ * @param e 消息事件
+ * @param platform 平台名（只用于日志与键）
+ * @param workId 作品 id（B站 bvid / 抖音 aweme_id）
+ * @returns true = 可以解析；false = 刚刚已经解析过这个作品，忽略
+ */
+const acquireCoverLock = (e: any, platform: string, workId: string): boolean => {
+  const key = ['cover', platform, e?.contact?.peer ?? e?.channelId ?? '', e?.userId ?? '', String(workId ?? '')].join(':')
+  if (acquireParseLock(key)) return true
+  logger.debug('短时间内重复的%s封面解析，已忽略: %s', platform, key)
   return false
 }
 // 注意路径必须用相对写法：@/ 别名在这个仓库里指向 karin/，写 @/compat/... 会解析成 karin/compat/...
@@ -205,6 +238,15 @@ const handleDouyin = withParseForward(wrapWithErrorHandler(
     const iddata = await getDouyinID(e, url)
 
     /**
+     * 首次（不带任何参数）发链接：先过一遍封面去重，再出面板。
+     * 面板按钮点出来的（`flags.hasAny`）不走这里 —— 它有自己的作品级去重，
+     * 而且「重发面板」这类交互不该被上一次点击挡住（见 acquireCoverLock 的说明）。
+     */
+    if (iddata.type === 'one_work' && !flags.hasAny && !acquireCoverLock(e, 'douyin', String(iddata.aweme_id))) {
+      return
+    }
+
+    /**
      * 面板按钮里继续用**原始分享链接**：`getDouyinID` 是靠跟随跳转拿 aweme_id 的，
      * 换成 `www.douyin.com/video/{id}` 反而可能撞上抖音的验证页。
      */
@@ -311,6 +353,12 @@ const handleBilibili = withParseForward(wrapWithErrorHandler(
     }
     const startedAt = Date.now()
     const iddata = await getBilibiliID(url)
+
+    /** 同上（抖音那份注释）：首次发链接先过封面去重，带参数（面板按钮）的放行 */
+    if (iddata.type === 'one_video' && iddata.bvid && !flags.hasAny &&
+      !acquireCoverLock(e, 'bilibili', String(iddata.bvid))) {
+      return
+    }
 
     // QQ 平台：单视频先发交互面板，按钮里的规范链接（BV 号 + 分P）点一次就是一条完整命令
     if (
@@ -609,6 +657,81 @@ const handleCardParse = wrapWithErrorHandler(
  * `卡片消息` 是可推导的中文名，放最前面。
  */
 export const cardAPP = karin.command(/卡片消息/, handleCardParse, { name: 'kkk-卡片解析' })
+
+/**
+ * 单独把卡片图发一遍（`kkk封面` / `kkk评论`）。
+ *
+ * 卡片在 QQ 上是一整条 markdown 图片消息，几张图叠在一起 —— 想单独存封面、
+ * 或者只看评论区那张长图时很不方便。卡片下面那两个按钮点出来的就是这里，
+ * 不支持按钮的平台则提示「引用这条消息发送指令」，走的也是这里。
+ *
+ * **不重新解析、不重新渲染**：图源是上次解析记下来的（见 CardImageCache），
+ * 15 分钟过期（评论图是临时文件，会被定时清理），过期了就提示先发条链接。
+ */
+const handleExtractCard = wrapWithErrorHandler(
+  async (e, next) => {
+    const msg = String(e.msg ?? '')
+    /**
+     * **按钮把作品键当参数带过来了**（`kkk封面 bilibili:BV1JSan6GEFW`），优先用它。
+     *
+     * 不能只按「本会话最近一次解析」取：群里在你点按钮之前可能又发了别的链接，
+     * 那时点老卡片下面的按钮会发出来另一个作品的图。
+     * 手敲指令（不带参数）时才回退到本会话最近一次。
+     */
+    const arg = msg.replace(/^#?(?:kkk封面|kkk评论|提取封面图|提取评论区图片)/, '').trim()
+    const wantComment = /评论/.test(msg)
+    const cached = recallCardImages(resolveCardImageKey(e, arg))
+    let urls: string[] | undefined
+    if (wantComment) {
+      /**
+       * 「提取评论区图片」要的是**评论里用户自己贴的图**（`commentPics`），
+       * **不是**插件渲染出来的那张评论长图 —— 后者卡片本身已经发过一遍了，
+       * 再发一次等于原样重发。
+       *
+       * `commentPics` 存的是原始地址，得先过 `processImageUrls` 落地成能发的
+       * （防盗链 / 按 imageSendMode 转 base64 或本地文件）。
+       * 一条评论都没贴图时才退回那张渲染卡片。
+       */
+      const pics = cached?.commentPics ?? []
+      if (pics.length) {
+        urls = await processImageUrls(pics, '评论图片').catch((error) => {
+          logger.warn('[提取卡片图] 评论图片处理失败，退回渲染卡片: %s', String(error?.message ?? error))
+          return [] as string[]
+        })
+        if (!urls?.length) urls = undefined
+      }
+      if (!urls?.length) urls = cached?.comment
+    } else {
+      urls = cached?.cover ? [cached.cover] : undefined
+    }
+    if (!urls?.length) {
+      await e.reply(wantComment
+        ? '没拿到这条内容的评论区图片 —— 评论里没有用户贴图，或者已经过期（15 分钟）／临时文件被清理了，重新发一下链接再点 ~'
+        : '没找到这个作品的封面 —— 可能已经过期（15 分钟），重新发一下链接再点 ~')
+      return
+    }
+    /** 图片统一走 markdown：QQ 上不会被二次压缩，小字才看得清（见 compat/imageMarkdown） */
+    const md = await buildMarkdownImageMessage(urls, 420, platformOf(e))
+    await e.reply(md ?? urls.map((url) => segment.image(url)))
+    logger.debug('[提取卡片图] 已发送 %s 张（%s）', urls.length, wantComment ? '评论区' : '封面')
+  },
+  { businessName: '提取卡片图' }
+)
+
+/**
+ * 优先级必须**高于**各平台的链接指令（douyin / bilibili 等都是 800）。
+ *
+ * 按钮回调的文本是 `kkk评论 bilibili:BV1JSan6GEFW` —— 里面带着 BV 号，
+ * 而 `runTextCommand` 是按注册顺序找第一条匹配的：**B站链接指令的正则也能匹配这串字**
+ * （它就是靠 BV 号认链接的）。排在它前面就会被当成「解析这条链接」，
+ * 于是点「提取评论区图片」变成**重新解析一遍视频**、又把评论区发了一遍。
+ * 这条指令的正则是 `^#?(kkk封面|…)`，锚在开头，抢在最前面也不会误伤别的消息。
+ */
+export const extractCardAPP = karin.command(
+  /^#?(kkk封面|kkk评论|提取封面图|提取评论区图片)/,
+  handleExtractCard,
+  { name: 'kkk-提取卡片图', priority: 900 }
+)
 
 const douyin = karin.command(reg.douyin, handleDouyin, {
   name: 'kkk-视频功能-抖音',

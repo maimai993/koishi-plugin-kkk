@@ -487,6 +487,60 @@ function isCommandMessage (content: string, names: Set<string>): boolean {
   return false
 }
 
+/* ------------------------------------------------------------------ *
+ * 指令分组
+ * ------------------------------------------------------------------ */
+
+/**
+ * 所有指令挂到的父指令名 —— 控制台「指令」页里就是一个 `kkk` 分组。
+ *
+ * Koishi 的指令树是**靠名字里的 `.` 分词**的（见 `@koishijs/core` 的 `ctx.command()`）：
+ * `ctx.command('kkk.帮助')` 会顺手建出父指令 `kkk`，并让 `帮助` 成为它的子指令。
+ * 控制台就是靠这层父子关系分组的 —— 而且 `Command.toJSON()` 只把**名字里带 `.`**
+ * 的子指令收进 `children`，所以「只把 `parent` 指过去、名字还是 `kkk帮助`」是没用的，
+ * 名字必须真的写成 `kkk.xxx`。
+ */
+const COMMAND_GROUP = 'kkk'
+
+/**
+ * 指令在分组下的显示名：去掉前导的 `kkk`。
+ *
+ * `kkk帮助` → `帮助`、`kkkB站登录` → `B站登录`、`kkk解析统计` → `解析统计`。
+ * 这样控制台里看到的是 `kkk/帮助` 而不是 `kkk/kkk帮助`。
+ * 去掉后为空（指令名就叫 `kkk`）时退回原名，免得建出一个没有名字的子指令。
+ */
+function groupChildName (name: string): string {
+  return name.replace(/^kkk/i, '') || name
+}
+
+/**
+ * 把「走 Koishi 指令树」的写法还原成 karin 注册表认的指令名。
+ *
+ * 分组之后 `kkk.帮助` / `kkk 帮助` 也能触发指令，但移植过来的业务代码是按
+ * `e.msg.replace(/^#kkk帮助/, '')` 这种**裸指令名**写的，所以这里把
+ * `kkk` + 分隔符（空格 / 点 / 全角空格）换成这条指令真正的 karin 名再往下传。
+ *
+ * 不处理 `/` 分隔：`ctx.command('kkk/帮助')` 建出来的子指令名字里没有 `.`，
+ * 既进不了控制台的指令树、也不是用户会敲的写法。
+ *
+ * @param content 已经去掉 Koishi 前缀的消息正文
+ * @param child 分组下的显示名（`帮助`）
+ * @param canonical 该指令在 karin 注册表里的名字（`kkk帮助`）
+ */
+function unwrapGroupedCommand (content: string, child: string, canonical: string): string {
+  const lowered = content.toLowerCase()
+  const childLower = child.toLowerCase()
+  // 裸写显示名（`帮助`）—— 大多是解析类指令，`解析 <链接>` 原样通过
+  if (lowered.startsWith(childLower)) return canonical + content.slice(child.length)
+  for (const separator of [' ', '.', '　']) {
+    const head = COMMAND_GROUP + separator
+    if (lowered.startsWith(head) && lowered.slice(head.length).startsWith(childLower)) {
+      return canonical + content.slice(head.length + child.length)
+    }
+  }
+  return content
+}
+
 /**
  * 注册指令。
  *
@@ -586,8 +640,44 @@ function registerCommands (
     return !continued
   }
 
-  // 1) 注册成真正的 Koishi 指令
+  // 1) 注册成真正的 Koishi 指令 —— **全部挂在 `kkk` 分组下**
+  //
+  // 一个 karin 注册能推导出好几个名字（`/^#?(解析|kkk解析|弹幕解析)/` → 3 个），
+  // 这些名字共用同一个 handler，所以在 Koishi 这边也合成**一条**指令：
+  // 显示名取「去掉前导 kkk」的那个（`解析`），其余名字挂成别名（`kkk解析`）。
+  // 于是 `解析` / `kkk解析` / `kkk.解析` / `kkk 解析` 四种写法都能用，
+  // 而控制台里只看到一个 `kkk/解析`。
   const registered = new Set<string>()
+  /**
+   * 分组下的显示名 → 已经建好的指令。
+   * 同一次注册的第二个名字（`kkk解析` 之于 `解析`）只会给它补个别名，不再建一条指令。
+   */
+  const groupedCommands = new Map<string, {
+    command: any
+    registration: typeof typedRegistrations[number]
+    /** 已经挂过的别名（小写）—— `Command.alias()` 撞名会抛，这里先自己拦一道 */
+    aliases: Set<string>
+  }>()
+
+  // 父指令：控制台里的分组节点。先建出来，好把说明写上（自动创建的话说明是空的）
+  const group = ctx.command(COMMAND_GROUP, 'koishi-plugin-kkk 全部指令（展开看子指令）')
+
+  /**
+   * 挂别名，但**不让撞名把整个 apply 拖死**。
+   *
+   * `Command.alias()` 撞到别的指令会抛 `duplicate command names`。正常升级路径上
+   * 旧指令会先被 dispose 掉，撞不上；但「插件热重载 / 控制台点重载」的时序偶尔会让
+   * 上一个实例的指令还在表里 —— 那种情况下宁可少一个别名（重启就好了），
+   * 也不能让 apply 抛出去：apply 一挂，指令和控制台路由全都上不去。
+   */
+  const safeAlias = (command: any, alias: string) => {
+    try {
+      command.alias(alias)
+    } catch (error: any) {
+      logger.warn('指令别名 %s 已被占用，本次跳过（重启宿主即可恢复）：%s', alias, error?.message ?? error)
+    }
+  }
+
   for (const registration of typedRegistrations) {
     const names = commandNames(registration.reg)
     if (!names.length) {
@@ -595,8 +685,19 @@ function registerCommands (
       continue
     }
     for (const name of names) {
-      if (registered.has(name)) continue
-      registered.add(name)
+      const child = groupChildName(name)
+      const existing = groupedCommands.get(child)
+      if (existing) {
+        // 同一个注册的另一个名字（`kkk解析` 之于 `解析`）→ 只挂别名，不再建一条指令
+        const key = name.toLowerCase()
+        if (existing.registration === registration && !existing.aliases.has(key)) {
+          existing.aliases.add(key)
+          safeAlias(existing.command, name)
+        }
+        registered.add(name)
+        continue
+      }
+
       /**
        * 指令说明按「当前是不是播放器模式」动态取：开着在线播放器时，
        * 「弹幕解析」不再是「把弹幕烧进视频」，控制台里显示的用法也得跟着改。
@@ -607,7 +708,20 @@ function registerCommands (
       // 解析类指令接一段自由文本（链接 / BV 号 / 参数），声明出来控制台里能看清用法；
       // Koishi 的 checkArgCount / checkUnknown 默认都是关的，多传也不会报错
       const parseCommand = name === '解析' || name === '弹幕解析' || name === 'kkk解析'
-      const command = ctx.command(parseCommand ? name + ' [input:text]' : name, description)
+      const command = ctx.command(parseCommand ? COMMAND_GROUP + '.' + child + ' [input:text]' : COMMAND_GROUP + '.' + child, description)
+      /**
+       * **老写法必须原样可用** —— 用户习惯、QQ 按钮里的指令文本、「下载进度」按钮
+       * 都不带分组前缀，改成正名会一次性全断掉。所以两套都挂成别名：
+       *   - 分组下的显示名 `解析`（去掉前导 kkk 的那个）
+       *   - karin 注册表里的原名 `kkk解析` / `kkkB站登录`
+       */
+      const aliases = new Set<string>()
+      for (const alias of child === name ? [child] : [child, name]) {
+        const key = alias.toLowerCase()
+        if (aliases.has(key)) continue
+        aliases.add(key)
+        safeAlias(command, alias)
+      }
       /**
        * 面板按钮发过来的是「解析 <链接> --qn=80」这类文本，声明一下选项免得被当成参数报错。
        *
@@ -630,8 +744,10 @@ function registerCommands (
       }
       command.action(async ({ session }) => {
         if (!session) return
-        // karin 的代码都假设 e.msg 以 # 开头，这里把 Koishi 前缀换回 #（见函数注释）
-        const consumed = await runRegistration(registration, session, '#' + stripCommandPrefix(session.content ?? ''))
+        // karin 的代码都假设 e.msg 以 # 开头，这里把 Koishi 前缀换回 #（见函数注释）；
+        // `kkk.帮助` / `kkk 帮助` 这种分组写法也顺带还原成 karin 认的指令名
+        const bare = unwrapGroupedCommand(stripCommandPrefix(session.content ?? ''), child, name)
+        const consumed = await runRegistration(registration, session, '#' + bare)
         /**
          * 消费掉的消息要返回一个**非空值**：Koishi 的 \`Command.execute\` 在 action 返回空值时会
          * 继续跑后面的队列（也就是把消息交回中间件链），那条链上的链接自动解析会**再解析一次** ——
@@ -641,32 +757,74 @@ function registerCommands (
         // 空串能截断后续中间件，又不会被当成消息发出去（返回 true 会真的回一个「true」）
         return consumed ? EMPTY_RESULT : undefined
       })
+
+      groupedCommands.set(child, { command, registration, aliases })
+      registered.add(name)
+      registered.add(child)
+      registered.add(COMMAND_GROUP + '.' + child)
     }
     logger.debug('注册指令 %s ← %s', names.join(' / '), String(registration.reg))
   }
-  if (registered.size) logger.info('已注册 Koishi 指令 %d 个：%s', registered.size, [...registered].join(' '))
+  // 让「链接自动解析」认得 `kkk …` / `kkk.xxx` 这种分组写法（不然会被当成普通消息再解析一遍）
+  if (groupedCommands.size) registered.add(COMMAND_GROUP)
 
   /**
-   * 「下载进度」指令：面板上的 📊 按钮点一下就发它。
+   * 「下载进度」：面板上的 📊 按钮点一下就发它。
    * 解析大文件时群里只有一句「收到请求，开始下载」，有这个按钮就能随时看进度。
+   *
+   * **两条路都要接**：
+   *   - Koishi 指令（`下载进度` / `kkk.下载进度`，见下面的注册）；
+   *   - QQ 回调按钮（`interaction/button` 的 data 走文本兜底，见 `runTextCommand`）——
+   *     它不是 karin 注册表里的指令，所以得单独认一下，否则点了没反应。
+   * @param session 会话（用 `session.send` 回话）
    */
-  if (!registered.has('下载进度')) {
+  const showDownloadProgress = async (session: any) => {
+    const { listActiveDownloads } = require('./karin/module/utils/Network/Downloader')
+    const tasks = listActiveDownloads()
+    const formatMB = (bytes: number) => (bytes / 1024 / 1024).toFixed(1)
+    const lines = tasks.length
+      ? tasks.map((task: any) => {
+          // 「还没开始传输字节」的阶段（获取下载链接 / 合并音轨）直接显示阶段文案
+          if (task.stage) return '• ' + task.name + '　' + task.stage
+          const percent = task.total > 0 ? Math.floor((task.bytes / task.total) * 100) + '%' : '?'
+          return '• ' + task.name + '　' + formatMB(task.bytes) + (task.total > 0 ? '/' + formatMB(task.total) + ' MB' : ' MB') + '（' + percent + '）'
+        })
+      : ['当前没有正在进行的下载']
+    await session?.send('📥 下载进度\n' + lines.join('\n'))
+  }
+
+  if (!groupedCommands.has('下载进度')) {
+    groupedCommands.set('下载进度', {
+      command: null, registration: null as any, aliases: new Set(['下载进度'])
+    })
     registered.add('下载进度')
-    ctx.command('下载进度', '查看当前解析下载进度').action(async ({ session }) => {
-      const { listActiveDownloads } = require('./karin/module/utils/Network/Downloader')
-      const tasks = listActiveDownloads()
-      const formatMB = (bytes: number) => (bytes / 1024 / 1024).toFixed(1)
-      const lines = tasks.length
-        ? tasks.map((task: any) => {
-            // 「还没开始传输字节」的阶段（获取下载链接 / 合并音轨）直接显示阶段文案
-            if (task.stage) return '• ' + task.name + '　' + task.stage
-            const percent = task.total > 0 ? Math.floor((task.bytes / task.total) * 100) + '%' : '?'
-            return '• ' + task.name + '　' + formatMB(task.bytes) + (task.total > 0 ? '/' + formatMB(task.total) + ' MB' : ' MB') + '（' + percent + '）'
-          })
-        : ['当前没有正在进行的下载']
-      await session?.send('📥 下载进度\n' + lines.join('\n'))
+    registered.add(COMMAND_GROUP + '.下载进度')
+    const progressCommand = ctx.command(COMMAND_GROUP + '.下载进度', '查看当前解析下载进度')
+    safeAlias(progressCommand, '下载进度')
+    progressCommand.action(async ({ session }) => {
+      await showDownloadProgress(session)
       return EMPTY_RESULT
     })
+  }
+
+  /**
+   * 父指令 `kkk` 自己：只敲 `kkk` 时列出子指令，免得对着一个空分组发愣。
+   * 子指令照常优先（Koishi 会把 `kkk 帮助` 解析成 `kkk.帮助`）。
+   *
+   * 放在最后才挂 action —— 闭包读的是**实时**的子指令表，`下载进度` 也是这时候才进去的。
+   */
+  if (groupedCommands.size) {
+    group.action(async ({ session }) => {
+      const lines = [...groupedCommands.keys()].map((name) => '· ' + name)
+      await session?.send('🧩 kkk 指令（也可以直接敲「帮助」看用法）\n' + lines.join('\n'))
+      return EMPTY_RESULT
+    })
+  }
+
+  // 日志放在最后报，这样 `下载进度` 也算进去（它是在中间那段才补进来的）
+  if (groupedCommands.size) {
+    logger.info('已注册 Koishi 指令 %d 条（挂在 %s 分组下，全部以 %s. 开头）：%s',
+      groupedCommands.size, COMMAND_GROUP, COMMAND_GROUP, [...groupedCommands.keys()].join(' '))
   }
 
   /**
@@ -675,6 +833,15 @@ function registerCommands (
    * @returns 是否已消费这条消息
    */
   const runTextCommand = async (session: any, text: string): Promise<boolean> => {
+    /**
+     * 「下载进度」不是 karin 注册表里的指令（它只在 Koishi 这边注册过），
+     * 面板上那个 📊 按钮走的是回调（`interaction/button` → 文本兜底），
+     * 不在这儿认一下的话点了完全没反应。放最前面，免得以后有人加个宽正则把它吃掉。
+     */
+    if (/^#?(kkk)?\s*下载进度\s*$/.test(text)) {
+      await showDownloadProgress(session)
+      return true
+    }
     for (const registration of typedRegistrations) {
       const { reg } = registration
       let matched = false

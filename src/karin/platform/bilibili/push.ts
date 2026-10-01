@@ -33,6 +33,7 @@ import {
   uploadFile
 } from '@/module'
 import { bilibiliFetcher } from '@/module/utils/amagiClient'
+import { parseCommandActions } from '@/module/utils/QqPanel'
 import { Config } from '@/module/utils/Config'
 import { bilibiliProcessVideos, buildDashUrlCandidates, generateDecorationCard, getvideosize, parseAdditionalCard, TimeFormatter } from '@/platform/bilibili'
 import {
@@ -824,17 +825,15 @@ export class Bilibilipush extends Base {
           eventWithBot.selfId = botId
           const pushImg = img ?? []
 
-          // 仅 QQ 官方机器人支持按钮：非直播动态在卡片末尾追加「解析」回调按钮，点击后下发 #解析 + 动态/视频地址
+          /**
+           * 卡片末尾追加「解析」入口：点一下按这条动态 / 视频的地址解析。
+           *
+           * 以前用的是 `segment.button`（旧式回调按钮），而且只认 `adapter.name === 'QQ Official Bot'`，
+           * 结果很多部署上根本不出按钮。现在和卡片「提取图」按钮同一套写法：
+           * QQ / QQ 频道给 markdown 按钮，其它平台给「引用这条消息发送指令」的文字提示。
+           */
           const parseUrl = buildParseUrl(data[dynamicId])
-          const parseButton =
-            bot?.adapter?.name === 'QQ Official Bot' && parseUrl
-              ? [
-                  segment.button([
-                    { text: '解析', callback: true, data: `#解析${parseUrl}` },
-                    { text: '帮助', callback: true, data: `#kkk帮助` }
-                  ])
-                ]
-              : []
+          const parseButton = parseCommandActions({ bot }, parseUrl)
 
           status = await karin.sendMsg(botId, Contact, [...pushImg, ...parseButton])
           const shouldParseDynamic =
@@ -1562,23 +1561,85 @@ const br = (data: string): string => {
   return (data = data.replace(/\n/g, '<br>'))
 }
 
+/** 动态里那些「不是作品、解析了也没用」的链接 */
+const NON_WORK_URL = /t\.bilibili\.com|space\.bilibili\.com|bilibili\.com\/read|live\.bilibili\.com|bilibili\.com\/opus/i
+/** 能解析的作品链接（B站视频 / 短链，以及 UP 主偶尔分享的站外作品） */
+const WORK_URL = /bilibili\.com\/(video|bangumi|list)|b23\.tv|bili2233|\bBV[0-9A-Za-z]{10}\b|douyin|iesdouyin|kuaishou|xiaohongshu|xhslink/i
+
 /**
- * 根据动态类型构造用于「解析」按钮的地址。
- * 视频动态使用 BV 视频地址，其余动态使用动态地址；直播动态返回空字符串（不追加按钮）。
+ * 从一堆链接里挑第一条**能解析的作品链接**。
+ *
+ * 动态正文里的跳转链接什么都有：话题页、@某人、个人主页、专栏、直播间……
+ * 这些点了解析也解析不出东西（插件只认作品链接），所以这里过一遍，只留作品。
+ * @param urls 候选链接
+ * @returns 第一条作品链接；一个都没有就是空串
+ */
+const firstParseableUrl = (urls: string[]): string => {
+  for (const url of urls) {
+    if (!/^https?:\/\//i.test(url)) continue
+    if (NON_WORK_URL.test(url)) continue
+    if (WORK_URL.test(url)) return url
+  }
+  return ''
+}
+
+/**
+ * 动态里「值得解析」的那条地址 —— **不是这条动态本身**。
+ *
+ * 推送卡片已经把这条动态整个渲染出来了，再点「解析」去解析同一条动态，
+ * 等于把刚才那张卡片原样再发一遍，没有任何意义。用户点它是想要**动态里面带的那个作品**
+ * （比如 UP 主分享的视频）。所以：
+ *   - 视频动态 → 里面的 BV；
+ *   - **转发动态** → 被转发的那条内容（递归一层，转发本身就是个壳）；
+ *   - 其它动态 → 翻正文富文本 / 网页卡片里的跳转链接，取第一条作品链接。
+ * 什么都没带（纯文字、纯图文、没链接的转发）→ 返回空串，**这时干脆不给按钮**。
+ * @param item 一条动态（转发时递归传 `orig`）
+ * @param depth 递归层数，防一手自引用
+ * @returns 解析地址；没有可解析的内容时是空串
+ */
+const extractDynamicParseUrl = (item: any, depth = 0): string => {
+  if (!item || depth > 2) return ''
+  const md = item.modules?.module_dynamic ?? {}
+
+  // 转发：要点的是被转发的那条内容，不是这条转发本身
+  if (item.orig) {
+    const inner = extractDynamicParseUrl(item.orig, depth + 1)
+    if (inner) return inner
+  }
+
+  // 视频（自己的视频动态 / 被转发的视频）
+  const bvid = md.major?.archive?.bvid
+  if (bvid) return `https://www.bilibili.com/video/${bvid}`
+
+  // 正文富文本里的跳转链接：图文 / 纯文字走 `opus.summary`，转发走 `desc`
+  const candidates: string[] = []
+  const collect = (nodes: any) => {
+    for (const node of nodes ?? []) {
+      const url = String(node?.jump_url ?? '')
+      if (url) candidates.push(url)
+    }
+  }
+  collect(md.desc?.rich_text_nodes)
+  collect(md.major?.opus?.summary?.rich_text_nodes)
+  // 网页卡片（MAJOR_TYPE_COMMON，比如分享站外作品）
+  const commonUrl = String(md.major?.common?.jump_url ?? '')
+  if (commonUrl) candidates.push(commonUrl)
+
+  return firstParseableUrl(candidates)
+}
+
+/**
+ * 构造「解析」按钮的地址。
+ *
+ * 见 {@link extractDynamicParseUrl}：**解析的是动态里面的作品，不是动态本身** ——
+ * 推送卡片已经把动态渲染出来了，重复解析同一条动态没有意义。
+ * 直播推荐没有作品可解析，返回空串（不追加按钮）。
  * @param PushItem 推送项
- * @returns 解析地址，无法解析时返回空字符串
+ * @returns 解析地址，没有可解析的内容时返回空字符串
  */
 const buildParseUrl = (PushItem: BilibiliPushItem): string => {
-  switch (PushItem.dynamic_type) {
-    case DynamicType.AV: {
-      const bvid = PushItem.Dynamic_Data.modules.module_dynamic.major?.archive?.bvid
-      return bvid ? `https://www.bilibili.com/video/${bvid}` : ''
-    }
-    case DynamicType.LIVE_RCMD:
-      return ''
-    default:
-      return `https://t.bilibili.com/${PushItem.Dynamic_Data.id_str}`
-  }
+  if (PushItem.dynamic_type === DynamicType.LIVE_RCMD) return ''
+  return extractDynamicParseUrl(PushItem.Dynamic_Data)
 }
 
 /**

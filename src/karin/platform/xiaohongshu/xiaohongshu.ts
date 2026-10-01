@@ -1,6 +1,8 @@
 import fs from 'node:fs'
-import { sendCopyJumpMessage, xiaohongshuShareUrl } from '@/module/utils/QqPanel'
+import { cardImageActions, sendCopyJumpMessage, withCardActions, xiaohongshuShareUrl } from '@/module/utils/QqPanel'
 import { sendParseTip } from '@/module/utils/parseTip'
+import { cardImageKeyOf, imageSourcesOf, rememberCardImages, rememberLastCardKey } from '@/module/utils/CardImageCache'
+import { sendSlicedImage } from '@/module/utils/ImageSlice'
 
 import type { NoteComments, XiaohongshuEmojiListResponse } from '@ikenxuan/amagi'
 import type { RichTextEmojiDefinition } from '@kkk/richtext'
@@ -147,7 +149,20 @@ export class Xiaohongshu extends Base {
     logger.mark('[小红书] 准备判定内容形态…')
     // 统计用的内容形态：有视频流算视频笔记，否则算图文（与 noteInfo/comment 模板里的判定一致）
     this.workType = noteCard.video ? 'video' : 'gallery'
-    logger.mark('[小红书] 内容形态=' + this.workType + '，接下来拉表情列表')
+    /**
+     * **卡片图下面那两个「提取」按钮的作品键**（`xiaohongshu:<note_id>`）。
+     *
+     * 按钮点的是缓存里的图（见 CardImageCache），所以作品 id 必须在这里就定下来：
+     * 封面在详情卡片渲染前记，评论区那张长图渲染完再补记，两次用同一个键。
+     * 详情卡片是**最先发**的那条，封面必须**在它发送之前**就记好 ——
+     * 否则用户点「提取封面图」时缓存里还没有封面。
+     */
+    const cardKey = cardImageKeyOf('xiaohongshu', noteCard.note_id ?? data.note_id)
+    /** 封面（视频笔记的 image_list 常为空数组，按首帧 / cover 兜底，和详情卡片取的是同一个值） */
+    const coverUrl = xiaohongshuCoverUrl(noteCard)
+    rememberCardImages(cardKey, { cover: coverUrl })
+    rememberLastCardKey(this.e, cardKey)
+    logger.mark('[小红书] 内容形态=' + this.workType + '，卡片键=' + cardKey + '，接下来拉表情列表')
     /**
      * 表情列表**失败不能让整条解析中断** ——
      * 实测这个接口经常报错，而它在卡片渲染之前，一抛异常就变成
@@ -249,14 +264,10 @@ export class Xiaohongshu extends Base {
         note_id: noteCard.note_id,
         author: noteCard.user,
         /**
-         * 封面要**容错**：视频笔记的 image_list 可能是空数组，
-         * 取 [0].url_default 会抛 TypeError（卡片整张都没了）。
-         * 退而求其次用视频首帧，再不行给空串（模板能接受空值）。
+         * 封面的取值已在上面统一算好（`coverUrl`，容错逻辑见 xiaohongshuCoverUrl）——
+         * 这里和「提取封面图」按钮记的是**同一个值**，两处不会再各取一份取岔。
          */
-        image_url: noteCard.image_list?.[0]?.url_default
-          ?? noteCard.video?.image?.first_frame
-          ?? noteCard.video?.cover
-          ?? '',
+        image_url: coverUrl,
         time: noteCard.time,
         ip_location: noteCard.ip_location,
         share_url: shareUrl,
@@ -268,7 +279,13 @@ export class Xiaohongshu extends Base {
         steps.fail('渲染详情卡片', error)
       }
       logger.mark('[小红书] 详情卡片渲染完成，准备发送')
-      await this.e.reply(noteInfoImg)
+      if (noteInfoImg) {
+        /**
+         * 封面卡下面挂「提取封面图」按钮（**同一条消息**，见 withCardActions）。
+         * 渲染失败时 `noteInfoImg` 是 undefined，这时不发（原来会把 undefined 交给 reply）。
+         */
+        await this.e.reply(withCardActions(this.e, noteInfoImg, cardKey, { cover: true }))
+      }
       logger.mark('[小红书] 详情卡片已发送')
     }
 
@@ -413,7 +430,18 @@ export class Xiaohongshu extends Base {
           ImageLength: noteCard.image_list?.length || 0,
           share_url: shareUrl
         })
-        this.e.reply(commentListImg)
+        /**
+         * 记两样东西：
+         *   - `comment`：渲染出来的这张评论长图（按钮点它只是「原样再发一遍」，兜底用）；
+         *   - `commentPics`：**评论里用户自己贴的图**（原始地址）——
+         *     「提取评论区图片」要的就是这些，卡片里只显示了每条的**第一张**，其余的要靠这里发全。
+         */
+        rememberCardImages(cardKey, {
+          comment: imageSourcesOf(commentListImg),
+          commentPics: xiaohongshuCommentPics(processedComments)
+        })
+        /** 评论区长图下面挂「提取评论区图片」按钮（同一条消息内） */
+        await sendSlicedImage(this.e, commentListImg, cardImageActions(this.e, { comment: true, key: cardKey }))
       }
     }
 
@@ -631,6 +659,50 @@ export class Xiaohongshu extends Base {
     steps.throwIfFailed()
     return true
   }
+}
+
+/**
+ * 笔记封面（「提取封面图」按钮记的就是这个）。
+ *
+ * **必须容错**：视频笔记的 `image_list` 常常是空数组，直接取 `[0].url_default` 会抛
+ * TypeError；退而求其次用视频首帧，再不行用 `cover`，都没有才给空串（模板接受空值）。
+ * @param noteCard 笔记卡片数据
+ * @returns 封面地址；取不到时为空串
+ */
+const xiaohongshuCoverUrl = (noteCard: any): string => String(
+  noteCard?.image_list?.[0]?.url_default
+  ?? noteCard?.video?.image?.first_frame
+  ?? noteCard?.video?.cover
+  ?? ''
+)
+
+/** 把一条评论里的图片（根评论是对象数组、子评论是字符串数组，两种都认）收成地址数组 */
+const xiaohongshuPictureUrls = (pictures: any): string[] => {
+  if (!Array.isArray(pictures)) return []
+  return pictures
+    .map((picture): string => {
+      if (typeof picture === 'string') return picture
+      if (!picture || typeof picture !== 'object') return ''
+      return String(picture.url_default ?? picture.url_pre ?? picture.info_list?.[0]?.url ?? '')
+    })
+    .filter(Boolean)
+}
+
+/**
+ * 评论区里**用户自己贴的图**（「提取评论区图片」按钮要发的就是这些）。
+ *
+ * 卡片里每条评论只渲染了 `pictures[0]`，这里把根评论与子评论的所有图都收齐，
+ * 按出现顺序去重。
+ * @param comments `xiaohongshuComments` 的返回值
+ * @returns 图片原始地址
+ */
+const xiaohongshuCommentPics = (comments: any): string[] => {
+  const urls: string[] = []
+  for (const comment of Array.isArray(comments) ? comments : []) {
+    urls.push(...xiaohongshuPictureUrls(comment?.pictures))
+    urls.push(...xiaohongshuCommentPics(comment?.sub_comments))
+  }
+  return [...new Set(urls)]
 }
 
 /**

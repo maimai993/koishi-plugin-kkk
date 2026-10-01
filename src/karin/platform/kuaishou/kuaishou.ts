@@ -6,7 +6,9 @@ import { ParseSteps, SendTasks } from '@/module/utils/ParseSteps'
 // sendParseTip 单独导入：它在一个无依赖的叶子模块里，避免和平台模块形成循环 import
 import { sendParseTip } from '@/module/utils/parseTip'
 import type { ParseWorkType } from '@/module/db'
-import { kuaishouShareUrl, sendCopyJumpMessage } from '@/module/utils/QqPanel'
+import { cardImageActions, kuaishouShareUrl, sendCopyJumpMessage } from '@/module/utils/QqPanel'
+import { cardImageKeyOf, imageSourcesOf, rememberCardImages, rememberLastCardKey } from '@/module/utils/CardImageCache'
+import { sendSlicedImage } from '@/module/utils/ImageSlice'
 import { Config } from '@/module/utils/Config'
 // 注意用相对写法：@/ 别名在仓库里指向 karin/，@/player 会被解析成不存在的 karin/player
 import { applyForceOnlinePlayer } from '../../../player'
@@ -30,6 +32,43 @@ const pickVideoUrl = (work: KuaishouVideoWorkResponse): string => {
   const representations = work.photo?.manifest?.adaptationSet?.flatMap((set) => set.representation ?? []) ?? []
   const preferred = representations.find((item) => item.defaultSelect) ?? representations[0]
   return preferred?.url ?? work.photo?.mainMvUrls?.[0]?.url ?? ''
+}
+
+/**
+ * 快手评论里**用户自己贴的图**（评论区那种表情包 / 图片附件）。
+ *
+ * 位置是 `rootComments[i].attachments[] → content.smallUrl[]`（多 CDN 列表，取第一条；
+ * 见 amagi 的 `KsAttachmentRaw`）。这类附件**实测出现率不高**（约 500 条评论里 7 个），
+ * 所以所有字段都按可选处理，另外几种见过的回退形状（单数 `attachment`、
+ * `pictures`、模板里的 `commentimage`）也一并兜住，扫不到就是空数组。
+ * @param rootComments 评论响应里的 `rootComments`
+ * @returns 图片原始地址（去重）
+ */
+const kuaishouCommentPics = (rootComments: any): string[] => {
+  const urls: string[] = []
+  const push = (value: any) => {
+    if (typeof value === 'string' && value) urls.push(value)
+  }
+  for (const comment of Array.isArray(rootComments) ? rootComments : []) {
+    const attachments = [comment?.attachment, ...(Array.isArray(comment?.attachments) ? comment.attachments : [])]
+    for (const attachment of attachments) {
+      if (!attachment) continue
+      const smallUrls = attachment?.content?.smallUrl ?? attachment?.smallUrls
+      if (Array.isArray(smallUrls)) {
+        for (const item of smallUrls) push(typeof item === 'string' ? item : item?.url)
+      }
+      push(attachment?.content?.url)
+      push(attachment?.url)
+    }
+    push(comment?.commentimage)
+    const pictures = comment?.pictures ?? comment?.imageUrls
+    if (Array.isArray(pictures)) {
+      for (const picture of pictures) {
+        push(typeof picture === 'string' ? picture : (picture?.url ?? picture?.url_default))
+      }
+    }
+  }
+  return [...new Set(urls)]
 }
 
 export class Kuaishou extends Base {
@@ -126,6 +165,16 @@ export class Kuaishou extends Base {
      */
     const shareUrl = photoId ? kuaishouShareUrl(photoId) : ''
     const cardShareUrl = shareUrl || video_url
+    /**
+     * **卡片图下面那两个「提取」按钮的作品键**（`kuaishou:<photoId>`）。
+     *
+     * 快手这条链路**只有评论区一张卡**（没有单独的封面卡，工作信息本身就画在评论卡顶部），
+     * 所以封面与评论区两个按钮都挂在它下面（见下面的 sends.add('渲染评论区')）。
+     */
+    const cardKey = cardImageKeyOf('kuaishou', photoId)
+    /** 封面：`photo.coverUrls` 是 `[{ cdn, url }]`，取第一张原图 */
+    rememberCardImages(cardKey, { cover: String(work?.photo?.coverUrls?.[0]?.url ?? '') })
+    rememberLastCardKey(this.e, cardKey)
     /** 本次解析的步骤容器：单步失败只跳过、不中断，最后统一渲染一张错误卡片（见 ParseSteps） */
     const steps = new ParseSteps()
     /** 发送任务组：评论区与视频各走一条线，谁先就绪谁先发 */
@@ -169,7 +218,20 @@ export class Kuaishou extends Base {
       VideoSize: fileSizeInMB,
       likeCount: work.photo.likeCount
     })
-    await this.e.reply(img)
+    /**
+     * 记下评论区那张长图（兜底用）与评论里用户贴的图（`commentPics`，按钮真正要发的）。
+     *
+     * 快手评论里的图片附件在 `attachments[].content.smallUrl`（见 {@link kuaishouCommentPics}），
+     * 出现率不高；扫不到时 `commentPics` 是空数组，按钮点下去退回这张评论长图，不会报错。
+     */
+    rememberCardImages(cardKey, {
+      comment: imageSourcesOf(img),
+      commentPics: kuaishouCommentPics(payload?.CommentsData?.rootComments)
+    })
+    /**
+     * 评论区这张卡是快手**唯一**的一张卡：封面与评论区两个按钮都挂它下面，同一条消息。
+     */
+    await sendSlicedImage(this.e, img, cardImageActions(this.e, { cover: true, comment: true, key: cardKey }))
     })
 
     /**

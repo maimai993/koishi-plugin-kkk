@@ -22,10 +22,44 @@ export interface ParseStepFailure {
   error: unknown
 }
 
-const messageOf = (error: unknown): string => {
-  if (error instanceof Error) return error.message
-  return String(error)
+/**
+ * 把任意错误说成一句人能看懂的话。
+ *
+ * ## 为什么要绕这么多层（用户实测踩的坑）
+ *
+ * 适配器发送失败时抛的是 `@satorijs/core` 的 `AggregateError`：它 `super('')` ——
+ * **message 是空字符串**，真正的原因放在 `errors: Error[]` 里，每条的 message 才是有用的
+ * `QQ 消息发送失败 [400xxxxx] xxx`。以前这里直接读 `error.message`，于是日志里只剩
+ *
+ *     视频文件上传错误,Error
+ *     [解析] 步骤「发送视频」失败，已跳过并继续后面的步骤:
+ *     [ErrorHandler] 原始错误: 解析过程中有 1 个步骤失败（发送视频）：
+ *
+ * —— 完全看不出为什么失败（连错误码都没有）。这里把 `errors[]` / `cause` 一层层剥开。
+ * @param error 捕获到的任意错误
+ * @param depth 递归深度（防止 `cause` 自引用转不出来）
+ * @returns 可读的错误描述，至少不会是空串
+ */
+export const describeError = (error: unknown, depth = 0): string => {
+  if (error === null || error === undefined) return String(error)
+  if (!(error instanceof Error)) return String(error)
+  const own = String(error.message ?? '').trim()
+  if (own) return own
+  if (depth >= 4) return error.name || 'Error'
+  const nested = (error as any)?.errors
+  if (Array.isArray(nested) && nested.length) {
+    const inner = nested.map((item: unknown) => describeError(item, depth + 1)).filter(Boolean)
+    if (inner.length) return inner.join('；')
+  }
+  const cause = (error as any)?.cause
+  if (cause && cause !== error) {
+    const text = describeError(cause, depth + 1)
+    if (text) return text
+  }
+  return error.name || 'Error'
 }
+
+const messageOf = (error: unknown): string => describeError(error)
 
 export class ParseSteps {
   /** 已失败的步骤（按发生顺序） */

@@ -30,7 +30,9 @@ import { resolvePlayerSizeLimitMB } from '../../../player'
 import { Config } from './Config'
 import { getDouyinQualityLevel } from '@/platform/douyin/videoQuality'
 import { platformOf } from '@/module/utils/ImageSlice'
+import { cardImageKeyOf, recallCardImages, rememberCardImages, rememberLastCardKey } from '@/module/utils/CardImageCache'
 import { getImageMetadata, Render } from '@/module/utils/Render'
+import { isUsableSize, readImageSize, scaleToWidth } from '../../../compat/imageSize'
 import { getHotDanmaku } from '@/platform/bilibili/danmaku'
 // 头像框 / 昵称颜色要从 UP 主页接口拿，和解析结果保持一致
 import { getUsernameMetadata } from '@/platform/bilibili/dynamic-text'
@@ -516,6 +518,251 @@ export function cmdInput (command: string, show?: string): string {
   return '<qqbot-cmd-input text="' + text + '" show="' + label + '" reference="false" />'
 }
 
+/**
+ * 从作品详情里取封面地址（两个平台的字段不一样）。
+ *
+ * B站是 `pic`；抖音视频在 `video.cover.url_list[0]`（动图封面 `animated_cover` 优先），
+ * 图文 / 文章没有 video，取 `images[0].url_list[0]`。
+ * @param platform 平台
+ * @param detail 作品详情（面板拿到的那份）
+ */
+function panelCoverUrl (platform: string, detail: any): string {
+  if (!detail) return ''
+  if (platform === 'bilibili') return String(detail.pic ?? '')
+  return String(
+    detail.video?.animated_cover?.url_list?.[0] ??
+    detail.video?.cover?.url_list?.[0] ??
+    detail.images?.[0]?.url_list?.[0] ??
+    ''
+  )
+}
+
+/**
+ * 当前适配器能不能发 **QQ 原生按钮**（keyboard 上那种方块按钮，不是 markdown 里的蓝字）。
+ *
+ * 原生按钮要靠适配器的 `button` 元素落到消息的 `keyboard` 字段上，
+ * 官方 `@koishijs/plugin-adapter-qq` **没实现**（发过去只会变成一段普通文本，按钮没了），
+ * 只有接了原生能力的适配器（比如 `adapter-qq-crack`）才有。所以这里先探一下：
+ *   - 适配器名对得上就直接用；
+ *   - 再退一步看内部 API —— 会处理 `INTERACTION_CREATE` 的适配器才会实现
+ *     `acknowledgeInteraction`，有它就说明按钮回调这条路是通的。
+ * 探不到就退回 markdown 的 `<qqbot-cmd-input>`（那个是**文字链**，QQ 上显示成蓝色链接）。
+ * @param e 消息事件 / `{ bot }`
+ */
+export function supportsKeyboardButton (e: any): boolean {
+  const bot = e?.bot ?? e?.session?.bot
+  const inner = bot?.bot ?? bot
+  const name = String(bot?.adapter?.name ?? inner?.adapter?.name ?? '')
+  if (name === 'adapter-qq-crack' || name.includes('crack')) return true
+  /** crack 专属能力（它 README 里列的 `bot.refreshBotGroupState`），比猜名字稳 */
+  if (typeof (bot?.refreshBotGroupState ?? inner?.refreshBotGroupState) === 'function') return true
+  return typeof (bot?.internal ?? inner?.internal)?.acknowledgeInteraction === 'function'
+}
+
+/** 「把封面图单独发一遍」的指令 */
+export const EXTRACT_COVER_COMMAND = 'kkk封面'
+/** 「把评论区那张长图单独发一遍」的指令 */
+export const EXTRACT_COMMENT_COMMAND = 'kkk评论'
+
+/**
+ * 这张卡片下面那个按钮**真的点得出东西吗**。
+ *
+ * 用户反馈：「**评论区没有图片就不要显示按钮了**」—— 按钮点下去是把缓存里的图
+ * 单独发一遍（见 `CardImageCache`），缓存里没这张图时它就是个**点了没反应**的摆设：
+ *   - `cover`：这个作品本来就没有封面（比如纯文字动态）；
+ *   - `comment`：「提取评论区图片」要的是**评论里用户自己贴的图**（`commentPics`，
+ *     和 `apps/tools.ts` 里点击处理的口径一致）—— 一条评论都没贴图时 `commentPics` 是空的，
+ *     而那张**渲染出来的评论长图**（`comment`）卡片本身已经发过一遍了，
+ *     再挂个按钮去重发一遍没有意义。
+ *
+ * 所以**没有图就不挂按钮**，宁缺毋滥。拿不到作品键（`key` 为空）时同样不放行。
+ *
+ * 注意：这要求调用方**先 `rememberCardImages`、再挂按钮**（各平台的调用点都是这个顺序）。
+ * @param key 作品缓存键（{@link cardImageKeyOf}）
+ * @param kind 哪个按钮
+ * @returns 该按钮是否有东西可发
+ */
+export function hasCardImage (key: string | undefined, kind: 'cover' | 'comment'): boolean {
+  /** 没有作品 id 就不挂按钮：点了也不知道该发哪张图 */
+  if (!key) return false
+  const cached = recallCardImages(key)
+  if (!cached) return false
+  if (kind === 'cover') return !!cached.cover
+  return !!cached.commentPics?.length
+}
+
+/**
+ * 卡片下面的「提取」按钮 —— **QQ 原生按钮**（`action.type = 1`，回调按钮）。
+ *
+ * 和 markdown 的 `<qqbot-cmd-input>`（蓝字文字链）不是一回事：原生按钮是挂在消息下方的
+ * 方块按钮，点了直接把 `data` 回调给机器人，走 `interaction/button` 事件
+ * （`src/index.ts` 里那条监听会把它当成一条指令跑掉），
+ * **不会**往输入框塞文本、也不用用户再点一次发送。
+ * @param e 消息事件（适配器探测用；原生按钮不区分平台，探测不通过时由调用方退回文字链）
+ * @param options 要哪几个按钮；`key` 是作品缓存键，会拼进回调 data
+ * @returns 按钮元素数组
+ */
+export function cardImageButtons (
+  e: any,
+  options: { cover?: boolean, comment?: boolean, key?: string } = {}
+): any[] {
+  const wanted: Array<{ command: string, label: string, id: string }> = []
+  if (options.cover && hasCardImage(options.key, 'cover')) wanted.push({ command: EXTRACT_COVER_COMMAND, label: '提取封面图', id: 'kkk-extract-cover' })
+  if (options.comment && hasCardImage(options.key, 'comment')) wanted.push({ command: EXTRACT_COMMENT_COMMAND, label: '提取评论区图片', id: 'kkk-extract-comment' })
+  /** 没有图 / 没有作品 id 就不挂按钮：点了也不知道该发哪张图（见 {@link hasCardImage}） */
+  if (!wanted.length || !options.key) return []
+  return wanted.map((item) => segment.button({
+    id: item.id,
+    /**
+     * 按钮**显示的名字只有中文那几个字**（`提取封面图` / `提取评论区图片`）。
+     * 作品参数只放在 `action.data` 里，那是点击后回调给机器人的**载荷**，用户看不见。
+     * `label` / `text` 两个别名也一起给上：适配器取名的回退链是
+     * `render_data.label → 子元素文本 → attrs.text → action.data`，
+     * 多给两层兜底，免得哪天 render_data 没透传时按钮把整串指令显示出来。
+     */
+    label: item.label,
+    text: item.label,
+    render_data: { label: item.label, visited_label: item.label, style: 1 },
+    action: {
+      /** 1 = 回调按钮：点了把 data 回调给后台，不往输入框塞文本 */
+      type: 1,
+      permission: { type: 2 },
+      data: item.command + ' ' + options.key,
+      /** `enter` 是指令按钮用的，回调按钮关掉，免得两种投递都触发、图发两遍 */
+      enter: false,
+      reply: false
+    }
+  }))
+}
+
+/**
+ * **推送 / 转发类消息下面的「解析」按钮**。
+ *
+ * 定时推送出来的动态、作品卡片里带着链接，但**自动解析没开时**没人会去解析它
+ * ——用户看到的就是一张图。这里在卡片下面给一个「解析」按钮，点一下即按这条链接解析。
+ *
+ * 和 {@link cardImageActions} 同一套口径：**只有 QQ / QQ 频道有按钮**，
+ * 其它平台给文字提示，照着「引用这条消息发送 `解析 <链接>`」操作即可。
+ * @param e 消息事件 / bot 所在上下文（用来判断平台）
+ * @param url 要解析的链接；空则不追加任何东西
+ * @returns 追加到卡片后面的元素
+ */
+export function parseCommandActions (e: any, url: string): any[] {
+  if (!url) return []
+  const command = '解析 ' + String(url)
+  /** 同卡片提取按钮：能用原生按钮就用原生按钮（回调，点了直接解析） */
+  if (supportsKeyboardButton(e)) {
+    return [segment.button({
+      id: 'kkk-push-parse',
+      /** 同上：按钮只显示「解析」，链接是点击后回调给机器人的载荷 */
+      label: '解析',
+      text: '解析',
+      render_data: { label: '解析', visited_label: '解析', style: 1 },
+      action: { type: 1, permission: { type: 2 }, data: command, enter: false, reply: false }
+    })]
+  }
+  if (supportsMarkdown(platformOf(e))) {
+    /**
+     * 前面**必须带换行**：这里是作为独立元素拼在卡片（图片 / markdown）后面的，
+     * 渲染时是直接续写在卡片内容末尾，不加换行按钮会**粘在图片那一行后面**，
+     * 既难看也容易被当成上一行的正文。
+     */
+    return [segment.markdown(String.fromCharCode(10) + cmdInput(command, '解析'))]
+  }
+  return [segment.text(String.fromCharCode(10) + '引用这条消息发送「' + command + '」即可解析')]
+}
+
+/**
+ * 「提取封面图 / 提取评论区图片」那一行**纯文本**（markdown 写法）。
+ *
+ * 面板、卡片这类消息本身就是 markdown 文本，要的是**拼在图片下面的一行**，
+ * 而不是一个独立的元素 —— 用这个拼进去才能和图片在同一条消息里（见 {@link cardImageActions}）。
+ * @param e 消息事件（用来判断平台）
+ * @param options 要哪几个按钮
+ * @returns markdown 文本行；不需要按钮时是空串，调用方判空即可
+ */
+export function cardImageActionLine (
+  e: any,
+  options: { cover?: boolean, comment?: boolean, key?: string } = {}
+): string {
+  const wanted: Array<{ command: string, label: string }> = []
+  if (options.cover && hasCardImage(options.key, 'cover')) wanted.push({ command: EXTRACT_COVER_COMMAND, label: '提取封面图' })
+  if (options.comment && hasCardImage(options.key, 'comment')) wanted.push({ command: EXTRACT_COMMENT_COMMAND, label: '提取评论区图片' })
+  if (!wanted.length) return ''
+  /**
+   * **指令必须带作品参数**（`kkk封面 bilibili:BV1JSan6GEFW`）。
+   *
+   * 不带参数就只能「取本会话最近解析过的作品」，而群里在你点按钮之前**可能已经又发了别的链接**
+   * —— 那时点老卡片下面的按钮，发出来的是另一个作品的图。带上参数就永远点对。
+   */
+  const withKey = (command: string) => options.key ? command + ' ' + options.key : command
+  if (supportsMarkdown(platformOf(e))) {
+    return wanted.map((item) => cmdInput(withKey(item.command), item.label)).join(' ')
+  }
+  return wanted.map((item) => '引用这条消息发送「' + withKey(item.command) + '」可' + item.label).join('；')
+}
+
+/**
+ * **卡片图下面的「提取」按钮**。
+ *
+ * 卡片在 QQ 上是 markdown 图片，几张图叠在一条消息里，想单独存封面 / 单独看评论区长图很不方便。
+ * 这里在卡片下面给两个按钮，点一下把对应的那张图**单独发一遍**（不重新解析、不重新渲染，
+ * 图源取自 `CardImageCache`）。
+ *
+ * **按钮就在图片下面、同一条消息里**：返回的是**追加元素**，调用方把它和图片放在同一个
+ * 数组里一起 reply（详情卡片、评论区卡片都是这么干的）；面板那种纯 markdown 文本的，
+ * 改用 {@link cardImageActionLine} 拿按钮行拼进文本。
+ *
+ * **只有 QQ / QQ 频道有按钮**（markdown 是它们才有的东西，见 `supportsMarkdown`）。
+ * 其它平台给的是一句**文字提示**：它们没有按钮可点，只能「引用这条消息 + 发指令」——
+ * 提示里把指令名写全，用户照着发就行。
+ * @param e 消息事件（用来判断平台）
+ * @param options 这张卡片下面要哪几个按钮
+ * @returns 追加到卡片后面的元素（没要按钮就是空数组，调用方直接展开即可）
+ */
+export function cardImageActions (
+  e: any,
+  options: { cover?: boolean, comment?: boolean, key?: string } = {}
+): any[] {
+  /** 适配器支持原生按钮就用原生按钮：方块按钮 + 点击直接回调，比文字链好用得多 */
+  if (supportsKeyboardButton(e)) return cardImageButtons(e, options)
+  const line = cardImageActionLine(e, options)
+  if (!line) return []
+  /**
+   * 独立成一条时用 markdown 元素（按钮要能被 QQ 认出来）；提示文字用 text 段。
+   *
+   * 同样**前面带换行**：这个元素是拼在图片后面的，不加换行按钮会粘在图片那一行末尾。
+   * （面板那种纯文本消息走 {@link cardImageActionLine}，它自己占一行，不要这个换行。）
+   */
+  return supportsMarkdown(platformOf(e))
+    ? [segment.markdown(String.fromCharCode(10) + line)]
+    : [segment.text(String.fromCharCode(10) + line)]
+}
+
+/**
+ * 把「提取封面图 / 提取评论区图片」按钮**挂到卡片后面**（同一条消息内）。
+ *
+ * 卡片在 QQ 上就是一张渲染出来的图，按钮要跟它一起发出去 —— 这个 helper 负责
+ * 「图片（单个元素或数组）+ 按钮」拼成一条消息的内容，调用方直接 `reply` 就行。
+ *
+ * **不传 key 就不挂按钮**：拿不到作品 id 的作品（比如没解析出 id 的动态）挂了也点不出东西。
+ * @param e 消息事件
+ * @param content 卡片本身（`Render` 的返回值，可以是单个元素也可以是数组）
+ * @param key 作品缓存键（{@link cardImageKeyOf}）
+ * @param options 要哪几个按钮
+ * @returns 一条消息的内容（数组）
+ */
+export function withCardActions (
+  e: any,
+  content: any,
+  key: string,
+  options: { cover?: boolean, comment?: boolean } = {}
+): any[] {
+  const list = Array.isArray(content) ? [...content] : [content]
+  if (!key) return list
+  return [...list, ...cardImageActions(e, { ...options, key })]
+}
+
 /* ------------------------------------------------------------------ *
  * 上一条面板消息的撤回
  *
@@ -723,6 +970,24 @@ const qualityLabel = (option: QualityOption): string => {
 }
 
 /**
+ * 「渲染出来的卡片 buffer + 公网地址」→ 可嵌进 markdown 的卡片信息。
+ *
+ * **尺寸必须是真量出来的**：QQ 按 `#宽px #高px` 这个框渲染图片，框的比例和原图对不上就会
+ * **被拉伸**。以前这里读不出尺寸时会兜 `|| 1440` / `|| 1080`（4:3），一张 1:2 的卡片就直接变形；
+ * 现在读不出就返回 null —— 这张卡不出，比出一张拉变形的图好（面板的文字表格照常在）。
+ * @param buffer 卡片图的二进制
+ * @param url 已上传拿到的公网地址
+ */
+const panelCardInfo = (buffer: Buffer, url: string): { url: string; width: number; height: number } | null => {
+  const size = readImageSize(buffer)
+  if (!isUsableSize(size)) {
+    logger.mark('[QQ面板] 卡片图读不出尺寸，跳过这张卡（写错尺寸会把图片拉伸）')
+    return null
+  }
+  return { url, width: size.width, height: size.height }
+}
+
+/**
  * 渲染面板卡片（和解析结果同一套模板）并上传到 assets，拿到 QQ markdown 能用的图片地址。
  *
  * QQ 的 markdown 图片必须是**可访问的 https 地址**（本地文件、base64 都不认），
@@ -758,11 +1023,10 @@ async function uploadPanelCard (
       const src = String(first?.attrs?.src ?? first?.data?.file ?? '')
       if (!src.startsWith('data:image/')) return null
       const buffer = Buffer.from(src.slice(src.indexOf(',') + 1), 'base64')
-      const meta = getImageMetadata(buffer)
       const uploaded = await assets.upload(src, 'kkk-douyin-panel.png')
       const url = typeof uploaded === 'string' ? uploaded : uploaded?.url
       if (!url || !/^https?:\/\//i.test(String(url))) return null
-      return { url: String(url), width: Number(meta.width) || 0, height: Number(meta.height) || 0 }
+      return panelCardInfo(buffer, String(url))
     }
 
     /** UP 主页信息（头像框 / 昵称颜色），失败不影响面板 */
@@ -810,14 +1074,13 @@ async function uploadPanelCard (
     if (!src.startsWith('data:image/')) return null
 
     const buffer = Buffer.from(src.slice(src.indexOf(',') + 1), 'base64')
-    const meta = getImageMetadata(buffer)
     const result = await assets.upload(src, 'kkk-panel.png')
     const url = typeof result === 'string' ? result : result?.url
     if (!url || !/^https?:\/\//i.test(String(url))) {
       logger.debug('[QQ面板] assets 上传返回的地址不可用: ' + String(url || result))
       return null
     }
-    return { url: String(url), width: Number(meta.width) || 0, height: Number(meta.height) || 0 }
+    return panelCardInfo(buffer, String(url))
   } catch (error: any) {
     logger.debug('[QQ面板] 渲染/上传卡片失败: ' + String(error?.message ?? error))
     return null
@@ -844,11 +1107,10 @@ async function renderBangumiCard (e: Message, cardData: any): Promise<{ url: str
   if (!src.startsWith('data:image/')) return null
 
   const buffer = Buffer.from(src.slice(src.indexOf(',') + 1), 'base64')
-  const meta = getImageMetadata(buffer)
   const uploaded = await assets.upload(src, 'kkk-bangumi.png')
   const url = typeof uploaded === 'string' ? uploaded : uploaded?.url
   if (!url || !/^https?:\/\//i.test(String(url))) return null
-  return { url: String(url), width: Number(meta.width) || 1440, height: Number(meta.height) || 1080 }
+  return panelCardInfo(buffer, String(url))
 }
 
 /**
@@ -981,6 +1243,20 @@ export async function sendQqParsePanel (e: Message, request: PanelRequest): Prom
   const info = await fetchPanelInfo(request)
   if (!info || !info.options.length) return false
 
+  /**
+   * 封面要在**这里**就记进缓存。
+   *
+   * 正式解析时详情卡片是**不发**的（`fromPanel` 分支跳过 —— 面板已经发过那张卡），
+   * 之后只有评论区那条长图会带按钮，而它下面的「提取封面图」要的就是这张封面。
+   * 注意**面板自己不带按钮**：选了清晰度面板会被撤回（`replyReplacing`），
+   * 挂在面板上的按钮跟着一起没了，点了没反应。
+   */
+  const panelKey = cardImageKeyOf(request.platform, request.id)
+  rememberCardImages(panelKey, {
+    cover: String(panelCoverUrl(request.platform, info?.detail) ?? '')
+  })
+  rememberLastCardKey(e, panelKey)
+
   const limit = Number(runtime.config.qqFileLimitMB ?? 200) || 200
   /**
    * 在线播放模式（通用 → 在线播放器设置 →「弹幕重定向在线播放器」，缺省即开启）。
@@ -1022,12 +1298,20 @@ export async function sendQqParsePanel (e: Message, request: PanelRequest): Prom
    */
   let cardSent = false
   if (card && card.url) {
-    // QQ markdown 的图片必须写成 ![#宽px #高px](url)
-    const cardLines = ["![#" + (card.width || 1440) + "px #" + (card.height || 1080) + "px](" + card.url + ")"]
+    // QQ markdown 的图片必须写成 ![#宽px #高px](url)，尺寸用**真实值**（panelCardInfo 保证过）
+    const cardLines = ["![#" + card.width + "px #" + card.height + "px](" + card.url + ")"]
     try {
       await recallLastPanelCard(e)
       await recallMessageById(e, loadingId)
-      const sentCard: any = await sendPanelMarkdown(cardLines, (content) => e.reply(content))
+      /**
+       * 「提取封面图」挂在**这张封面卡**上（同一条消息），不放画质表格那条。
+       *
+       * 这张卡是**单独一条**消息、选清晰度时不会被撤（撤的只是下面那张表格），
+       * 所以按钮点得到；而表格那条一点就被 `replyReplacing` 撤掉了，挂那儿等于没有。
+       * 这里**只给封面**：评论区那张图这会儿还没渲染，给了也点不出东西。
+       */
+      const sentCard: any = await sendPanelMarkdown(cardLines, (content) =>
+        e.reply([content, ...cardImageActions(e, { cover: true, key: panelKey })]))
       rememberPanelCard(e, sentCard?.sent?.messageId)
       cardSent = true
     } catch (error: any) {
@@ -1209,6 +1493,7 @@ export async function sendQqParsePanel (e: Message, request: PanelRequest): Prom
         : [sourceLink('打开原站', jumpUrl)]
     lines.push(...block)
   }
+  // 面板**不放**「提取」按钮：点清晰度后面板会被撤回（`replyReplacing`），按钮跟着没了
   // 带链接发不出去时自动去掉链接行重发（不然整条面板、整个解析都会被一个链接拖死）
   // 代码块连围栏共 3 行，所以按**下标范围**整块摘，不能只删中间那行
   const linkRange: [number, number] | undefined = lines.length > linkStart ? [linkStart, lines.length] : undefined
@@ -1242,23 +1527,27 @@ export const sendParseTip = async (e: Message, platformName: string): Promise<vo
 }
 
 /**
- * 把一张远程图片转成 QQ markdown 能用的地址。
+ * 把一张图片转成 QQ markdown 能用的地址（`![#宽px #高px](https url)`）。
  *
- * QQ 的 markdown 图片必须写成 `![#宽px #高px](https url)`，而且外链常常被拦，
- * 所以这里先下载再通过宿主的 assets 服务上传一份，返回可直接嵌进 markdown 的地址与原始尺寸。
+ * ## 尺寸只写**真实值**，读不出就返回 null
  *
- * @param url 原始图片地址
+ * 这个函数以前有**四处**「读不出尺寸就按 `maxWidth × maxWidth×1.3` 估一个」的兜底。
+ * 那不叫兜底，叫**拉变形**：QQ 按 `#宽px #高px` 这个框渲染，框的比例和原图对不上，
+ * 图片就被硬拉成长宽比 1:1.3 —— 用户反馈的「自适应发送的图片有些被强制拉伸了」就是它。
+ *
+ * 现在的口径和其它链路统一（见 `compat/imageMarkdown`）：
+ *   - 能读出来（PNG / JPEG / GIF / WebP，见 `compat/imageSize`）→ 按真实比例写死尺寸；
+ *   - 读不出来 → 先补一次 ffprobe；还是不行就**返回 null**，让调用方退回「普通图片段」发。
+ *     普通图片会被客户端压得糊一点，但**比例是对的、也看得见**，比一张拉变形的图强。
+ *
+ * @param url 原始图片地址（http(s) / 本地路径 / file:// / data URI / base64://）
  * @param maxWidth 最大显示宽度（等比缩放，避免大图刷屏）
+ * @returns 可直接嵌进 markdown 的图片；**尺寸未知 / 下载失败时返回 null**
  */
 export const toMarkdownImage = async (url: string, maxWidth = 420): Promise<string | null> => {
   try {
     const ctx: any = tryGetRuntime()?.ctx
     const assets: any = ctx?.assets
-    if (!assets?.upload) {
-      // 没有 assets 服务就只能用原始链接（QQ 大概率取不到，但比直接放弃强）
-      logger.mark('[QQ面板] 宿主没有 assets 服务，md 图片改用原始链接')
-      return /^https?:\/\//i.test(url) ? '![#' + maxWidth + 'px #' + Math.round(maxWidth * 1.3) + 'px](' + url + ')' : null
-    }
     /**
      * 三种图片来源都要认：
      *   1. **data URI**（卡片、提示图 ✓）
@@ -1288,48 +1577,53 @@ export const toMarkdownImage = async (url: string, maxWidth = 420): Promise<stri
     } else {
       const res = await fetch(url)
       if (!res.ok) {
-        logger.mark('[QQ面板] md 图片下载失败 HTTP ' + res.status + '，改用原始链接: ' + url.slice(0, 60))
-        return '![#' + maxWidth + 'px #' + Math.round(maxWidth * 1.3) + 'px](' + url + ')'
+        logger.mark('[QQ面板] md 图片下载失败 HTTP ' + res.status + '，这张改用普通图片发送: ' + url.slice(0, 60))
+        return null
       }
       buffer = Buffer.from(await res.arrayBuffer())
       mime = String(res.headers.get('content-type') ?? 'image/jpeg').split(';')[0]
     }
-    /**
-     * 尺寸必须尽量取到**真实值** —— 原来取不到就用 maxWidth 兜底，
-     * 结果 width/height 相等 → 图片被拉成**正方形**（用户反馈「比例不对」）。
-     * 这里补一层 ffprobe（webp/avif 这类 getImageMetadata 认不出的格式也能拿到）。
-     */
-    const meta = getImageMetadata(buffer)
-    let realWidth = Number(meta.width) || 0
-    let realHeight = Number(meta.height) || 0
-    if (!realWidth || !realHeight) {
+
+    /** 真实尺寸：先按二进制头认（PNG/JPEG/GIF/WebP），认不出再补一层 ffprobe */
+    let size = readImageSize(buffer)
+    if (!isUsableSize(size)) {
       try {
         const { spawnSync } = await import('node:child_process')
         const probe = spawnSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=p=0', '-'], { input: buffer })
         const parts = String(probe.stdout ?? '').trim().split(',')
-        realWidth = Number(parts[0]) || 0
-        realHeight = Number(parts[1]) || 0
-      } catch { /* 兜底失败 */ }
+        const width = Number(parts[0]) || 0
+        const height = Number(parts[1]) || 0
+        if (width > 0 && height > 0) size = { width, height }
+      } catch { /* ffprobe 不在就按「读不出」处理 */ }
     }
-    const uploaded: any = await assets.upload('data:' + mime + ';base64,' + buffer.toString('base64'), 'kkk-md.png')
-    const finalUrl = typeof uploaded === 'string' ? uploaded : uploaded?.url
-    if (!finalUrl || !/^https?:\/\//i.test(String(finalUrl))) {
-      // 上传拿不到公网地址：退回原始链接，至少图片还能显示
-      logger.mark('[QQ面板] assets 上传没有返回公网地址，md 图片改用原始链接')
-      return /^https?:\/\//i.test(url) ? '![#' + maxWidth + 'px #' + Math.round(maxWidth * 1.3) + 'px](' + url + ')' : null
+    if (!isUsableSize(size)) {
+      logger.mark('[QQ面板] 读不出图片尺寸，这张不发 markdown（猜尺寸会把图拉伸），改用普通图片发送: ' + url.slice(0, 60))
+      return null
     }
-    if (!realWidth || !realHeight) {
-      // 真的拿不到：宁可不写尺寸让客户端按原图比例显示，也别硬套成正方形
-      logger.mark('[QQ面板] 图片尺寸未知，改用原始尺寸显示: ' + url.slice(0, 50))
-      return '![](' + finalUrl + ')'
+    const scaled = scaleToWidth(size, maxWidth)
+
+    /**
+     * 上传换公网地址。**md 里的图片地址必须是公网 https**（相对路径、本地路径手机端取不到）。
+     * 没有 assets 服务、或者上传没返回公网地址时，就用原始链接 —— 只要尺寸是真的，
+     * 至少比例不会错。
+     */
+    let finalUrl = /^https?:\/\//i.test(url) ? url : ''
+    if (assets?.upload) {
+      const uploaded: any = await assets.upload('data:' + mime + ';base64,' + buffer.toString('base64'), 'kkk-md.png')
+      const remote = typeof uploaded === 'string' ? uploaded : uploaded?.url
+      if (remote && /^https?:\/\//i.test(String(remote))) finalUrl = String(remote)
+      else logger.mark('[QQ面板] assets 上传没有返回公网地址，md 图片改用原始链接')
+    } else {
+      logger.mark('[QQ面板] 宿主没有 assets 服务，md 图片改用原始链接')
     }
-    const w = Math.min(realWidth, maxWidth)
-    const h = Math.max(1, Math.round((realHeight * w) / realWidth))
-    return '![#' + w + 'px #' + h + 'px](' + finalUrl + ')'
+    if (!finalUrl) {
+      logger.mark('[QQ面板] 拿不到可公网访问的图片地址，这张改用普通图片发送: ' + url.slice(0, 60))
+      return null
+    }
+    return '![#' + scaled.width + 'px #' + scaled.height + 'px](' + finalUrl + ')'
   } catch (error: any) {
-    logger.mark('[QQ面板] 图片转 markdown 失败: ' + String(error?.message ?? error).slice(0, 120))
-    // 兜底：直接用原始链接（QQ 取不到就取不到，总比整条图集退化成逐张发好）
-    return /^https?:\/\//i.test(url) ? '![#' + maxWidth + 'px #' + Math.round(maxWidth * 1.3) + 'px](' + url + ')' : null
+    logger.mark('[QQ面板] 图片转 markdown 失败（这张改用普通图片发送）: ' + String(error?.message ?? error).slice(0, 120))
+    return null
   }
 }
 

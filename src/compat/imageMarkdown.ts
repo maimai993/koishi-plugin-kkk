@@ -27,6 +27,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { isUsableSize, readImageSize, scaleToWidth } from './imageSize'
 import { logger } from './logger'
 import { tryGetRuntime } from './runtime'
 import { segment } from './segment'
@@ -67,52 +68,6 @@ const mimeOfBuffer = (buffer: Buffer): string => {
   if (buffer.length >= 6 && buffer.toString('latin1', 0, 3) === 'GIF') return 'image/gif'
   if (buffer.length >= 12 && buffer.toString('latin1', 0, 4) === 'RIFF' && buffer.toString('latin1', 8, 12) === 'WEBP') return 'image/webp'
   return 'image/jpeg'
-}
-
-/**
- * 读出图片的**真实像素尺寸** —— md 里的 `#宽px #高px` 就靠它。
- *
- * 不引第三方库：卡片是 JPEG、图集是 JPEG、二维码是 PNG、实况图封面是 WebP，四种头都自己认，
- * 免得又出现「取不到尺寸 → 正方形拉伸」或「没写尺寸 → 手机不显示」。
- */
-const readImageSize = (buffer: Buffer): { width: number; height: number } => {
-  // PNG：IHDR 就在固定偏移
-  if (buffer.length >= 24 && buffer[0] === 0x89 && buffer.toString('latin1', 1, 4) === 'PNG') {
-    return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) }
-  }
-  // GIF：逻辑屏幕描述符，小端
-  if (buffer.length >= 10 && buffer.toString('latin1', 0, 3) === 'GIF') {
-    return { width: buffer.readUInt16LE(6), height: buffer.readUInt16LE(8) }
-  }
-  // JPEG：扫到 SOF 段（SOF0..SOF15，跳过 DHT/DAC 这些非 SOF 标记）
-  if (buffer.length > 4 && buffer[0] === 0xff && buffer[1] === 0xd8) {
-    let offset = 2
-    while (offset + 9 < buffer.length) {
-      if (buffer[offset] !== 0xff) { offset++; continue }
-      const marker = buffer[offset + 1]
-      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
-        return { height: buffer.readUInt16BE(offset + 5), width: buffer.readUInt16BE(offset + 7) }
-      }
-      const length = buffer.readUInt16BE(offset + 2)
-      if (length <= 0) break
-      offset += 2 + length
-    }
-  }
-  // WebP：VP8X（扩展）/ VP8L（无损）/ VP8（有损）三种头的写法都不一样
-  if (buffer.length >= 30 && buffer.toString('latin1', 0, 4) === 'RIFF' && buffer.toString('latin1', 8, 12) === 'WEBP') {
-    const format = buffer.toString('latin1', 12, 16)
-    if (format === 'VP8X') {
-      return { width: 1 + buffer.readUIntLE(24, 3), height: 1 + buffer.readUIntLE(27, 3) }
-    }
-    if (format === 'VP8L') {
-      const bits = buffer.readUInt32LE(21)
-      return { width: 1 + (bits & 0x3fff), height: 1 + ((bits >> 14) & 0x3fff) }
-    }
-    if (format === 'VP8 ') {
-      return { width: buffer.readUInt16LE(26) & 0x3fff, height: buffer.readUInt16LE(28) & 0x3fff }
-    }
-  }
-  return { width: 0, height: 0 }
 }
 
 /** 把各种写法读成 Buffer：data URI / base64:// / file:// / 本地路径 / http(s) */
@@ -217,6 +172,122 @@ export const markdownImageOf = async (src: string): Promise<string | null> => {
 /** 清空缓存（测试用） */
 export const clearMarkdownImageCache = (): void => { imageCache.clear() }
 
+/* ------------------------------------------------------------------ *
+ * md 图片的尺寸兜底
+ *
+ * `markdownImageOf` 只管**图片段**转 md 这条线（读不出尺寸就不转，退回普通图片）。
+ * 但业务代码自己拼的 markdown —— 长图切片、画质面板的封面卡、按钮行 —— 不经过那里，
+ * 万一漏了尺寸（历史遗留写成 `![](url)`，或者以后新加的拼接忘了带），
+ * 发出去在手机端就是**一片空白**（用户实测：「必须要 #px，不然手机不会显示」）。
+ *
+ * 所以在**发送出口**再扫一遍，把没带尺寸的 md 图片补上。
+ *
+ * ## 补的必须是**真实**尺寸
+ *
+ * 第一版图省事，直接塞一个「默认宽 420 × 高 546」的框 —— 结果**图片被强制拉伸**了：
+ * QQ 按 `#宽px #高px` 这个框渲染图片，框的比例和原图对不上就被拉变形。
+ * 所以现在**先把图下下来量一下真实尺寸**，量到了就用真实比例（和 `markdownImageOf` 同一套），
+ * 只有连图片都读不到时才退到估算值（那种情况下图本来就出不来，比例已经无所谓了）。
+ * ------------------------------------------------------------------ */
+
+/** 标准 md 图片语法：`![alt](url)`（alt 里不许有 `]`、url 里不许有空白与 `)`） */
+const MD_IMAGE_RE = /!\[([^\]\n]*)\]\(([^)\s]+)\)/g
+/** alt 里已经写了 `#宽px` 就不动它 */
+const HAS_SIZE_RE = /#[^#\]]*?\d+(?:\.\d+)?\s*px/i
+
+/**
+ * **估算版**：给一段 markdown 文本里的图片补尺寸（已经带 `#px` 的原样不动）。
+ *
+ * ⚠️ 估算出来的框**比例是固定的**（宽 : 高 = 1 : 1.3），和原图对不上就会**拉伸**。
+ * 只该在「连图片都读不到」时当最后兜底用；正常路径请用 {@link sizeMarkdownImages}，
+ * 它会先量真实尺寸。
+ * @param text markdown 文本
+ * @param maxWidth 估算用的默认宽度
+ */
+export const ensureMarkdownImageSize = (text: string, maxWidth = 420): string => {
+  const source = String(text ?? '')
+  if (!source.includes('![')) return source
+  return source.replace(MD_IMAGE_RE, (whole, alt: string, url: string) =>
+    HAS_SIZE_RE.test(String(alt))
+      ? whole
+      : '![#' + maxWidth + 'px #' + Math.round(maxWidth * 1.3) + 'px](' + url + ')')
+}
+
+/**
+ * 量一张图的**真实**尺寸，返回带真实比例的 md 图片；读不到返回 null。
+ * @param url 图片地址（http(s) / 本地 / data URI / base64://）
+ * @param maxWidth 显示宽度上限
+ */
+const measureMarkdownImage = async (url: string, maxWidth: number): Promise<string | null> => {
+  const buffer = await loadImageBuffer(url)
+  if (!buffer || !buffer.length) return null
+  const size = readImageSize(buffer)
+  if (!isUsableSize(size)) return null
+  const scaled = scaleToWidth(size, maxWidth)
+  logger.mark('[图片md] 给漏了尺寸的 md 图片补真实尺寸（原图 ' + size.width + 'x' + size.height + '）：' + url.slice(0, 60))
+  return '![#' + scaled.width + 'px #' + scaled.height + 'px](' + url + ')'
+}
+
+/**
+ * 给一段 markdown 里的图片补尺寸 —— **优先量真实尺寸**，量不到才用估算值。
+ *
+ * @param text markdown 文本
+ * @param maxWidth 显示宽度上限
+ */
+export const sizeMarkdownImages = async (text: string, maxWidth = 420): Promise<string> => {
+  const source = String(text ?? '')
+  if (!source.includes('![')) return source
+  /** 没带尺寸的那几张（同一段里可能重复出现同一张，用整段文本当键去重） */
+  const pending = [...source.matchAll(MD_IMAGE_RE)]
+    .map((match) => match[0])
+    .filter((whole) => !HAS_SIZE_RE.test(whole.slice(2, whole.indexOf(']('))))
+  if (!pending.length) return source
+
+  const replacements = new Map<string, string>()
+  /** 串行量：同一段里通常只有一两张，串行能避免瞬间并发去下载同一个图床 */
+  for (const whole of new Set(pending)) {
+    const url = whole.slice(whole.indexOf('](') + 2, -1)
+    replacements.set(whole, (await measureMarkdownImage(url, maxWidth)) ?? ensureMarkdownImageSize(whole, maxWidth))
+  }
+  return source.replace(MD_IMAGE_RE, (whole) => replacements.get(whole) ?? whole)
+}
+
+/**
+ * 把元素树里所有**文本**过一遍改写函数（`attrs.content` 与嵌套 text 子节点都认）。
+ *
+ * 为什么要递归：`segment.markdown('...')` 走的是 satori 的 `h()`，
+ * 形状是 `{ type:'markdown', attrs:{}, children:[{ type:'text', attrs:{ content } }] }`
+ * —— 正文**不在** `attrs.content` 上。两种形状都兜住，免得哪天换回扁平写法就失效。
+ * @returns 有新内容时返回新对象，没变则返回原对象（调用方可用引用比较判断）
+ */
+const mapTextContent = async (node: any, fn: (text: string) => Promise<string>): Promise<any> => {
+  if (!node || typeof node !== 'object') return node
+  let attrs = node.attrs
+  let changed = false
+  if (attrs && typeof attrs.content === 'string') {
+    const next = await fn(attrs.content)
+    if (next !== attrs.content) {
+      attrs = { ...attrs, content: next }
+      changed = true
+    }
+  }
+  let children = node.children
+  if (Array.isArray(children)) {
+    const mapped = await Promise.all(children.map((child: any) => mapTextContent(child, fn)))
+    if (mapped.some((child: any, index: number) => child !== children[index])) {
+      children = mapped
+      changed = true
+    }
+  }
+  return changed ? { ...node, attrs, children } : node
+}
+
+/** 给一个元素里的 md 图片补尺寸（非 markdown 段原样返回） */
+const patchMarkdownElement = async (element: any): Promise<any> =>
+  String(element?.type ?? '') === 'markdown'
+    ? mapTextContent(element, (text) => sizeMarkdownImages(text))
+    : element
+
 /**
  * 把一条消息里的图片段改写成 markdown 图片（其它段原样保留、顺序不变）。
  *
@@ -231,8 +302,16 @@ export const imagesToMarkdown = async (elements: any[], platform: string): Promi
   const list = Array.isArray(elements) ? elements : []
   if (!list.length) return list
   if (!canUseMarkdownImage(platform)) return list
-  if (!list.some(isImageElement)) return list
-  if (list.some((element) => ATTACHMENT_TYPES.has(String(element?.type ?? '')))) return list
+
+  /**
+   * **已有的 markdown 段先补一遍尺寸，且必须在「有没有图片段」的判断之前** ——
+   * 长图切片那种消息整条只有 markdown、一个 image 段都没有，
+   * 放到后面就整条漏掉了。
+   */
+  const sized = await Promise.all(list.map(patchMarkdownElement))
+
+  if (!sized.some(isImageElement)) return sized
+  if (sized.some((element) => ATTACHMENT_TYPES.has(String(element?.type ?? '')))) return sized
 
   const out: any[] = []
   /** 攒着的连续图片（遇到非图片段就冲出去） */
@@ -243,7 +322,7 @@ export const imagesToMarkdown = async (elements: any[], platform: string): Promi
     run = []
   }
 
-  for (const element of list) {
+  for (const element of sized) {
     if (!isImageElement(element)) {
       flushRun()
       out.push(element)

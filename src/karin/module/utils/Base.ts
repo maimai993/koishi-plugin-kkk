@@ -7,6 +7,8 @@ import { baseHeaders, Common, compressVideo, extractTotalBytesFromHeaders, getMe
 import { Config } from '@/module/utils/Config'
 // 撤回上一条面板 + 「发送中…」提示（见 QqPanel 的 recallLastPanel）
 import { recallLastPanel } from '@/module/utils/QqPanel'
+// 错误描述：适配器的 AggregateError 的 message 是空的，真正原因在 errors[] 里（见 describeError）
+import { describeError } from '@/module/utils/ParseSteps'
 import type { pushlistConfig } from '@/types/config/pushlist'
 
 import { AmagiBase } from './amagiClient'
@@ -362,6 +364,26 @@ export const uploadFile = async (event: Message, file: fileInfo, videoUrl: strin
     logger.debug('发送中提示失败: ' + String(error))
   }
 
+  /**
+   * 发群文件。名字被 QQ 打回时，换一个「绝对合法」的临时名再试一次。
+   *
+   * 为什么要重试：群文件名是这条链路上**唯一因文件而异**的入参，QQ 的 `upload_prepare`
+   * 会因为名字不合法（换行、超长、非法字符）直接返回参数错误，而这时候文件本身、网络、
+   * 体积都没问题 —— 换个短名就能过（详见 {@link groupFileName}）。
+   * @param bot 用哪个 bot 发（主动消息与被动消息不是同一个来源）
+   */
+  const sendGroupFile = async (bot: any): Promise<any> => {
+    const name = groupFileName(file)
+    try {
+      return await bot.uploadFile(contact, File, name)
+    } catch (error) {
+      logger.warn(
+        `群文件名「${name}」发送失败，改用临时文件名重试一次：` + describeError(error)
+      )
+      return await bot.uploadFile(contact, File, fallbackGroupFileName())
+    }
+  }
+
   try {
     // 是主动消息
     if (options?.active) {
@@ -369,7 +391,7 @@ export const uploadFile = async (event: Message, file: fileInfo, videoUrl: strin
         // 是群文件
         const bot = karin.getBot(String(options.activeOption?.uin))!
         logger.mark(`${logger.blue('主动消息:')} 视频大小: ${newFileSize.toFixed(1)}MB 正在通过${logger.yellow('bot.uploadFile')}回复...`)
-        const sent: any = await bot.uploadFile(contact, File, file.originTitle ? `${file.originTitle}.mp4` : `${File.split('/').pop()}`)
+        const sent: any = await sendGroupFile(bot)
         reportSent(options, sent)
       } else {
         // 不是群文件
@@ -384,7 +406,7 @@ export const uploadFile = async (event: Message, file: fileInfo, videoUrl: strin
       if (useGroupFile) {
         // 是文件
         logger.mark(`${logger.blue('被动消息:')} 视频大小: ${newFileSize.toFixed(1)}MB 正在通过${logger.yellow('e.bot.uploadFile')}回复...`)
-        const sent: any = await event.bot.uploadFile(event.contact, File, file.originTitle ? `${file.originTitle}.mp4` : `${File.split('/').pop()}`)
+        const sent: any = await sendGroupFile(event.bot)
         reportSent(options, sent)
       } else {
         // 不是文件
@@ -406,7 +428,7 @@ export const uploadFile = async (event: Message, file: fileInfo, videoUrl: strin
     if (options && options.active === false) {
       await event.reply('视频文件上传失败' + JSON.stringify(error, null, 2))
     }
-    logger.error('视频文件上传错误,' + String(error))
+    logger.error('视频文件上传错误,' + describeError(error))
     throw error // 重新抛出错误，让 wrapWithErrorHandler 能够捕获
   } finally {
     // 发送阶段结束（成功失败都要清，否则「下载进度」会一直卡在「正在发送」）
@@ -414,7 +436,7 @@ export const uploadFile = async (event: Message, file: fileInfo, videoUrl: strin
     const filePath = file.filepath
     Common.registerVideoPreview(filePath, Config.app.removeCache, 30 * 60 * 1000)
     logger.mark(
-      `临时预览地址：http://localhost:${process.env.HTTP_PORT!}/kkk/ssr/video/${encodeURIComponent(filePath.split('/').pop() ?? '')}`
+      `临时预览地址：http://localhost:${previewPort()}/kkk/ssr/video/${encodeURIComponent(filePath.split('/').pop() ?? '')}`
     )
     if (Config.app.removeCache) {
       logger.info(`文件 ${filePath} 将在 30 分钟后删除`)
@@ -654,6 +676,79 @@ export const downloadFile = async (videoUrl: string, opt: downLoadFileOptions): 
 
     throw error
   }
+}
+
+/**
+ * 群文件名主体允许的最大字符数（不含扩展名）。
+ *
+ * 取 60 是个折中：QQ 侧对 `upload_prepare` 的 `file_name` 有长度上限，但**没有公开的准确值**，
+ * 而作品标题动辄几百字，所以必须截断；60 个中文标题还能看清是哪条视频。
+ */
+const GROUP_FILE_NAME_MAX = 60
+
+/**
+ * 生成一个能过 QQ 群文件接口校验的文件名。
+ *
+ * ## 为什么需要这个（用户实测踩的坑）
+ *
+ * 快手作品的 `originTitle` 就是**作品标题原文**（`kuaishou.ts` 里
+ * `originTitle: \`${work.photo.caption}.mp4\``），而快手标题常常是带换行的多行文案，
+ * 长度也经常几百字。这条链路上 `originTitle` 以前是**原样**拼上 `.mp4` 当 `file_name`
+ * 发给 QQ 的 `upload_prepare`，于是：
+ *   - 名字里有 `\n`（或其它非法字符）→ QQ 返回参数错误 → **整个视频一个字节都没发出去**；
+ *   - 标题本身已经带 `.mp4` 时还会拼成 `xxx.mp4.mp4`。
+ *
+ * 这个问题只在「发到 QQ」时才暴露：磁盘上的文件名有 {@link processFilename} 兜着，
+ * 所以本地一切正常，只有群文件那一步静默失败。
+ *
+ * ## 处理规则
+ *
+ *   1. 去掉调用方普遍已经自带的 `.mp4`（避免 `xxx.mp4.mp4`）；
+ *   2. 把 `\ / : * ? " < > |`、换行、制表符、控制字符统一换成空格并压缩连续空白；
+ *   3. 去掉开头的点（`.mp4` 这种「文件名只剩扩展名」的情况会变成空串）；
+ *   4. 按**字符数**截断到 {@link GROUP_FILE_NAME_MAX}；
+ *   5. 标题为空（或清完什么都不剩）时退回 `filepath` 的文件名，
+ *      连文件名都拿不到才退化成 `kkk_<时间戳>.mp4`。
+ *
+ * @param file 视频文件信息（优先 `originTitle`，拿不到就退回 `filepath` 的文件名）
+ * @returns 带 `.mp4` 扩展名的安全文件名
+ */
+export const groupFileName = (file: Pick<fileInfo, 'originTitle' | 'filepath'>): string => {
+  // 退回 filepath 时只取文件名那一段 —— 整个路径会被下面的「非法字符」规则切成空格
+  const raw = String(file.originTitle ?? '').trim()
+    || String(file.filepath ?? '').split(/[\\/]/).pop()
+    || ''
+  const cleaned = raw
+    .replace(/\.mp4$/i, '')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\\/:*?"<>|\r\n\t\v\f\u0000-\u001f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^[.\s]+/, '')
+    .trim()
+  const base = cleaned.length > GROUP_FILE_NAME_MAX ? cleaned.slice(0, GROUP_FILE_NAME_MAX).trim() : cleaned
+  return base ? `${base}.mp4` : fallbackGroupFileName()
+}
+
+/**
+ * 兜底文件名：纯 ASCII、短、只用时间戳，几乎不可能被 QQ 打回。
+ *
+ * 两个地方用它：标题清完之后什么都不剩（见 {@link groupFileName}），
+ * 以及群文件发送失败后换个名字重试一次（见 {@link uploadFile}）。
+ */
+export const fallbackGroupFileName = (): string => `kkk_${Date.now()}.mp4`
+
+/**
+ * 「临时预览地址」里的端口。
+ *
+ * 以前直接读 `process.env.HTTP_PORT` —— 那是**上游 karin 的环境变量**，Koishi 侧根本没有，
+ * 于是日志里一直是 `http://localhost:undefined/kkk/ssr/video/…`（点不开，
+ * 也让人以为插件坏了）。Koishi 的端口在 `ctx.config.port` 上，按它取；
+ * 拿不到再退回环境变量 / 7777（和 `qrlogin.ts` 里的兜底保持一致）。
+ */
+const previewPort = (): string => {
+  const fromKoishi = (tryGetRuntime()?.ctx as any)?.config?.port
+  if (fromKoishi !== undefined && fromKoishi !== null && String(fromKoishi).trim()) return String(fromKoishi)
+  return process.env.HTTP_PORT || '7777'
 }
 
 /**

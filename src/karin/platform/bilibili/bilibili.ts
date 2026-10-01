@@ -1,6 +1,7 @@
 import fs from 'node:fs'
-import { platformOf } from '@/module/utils/ImageSlice'
-import { buildMarkdownImageMessage } from '@/module/utils/QqPanel'
+import { cardImageActions, withCardActions } from '@/module/utils/QqPanel'
+import { sendCommentPicsDirectly } from '@/module/utils/CommentPics'
+import { cardImageKeyOf, imageSourcesOf, rememberCardImages, rememberLastCardKey } from '@/module/utils/CardImageCache'
 // 弹幕策略（通用里的「强制不烧录弹幕」优先；「在线播放器」开着时是在线播放，不烧录）
 import { shouldBurnDanmaku, shouldFetchDanmaku } from '@/module/utils/DanmakuPolicy'
 // 在线播放：下载完之后登记播放会话并把链接回给用户（路径不能写 @/，那指向 karin/）
@@ -245,6 +246,15 @@ export class Bilibili extends Base {
         applyForceOnlinePlayer(this.e)
         const infoData = await this.amagi.bilibili.fetcher.fetchVideoInfo({ bvid: iddata.bvid })
         /**
+         * 本次解析的作品键（「提取封面图 / 提取评论区图片」按钮把它当参数带上）。
+         *
+         * 封面**在这里就记**：详情卡片在面板路径下是不发的，但评论区那条长图会带按钮，
+         * 它的「提取封面图」要的就是这张 —— 放在卡片分支里记，面板路径下就记不到。
+         */
+        const cardKey = cardImageKeyOf('bilibili', iddata.bvid)
+        rememberCardImages(cardKey, { cover: String(infoData?.data?.data?.pic ?? '') })
+        rememberLastCardKey(this.e, cardKey)
+        /**
          * 顺手把作品信息收好：在线播放页要按B站那样展示标题 / UP 主 / 播放量 / 发布时间。
          * 字段全部可选，取不到就是 undefined（页面不显示，不编数据）。
          */
@@ -394,7 +404,14 @@ export class Bilibili extends Base {
                 frame: userProfileData.data.data.card.pendant?.image || ''
               }
             })
-            this.e.reply(img)
+            /**
+             * 详情卡片（封面卡）下面只带**它自己那个**「提取封面图」，同一条消息内发出去。
+             * 「提取评论区图片」归评论区那条 —— 两张卡各带各的，不堆在最后一条下面。
+             * 封面在上面拿到作品信息时就记过了，这里只负责挂按钮。
+             */
+            this.e.reply(
+              withCardActions(this.e, img, cardKey, { cover: true })
+            )
           }
         }
 
@@ -582,43 +599,30 @@ export class Bilibili extends Base {
               ' numcomment=' + Config.bilibili.numcomment
             )
             const { comments: commentsdata, image_urls } = bilibiliComments(commentsData.data, infoData.data.data.owner.mid.toString())
+            /**
+             * 评论里**用户自己贴的图**记下来（原始地址）。
+             * 卡片下面「提取评论区图片」按钮要的是**这些**，不是下面渲染出来的那张评论长图；
+             * 手敲 `kkk评论` 也走这份缓存，所以图**直接发过之后照样记**（只是不再挂按钮）。
+             */
+            if (image_urls?.length) rememberCardImages(cardKey, { commentPics: image_urls })
             if (!commentsdata?.length) {
               this.e.reply('这个视频没有评论 ~')
             } else {
               /**
-               * 评论区图片**不再单独发**（按需求关闭）：评论卡片里本来就会展示这些图，
-               * 再发一遍合并转发既刷屏又慢。这里保留解析（image_urls 仍在用），只是不发出去。
+               * 配置「是否收集评论区的图片」**打开时，评论里用户贴的图直接发一条**。
+               *
+               * 这一段原来被写死成 `if (false && ...)` 整个短路掉了 —— 于是那个开关在面板上
+               * 点成什么样**都没有任何反应**（用户反馈：「这个开不开都没有用啊」）。现在真按开关走：
+               *   - 打开 → 走 {@link sendCommentPicsDirectly} 直接发出去，
+               *     并把下面卡片上的「提取评论区图片」按钮**撤掉**（图已经在群里了）；
+               *   - 关着（默认）→ 不直接发，按钮照挂，用户想单独看再点。
                */
-              const messageElements = []
-              if (false && Config.bilibili.commentImageCollection && image_urls.length > 0) {
-                for (const [index, v] of image_urls.entries()) {
-                  const imageUrl = await processImageUrl(v, infoData.data.data.title, index)
-                  messageElements.push(segment.image(imageUrl))
-                }
-                /**
-                 * 评论图片收集：**合并成一条 markdown**（QQ 官方 bot 上合并转发经常发不出去）。
-                 * md 里连续图片紧贴渲染，一条消息装完整套图；失败再退回转发。
-                 */
-                const mdMessage = await buildMarkdownImageMessage(
-                  messageElements.map((item: any) => String(item?.attrs?.src ?? '')).filter(Boolean),
-                  420, platformOf(this.e)
-                )
-                if (mdMessage) {
-                  await this.e.reply(mdMessage)
-                } else {
-                  const res = common.makeForward(
-                    messageElements,
-                    Config.app.fakeForward ? this.e.sender.userId : this.e.bot.account.selfId,
-                    Config.app.fakeForward ? this.e.sender.nick : this.e.bot.account.name
-                  )
-                  await this.e.bot.sendForwardMsg(this.e.contact, res, {
-                    source: '评论图片收集',
-                    summary: `查看${messageElements.length}张图片`,
-                    prompt: 'B站评论解析结果',
-                    news: [{ text: '点击查看解析结果' }]
+              const picsSent = Config.bilibili.commentImageCollection
+                ? await sendCommentPicsDirectly(this.e, image_urls, {
+                    title: infoData.data.data.title,
+                    prompt: 'B站评论解析结果'
                   })
-                }
-              }
+                : false
 
               img = await Render(this.e, 'bilibili/comment', {
                 Type: '视频',
@@ -643,7 +647,18 @@ export class Bilibili extends Base {
                     : `${playUrlData.data.data.dash.video[0].width} x ${playUrlData.data.data.dash.video[0].height}`
               })
               // 评论卡可能极长（实测 2880x40000），交给切片+md 拼接发送，避免 QQ 拒收
-              await sendSlicedImage(this.e, img)
+              /** 评论区那张长图也记下来，「提取评论区图片」按钮点的是它 */
+              rememberCardImages(cardKey, { comment: imageSourcesOf(img) })
+              /**
+               * 评论区卡片**同一条消息**里带上「提取封面图 / 提取评论区图片」。
+               *
+               * 按钮**必须挂在这里**：详情卡片在面板路径下是不发的（`fromPanel` 时跳过，
+               * 面板已经发过那张卡了），而 QQ 上的解析几乎都是「发链接 → 出面板 → 点清晰度」，
+               * 用户真正看到的就只有评论区这条长图。
+               *
+               * `comment` 传 `!picsSent`：图刚刚已经直接发过时**不再挂按钮**（见上面的 `picsSent`）。
+               */
+              await sendSlicedImage(this.e, img, cardImageActions(this.e, { comment: !picsSent, key: cardKey }))
             }
           }
         })
@@ -845,6 +860,23 @@ export class Bilibili extends Base {
          * 转成枚举后各支照旧按运行时的 `type` 字符串走，字段读取仍走每层的索引签名。
          */
         const dynamicType = String(dynamicInfo.data.data.item.type) as DynamicType
+        /**
+         * 动态也要带「提取封面图 / 提取评论区图片」按钮，所以同样要有个**作品键**。
+         *
+         * 视频动态用**里面的 BV**（用户点按钮想拿到的是那个视频的封面，不是这条动态），
+         * 其它动态用动态 id。
+         */
+        const dynamicBvid = String((dynamicInfo.data.data.item as any)?.modules?.module_dynamic?.major?.archive?.bvid ?? '')
+        const dynamicCardKey = cardImageKeyOf('bilibili', dynamicBvid || iddata.dynamic_id)
+        const dynamicCover = dynamicCoverUrl(dynamicInfo.data.data.item)
+        rememberCardImages(dynamicCardKey, { cover: dynamicCover })
+        rememberLastCardKey(this.e, dynamicCardKey)
+        /**
+         * **两张卡各带各的按钮**（不要堆在一起放在最后一条下面）：
+         * 动态卡片给「提取封面图」（没有封面就不给），动态评论区给「提取评论区图片」
+         * （评论区那些图**已经按配置直接发过时就不给**，见下面挂按钮处的 `picsSent`）。
+         */
+        const dynamicCardActions = { cover: !!dynamicCover }
         const userProfileData = await this.amagi.bilibili.fetcher.fetchUserCard({
           host_mid: dynamicInfo.data.data.item.modules.module_author.mid
         })
@@ -991,7 +1023,7 @@ export class Bilibili extends Base {
               summary.text = summary.text ? `${name}\n${summary.text}` : name
             }
             this.e.reply(
-              await Render(this.e, 'bilibili/dynamic/DYNAMIC_TYPE_DRAW', {
+              withCardActions(this.e, await Render(this.e, 'bilibili/dynamic/DYNAMIC_TYPE_DRAW', {
                 // 生成类型在判别联合里把 `pics` 记成 `any`（各支索引签名），`Object.values` 于是推出
                 // `unknown[]` —— 谓词里先把元素当成「可能有 url 的对象」再判，形状仍然照旧收窄
                 image_url: Object.values(dynamicInfo.data.data.item.modules.module_dynamic.major.opus.pics)
@@ -1023,7 +1055,7 @@ export class Bilibili extends Base {
                 imageLayout: Config.bilibili.imageLayout,
                 additional: parseAdditionalCard(dynamicInfo.data.data.item.modules.module_dynamic.additional),
                 dynamic_id: dynamicInfo.data.data.item.id_str
-              })
+              }), dynamicCardKey, dynamicCardActions)
             )
             break
           }
@@ -1045,7 +1077,7 @@ export class Bilibili extends Base {
             )
 
             this.e.reply(
-              await Render(this.e, 'bilibili/dynamic/DYNAMIC_TYPE_WORD', {
+              withCardActions(this.e, await Render(this.e, 'bilibili/dynamic/DYNAMIC_TYPE_WORD', {
                 text,
                 dianzan: Count(dynamicInfo.data.data.item.modules.module_stat.like.count),
                 pinglun: Count(dynamicInfo.data.data.item.modules.module_stat.comment.count),
@@ -1064,7 +1096,7 @@ export class Bilibili extends Base {
                 dynamicTYPE: '纯文动态解析',
                 additional: parseAdditionalCard(dynamicInfo.data.data.item.modules.module_dynamic.additional),
                 dynamic_id: dynamicInfo.data.data.item.id_str
-              })
+              }), dynamicCardKey, dynamicCardActions)
             )
             break
           }
@@ -1219,7 +1251,7 @@ export class Bilibili extends Base {
               }
             }
             this.e.reply(
-              await Render(this.e, 'bilibili/dynamic/DYNAMIC_TYPE_FORWARD', {
+              withCardActions(this.e, await Render(this.e, 'bilibili/dynamic/DYNAMIC_TYPE_FORWARD', {
                 text,
                 imgList: imgList.length > 0 ? imgList : null,
                 dianzan: Count(dynamicInfo.data.data.item.modules.module_stat.like.count),
@@ -1239,7 +1271,7 @@ export class Bilibili extends Base {
                 render_time: TimeFormatter.now(),
                 original_content,
                 dynamic_id: dynamicInfo.data.data.item.id_str
-              })
+              }), dynamicCardKey, dynamicCardActions)
             )
             break
           }
@@ -1313,7 +1345,7 @@ export class Bilibili extends Base {
                 dynamic_id: dynamicInfo.data.data.item.id_str,
                 staff
               })
-              this.e.reply(img)
+              this.e.reply(withCardActions(this.e, img, dynamicCardKey, dynamicCardActions))
             }
             break
           }
@@ -1416,7 +1448,7 @@ export class Bilibili extends Base {
               following_count: Count(userProfileData.data.data.card.friend),
               fans: Count(userProfileData.data.data.card.fans)
             })
-            this.e.reply(img)
+            this.e.reply(withCardActions(this.e, img, dynamicCardKey, dynamicCardActions))
             break
           }
           default: {
@@ -1451,45 +1483,28 @@ export class Bilibili extends Base {
             )
 
             if (commentsdata && commentsdata.length > 0) {
-              // 收集评论区图片
-              if (Config.bilibili.commentImageCollection && image_urls.length > 0) {
-                const messageElements = []
-                // 获取动态标题用于图片命名
-                let title = 'bilibili_dynamic'
-                if (dynamicType === DynamicType.DRAW) {
-                  title = dynamicInfo.data.data.item.modules.module_dynamic.major.opus.title || 'bilibili_dynamic'
-                } else if (dynamicType === DynamicType.AV) {
-                  title = dynamicInfo.data.data.item.modules.module_dynamic.major.archive.title || 'bilibili_dynamic'
-                }
-
-                for (const [index, v] of image_urls.entries()) {
-                  const imageUrl = await processImageUrl(v, title, index)
-                  messageElements.push(segment.image(imageUrl))
-                }
-                /**
-                 * 评论图片收集：**合并成一条 markdown**（QQ 官方 bot 上合并转发经常发不出去）。
-                 * md 里连续图片紧贴渲染，一条消息装完整套图；失败再退回转发。
-                 */
-                const mdMessage = await buildMarkdownImageMessage(
-                  messageElements.map((item: any) => String(item?.attrs?.src ?? '')).filter(Boolean),
-                  420, platformOf(this.e)
-                )
-                if (mdMessage) {
-                  await this.e.reply(mdMessage)
-                } else {
-                  const res = common.makeForward(
-                    messageElements,
-                    Config.app.fakeForward ? this.e.sender.userId : this.e.bot.account.selfId,
-                    Config.app.fakeForward ? this.e.sender.nick : this.e.bot.account.name
-                  )
-                  await this.e.bot.sendForwardMsg(this.e.contact, res, {
-                    source: '评论图片收集',
-                    summary: `查看${messageElements.length}张图片`,
-                    prompt: 'B站评论解析结果',
-                    news: [{ text: '点击查看解析结果' }]
+              /**
+               * 动态评论里用户贴的图：先记缓存（「提取评论区图片」按钮 / 手敲 `kkk评论` 都读它），
+               * 再按配置「是否收集评论区的图片」决定**要不要直接发一条**。
+               *
+               * `picsSent` 一路传到下面挂按钮那儿 —— 图**已经直接发过就不挂按钮**。
+               */
+              if (image_urls?.length) rememberCardImages(dynamicCardKey, { commentPics: image_urls })
+              const picsSent = Config.bilibili.commentImageCollection
+                ? await sendCommentPicsDirectly(this.e, image_urls, {
+                    /**
+                     * 下载落地时用的标题（只影响本地文件名）：图文取 opus 标题、
+                     * 视频动态取稿件标题，转发 / 纯文字动态没有标题就用个固定的。
+                     */
+                    title:
+                      dynamicType === DynamicType.DRAW
+                        ? dynamicInfo.data.data.item.modules.module_dynamic.major.opus.title
+                        : dynamicType === DynamicType.AV
+                          ? dynamicInfo.data.data.item.modules.module_dynamic.major.archive.title
+                          : 'bilibili_dynamic',
+                    prompt: 'B站评论解析结果'
                   })
-                }
-              }
+                : false
 
               // 渲染评论图
               const img = await Render(this.e, 'bilibili/comment', {
@@ -1504,7 +1519,9 @@ export class Bilibili extends Base {
                 shareurl: '动态分享链接',
                 Resolution: null
               })
-              this.e.reply(img)
+              /** 动态评论区下面只带「提取评论区图片」，封面那个归动态卡片 */
+              rememberCardImages(dynamicCardKey, { comment: imageSourcesOf(img) })
+              this.e.reply(withCardActions(this.e, img, dynamicCardKey, { comment: !picsSent }))
             } else {
               this.e.reply('这条动态暂时还没有评论~')
             }
@@ -2605,6 +2622,31 @@ function optionalStat (value: unknown): number | undefined {
  * @param dynamicData 动态数据
  * @returns
  */
+/**
+ * 动态的封面图（给「提取封面图」按钮用）。
+ *
+ * 按内容取，取不到就是空串（这时卡片下面**不放**提取封面按钮）：
+ *   - 视频动态 → 视频封面 `major.archive.cover`；
+ *   - 图文 / 纯图 → 第一张图 `major.opus.pics[0].url`；
+ *   - 转发 → 被转发的那条（转发本身只是个壳，跟随一层）。
+ * @param item 一条动态（转发时递归传 `orig`）
+ * @param depth 递归层数，防一手自引用
+ */
+const dynamicCoverUrl = (item: any, depth = 0): string => {
+  if (!item || depth > 2) return ''
+  const md = item.modules?.module_dynamic ?? {}
+  const cover = md.major?.archive?.cover
+  if (cover) return String(cover)
+  const pics = md.major?.opus?.pics
+  if (pics) {
+    for (const pic of Object.values(pics) as any[]) {
+      if (typeof pic?.url === 'string' && pic.url) return String(pic.url)
+    }
+  }
+  if (item.orig) return dynamicCoverUrl(item.orig, depth + 1)
+  return ''
+}
+
 const oid = (dynamicType: DynamicType, dynamicData: BilibiliDynamicDetailResponse) => {
   switch (dynamicType) {
     case DynamicType.WORD:

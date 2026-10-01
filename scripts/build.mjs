@@ -8,8 +8,7 @@
  *    - @kkk/richtext    → 内置 richtext
  *    - node-karin[/sub] → 兼容层实现（这样产物自带兼容层，不依赖 node_modules 里的转发包）
  */
-import { execFileSync } from 'node:child_process'
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, readFileSync, statSync, writeFileSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -152,6 +151,47 @@ const checkImportMeta = (dir) => {
 }
 
 /**
+ * 取当前 commit hash（不派生子进程）。
+ *
+ * 以前这里用 `execFileSync('git', ['rev-parse', 'HEAD'])`。**同步起子进程在部分环境里会直接失败**
+ * （这台开发机上 `spawnSync`/`execFileSync` 一律返回 EBUSY，被沙箱掐掉时 build 会连一行输出都没有
+ * 就退出），而 commit hash 只是卡片上「显示用」的元数据 —— 直接读 `.git` 目录更省事也更稳。
+ *
+ * 覆盖三种情况：分离头指针（HEAD 本身就是 hash）、普通分支（HEAD 是 `ref: refs/heads/x`，
+ * 且该 ref 可能还没写进 `.git/refs`，而是压在 `.git/packed-refs` 里）、以及 worktree / submodule
+ * （`.git` 是个指向真实 git 目录的文件）。
+ *
+ * 都读不到时退回 CI 给的 `GITHUB_SHA`（或空串，插件会显示「无 commit」）。
+ * @returns 40 位 commit hash，或空串
+ */
+const readCommitHash = () => {
+  try {
+    let gitDir = path.join(root, '.git')
+    if (existsSync(gitDir) && !statSync(gitDir).isDirectory()) {
+      const pointer = readFileSync(gitDir, 'utf8').trim()
+      const match = /^gitdir:\s*(.+)$/.exec(pointer)
+      if (match) gitDir = path.resolve(root, match[1].trim())
+    }
+    const head = readFileSync(path.join(gitDir, 'HEAD'), 'utf8').trim()
+    if (/^[0-9a-f]{40}$/i.test(head)) return head
+    const ref = /^ref:\s*(.+)$/.exec(head)?.[1]?.trim()
+    if (!ref) return ''
+    const loose = path.join(gitDir, ...ref.split('/'))
+    if (existsSync(loose)) return readFileSync(loose, 'utf8').trim()
+    const packed = path.join(gitDir, 'packed-refs')
+    if (existsSync(packed)) {
+      for (const line of readFileSync(packed, 'utf8').split('\n')) {
+        const [hash, name] = line.trim().split(/\s+/)
+        if (name === ref && /^[0-9a-f]{40}$/i.test(hash)) return hash
+      }
+    }
+  } catch {
+    // 不在仓库里 / 结构不认识：交给下面的兜底
+  }
+  return String(process.env.GITHUB_SHA ?? '').trim()
+}
+
+/**
  * 写入构建元数据。
  *
  * 卡片上的「Built Time / Commit Hash」以前一直是空的：插件读的是 lib/build-metadata.json，
@@ -159,17 +199,7 @@ const checkImportMeta = (dir) => {
  */
 const writeBuildMetadata = () => {
   const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'))
-  let commitHash = ''
-  try {
-    commitHash = execFileSync('git', ['rev-parse', 'HEAD'], {
-      cwd: root,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore']
-    }).trim()
-  } catch {
-    // 没装 git（或不在仓库里）：CI 上通常给了 GITHUB_SHA
-    commitHash = String(process.env.GITHUB_SHA ?? '').trim()
-  }
+  const commitHash = readCommitHash()
   const metadata = {
     version: String(pkg.version ?? ''),
     buildTime: new Date().toISOString(),

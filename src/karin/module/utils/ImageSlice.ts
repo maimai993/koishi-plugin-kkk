@@ -153,7 +153,15 @@ const uploadSliceOnce = async (buffer: Buffer, name: string): Promise<string | n
  * @param source data URI 或本地图片路径
  * @returns 是否已发送
  */
-export const sendSlicedImage = async (e: Message, input: any): Promise<boolean> => {
+/**
+ * @param e 消息事件
+ * @param input 图片（data URI / 本地路径 / 图片段 / 数组）
+ * @param extra **跟着图片一起发**的额外元素（比如卡片下面的「提取封面图」按钮）。
+ *   它们会被拼进**同一条消息**（图片后面），调用方不用再单独发一条。
+ */
+export const sendSlicedImage = async (e: Message, input: any, extra: any[] = []): Promise<boolean> => {
+  /** 拼 extras：没有附加元素时保持原来的单元素形态（不改变既有发送行为） */
+  const withExtra = (content: any): any => extra.length ? [content, ...extra] : content
   /**
    * 入参形态有三种，全都要认：
    *   1. data URI / 本地路径（字符串）
@@ -196,7 +204,7 @@ export const sendSlicedImage = async (e: Message, input: any): Promise<boolean> 
   const QQ_LIKE_PLATFORM = /^(qq|qqguild|onebot|napcat|lagrange|go-?cqhttp|chronocat|mirai)/i
   if (platform && !QQ_LIKE_PLATFORM.test(platform)) {
     logger.debug('[图片切片] 当前平台 ' + platform + ' 不是 QQ 链路，按普通图片发送')
-    await e.reply(segment.image(source))
+    await e.reply(withExtra(segment.image(source)))
     return true
   }
   const onDemand = runtimeConfig.sliceImageOnDemand !== false
@@ -251,7 +259,7 @@ export const sendSlicedImage = async (e: Message, input: any): Promise<boolean> 
     const startedAt = Date.now()
     const sendPromise = (async (): Promise<SendFailure | null> => {
       try {
-        const result: any = await e.reply(segment.image(source))
+        const result: any = await e.reply(withExtra(segment.image(source)))
         const failure = failureFromReplyResult(result)
         if (failure) logger.mark('[图片切片] 普通发送返回错误：' + describeSendFailure(failure))
         return failure
@@ -324,7 +332,7 @@ export const sendSlicedImage = async (e: Message, input: any): Promise<boolean> 
 
   // 开关关闭 → 永远普通发送
   if (!onDemand) {
-    await e.reply(segment.image(source))
+    await e.reply(withExtra(segment.image(source)))
     return true
   }
   /**
@@ -333,6 +341,16 @@ export const sendSlicedImage = async (e: Message, input: any): Promise<boolean> 
    *   - 拿不到消息 ID（QQ 拒收就是这样，不抛异常）/ 抛异常 → 再切片重发
    * 只有图片本身就超过 20MB 才跳过这次尝试，直接切。
    */
+  /**
+   * **超高就别试发了，直接切**（配置项 `sliceImageAutoHeight`，0 = 关）。
+   *
+   * 「按需切片」是**先整张发一次、被拒了再切**：QQ 收得下的超高图就这么整张出去了。
+   * 而太高的图 QQ 会整体缩小显示，卡片下面挂了按钮（提取封面 / 提取评论区图片）时，
+   * 缩图剩下的空白会被按钮撑开 —— 一大片空白，非常难看。
+   * 设了阈值就直接切开，每片都在正常尺寸内，没这块空白。
+   */
+  const autoHeight = Math.max(0, Number(runtimeConfig.sliceImageAutoHeight) || 0)
+  const tooTallForAuto = autoHeight > 0 && !!height && height > autoHeight
   const oversized = buffer.length > IMAGE_SIZE_LIMIT
   /**
    * **大图失败后不重试**：重传一次就是几 MB 起步（这张评论卡 4.6MB / 1.03 亿像素），
@@ -353,6 +371,8 @@ export const sendSlicedImage = async (e: Message, input: any): Promise<boolean> 
   const tooTall = !!height && height > sliceHeight
   if (oversized) {
     logger.mark('[图片切片] 图片 ' + (buffer.length / 1024 / 1024).toFixed(1) + 'MB 超过 20MB 限制，直接切片')
+  } else if (tooTallForAuto) {
+    logger.mark('[图片切片] 图片高 ' + height + 'px 超过阈值 ' + autoHeight + 'px，直接切片（不再整张试发）')
   } else if (collecting && tooTall) {
     logger.mark('[图片切片] 合并转发模式：' + width + 'x' + height + ' 超过单片高度 ' + sliceHeight + '，直接切片（转发时不试发，试了也拿不到反馈）')
   } else {
@@ -361,10 +381,11 @@ export const sendSlicedImage = async (e: Message, input: any): Promise<boolean> 
     logger.mark('[图片切片] 普通发送未成功（' + describeSendFailure(failure) + '）' +
       (heavyImage ? '，大图不重试' : '') + '，改走切片')
   }
-  if (!width || !height || height <= sliceHeight) {
+  /** 走到「没得切、原样重发」这一支时，按阈值决定要切的情况要排除掉（阈值可能比单片高度还小） */
+  if (!width || !height || (height <= sliceHeight && !tooTallForAuto)) {
     // 尺寸本身就在范围内、只是发不出去：没得切，原样再发一次（再失败也如实报出来）
     try {
-      const failure = failureFromReplyResult(await e.reply(segment.image(source)))
+      const failure = failureFromReplyResult(await e.reply(withExtra(segment.image(source))))
       if (failure) logger.warn('[图片切片] 重发仍未成功：' + describeSendFailure(failure))
     } catch (error: any) {
       logger.warn('[图片切片] 重发失败：' + describeSendFailure(classifySendFailure(error)))
@@ -436,13 +457,13 @@ export const sendSlicedImage = async (e: Message, input: any): Promise<boolean> 
     const usable = oneBotMode ? slices.length : parts.length
     if (!usable) {
       // 切片失败就退回原图，至少不是完全没反应
-      await e.reply(segment.image(source))
+      await e.reply(withExtra(segment.image(source)))
       return true
     }
 
     if (markdownMode) {
       logger.mark('[图片切片] 长图 ' + width + 'x' + height + ' 已切成 ' + parts.length + ' 片，用 markdown 拼接发送')
-      await e.reply(segment.markdown(parts.join(String.fromCharCode(10))))
+      await e.reply(withExtra(segment.markdown(parts.join(String.fromCharCode(10)))))
       return true
     }
 
@@ -453,13 +474,16 @@ export const sendSlicedImage = async (e: Message, input: any): Promise<boolean> 
     const groups = chunkElements(slices, SLICES_PER_MESSAGE)
     logger.mark('[图片切片] 长图 ' + width + 'x' + height + ' 已切成 ' + slices.length + ' 片，按图片段分 '
       + groups.length + ' 条发送（' + (platform || 'onebot') + ' 不渲染 markdown）')
-    for (const group of groups) {
+    for (const [groupIndex, group] of groups.entries()) {
+      const lastGroup = groupIndex === groups.length - 1
       /**
        * 用**带 mime 的 data URI**，别用 \`base64://\`：兼容层把 \`base64://\` 一律当
        * \`image/png\`（compat/segment.ts 的 guessMime 拿不到扩展名就默认 png），
        * 而切片是 ffmpeg 出的 jpeg —— 标错 mime 会让适配器把 .png 扩展名的 jpeg 交给客户端。
        */
-      await e.reply(group.map((slice) => segment.image('data:image/jpeg;base64,' + slice.toString('base64'))))
+      const images = group.map((slice) => segment.image('data:image/jpeg;base64,' + slice.toString('base64')))
+      /** 附加元素（按钮 / 提示）只跟在**最后一组**后面：中途插会把一张长图切成两半 */
+      await e.reply(lastGroup ? [...images, ...extra] : images)
     }
     return true
   } finally {

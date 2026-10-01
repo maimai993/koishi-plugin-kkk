@@ -1,7 +1,9 @@
 import fs from 'node:fs'
 import { sendSlicedImage } from '@/module/utils/ImageSlice'
 import { platformOf } from '@/module/utils/ImageSlice'
-import { buildMarkdownImageMessage } from '@/module/utils/QqPanel'
+import { buildMarkdownImageMessage, cardImageActions, withCardActions } from '@/module/utils/QqPanel'
+import { sendCommentPicsDirectly } from '@/module/utils/CommentPics'
+import { cardImageKeyOf, imageSourcesOf, rememberCardImages, rememberLastCardKey } from '@/module/utils/CardImageCache'
 // 弹幕策略（通用里的「强制不烧录弹幕」优先；「在线播放器」开着时是在线播放，不烧录）
 import { shouldBurnDanmaku, shouldFetchDanmaku } from '@/module/utils/DanmakuPolicy'
 // 在线播放：下载完之后登记播放会话并把链接回给用户（路径不能写 @/，那指向 karin/）
@@ -51,6 +53,21 @@ import { DouyinDataTypes, DouyinIdData } from '@/types'
 
 let mp4size = ''
 let img
+
+/**
+ * 作品封面（给「提取封面图」按钮用）。
+ *
+ * 图文 / 图集取第一张图，视频取 `animated_cover` → `cover` → `origin_cover`。
+ * 取不到就是空串 —— 这时卡片下面**不放**「提取封面图」按钮。
+ * @param aweme 作品详情（`aweme_detail`）
+ */
+const douyinCoverUrl = (aweme: any): string => {
+  const fromImages = aweme?.images?.[0]?.url_list?.[0]
+  const fromVideo = aweme?.video?.animated_cover?.url_list?.[0] ??
+    aweme?.video?.cover?.url_list?.[0] ??
+    aweme?.video?.origin_cover?.url_list?.[0]
+  return String(fromImages ?? fromVideo ?? '')
+}
 
 /** 统计数字的容错取值：拿不到就 undefined（页面干脆不显示，而不是显示 0 / NaN） */
 function optionalStat (value: unknown): number | undefined {
@@ -736,6 +753,15 @@ export class DouYin extends Base {
          * （bilibili 那边同样处理，见 bilibili.ts 的 fromPanel 判断）
          */
         const fromPanelDouyin = getParseOverride()?.fromPanel === true
+        /**
+         * 本次解析的作品键（「提取封面图 / 提取评论区图片」按钮把它当参数带上）。
+         *
+         * 封面**在这里就记**：面板路径下详情卡片是不发的（`fromPanelDouyin`），
+         * 之后只有评论区那条长图会带按钮，而它的「提取封面图」要的就是这张封面。
+         */
+        const douyinCardKey = cardImageKeyOf('douyin', (VideoData.data.aweme_detail as any)?.aweme_id)
+        rememberCardImages(douyinCardKey, { cover: douyinCoverUrl(VideoData.data.aweme_detail) })
+        rememberLastCardKey(this.e, douyinCardKey)
         if (!fromPanelDouyin && Config.douyin.sendContent.includes('info')) {
           // 卡片渲染失败只跳过卡片，视频照发（最后统一报错）；不再阻塞视频那条线
           sends.add('渲染作品信息卡', async () => {
@@ -786,7 +812,20 @@ export class DouYin extends Base {
               shareLink,
               dynamicTypeLabel: isArticle ? '文章作品' : isVideo ? '视频作品' : this.is_slides ? '合辑作品' : '图文作品'
             })
-            await this.e.reply(workInfoImg)
+            /**
+             * 记下封面并给卡片加上「提取封面图 / 提取评论区图片」按钮
+             * （图文/文章作品没有 video.cover，取第一张图当封面，和上面 text 模式的取法一致）。
+             */
+            const coverImageUrl = isArticle
+              ? aweme.video?.origin_cover?.url_list?.[0]
+              : isVideo
+                ? (aweme.video?.animated_cover?.url_list?.[0] ?? aweme.video?.cover?.url_list?.[0])
+                : aweme.images?.[0]?.url_list?.[0]
+            rememberCardImages(douyinCardKey, { cover: String(coverImageUrl ?? '') })
+            /** 详情卡（封面卡）只带「提取封面图」，评论区那条带「提取评论区图片」 */
+            await this.e.reply(
+              withCardActions(this.e, workInfoImg, douyinCardKey, { cover: true })
+            )
           }
           })
         }
@@ -835,40 +874,41 @@ export class DouYin extends Base {
               },
               CreateTime: aweme.create_time
             })
-            const messageElements = []
-            if (Config.douyin.commentImageCollection && douyinCommentsRes.image_url.length > 0) {
-              for (const [index, v] of douyinCommentsRes.image_url.entries()) {
-                const imageUrl = await processImageUrl(v, VideoData.data.aweme_detail.desc, index)
-                messageElements.push(segment.image(imageUrl))
-              }
-              /**
-               * 评论图片收集：**合并成一条 markdown** 发送。
-               *
-               * 原来是合并转发 —— 官方 bot 上转发经常发不出去，会退化成一张图一条消息。
-               * md 里连续图片是紧贴渲染的，一条消息就能装完整套图。
-               */
-              const mdMessage = await buildMarkdownImageMessage(
-                messageElements.map((item: any) => String(item?.attrs?.src ?? '')).filter(Boolean),
-                420, platformOf(this.e)
-              )
-              if (mdMessage) {
-                await this.e.reply(mdMessage)
-              } else {
-                const res = common.makeForward(
-                  messageElements,
-                  Config.app.fakeForward ? this.e.sender.userId : this.e.bot.account.selfId,
-                  Config.app.fakeForward ? this.e.sender.nick : this.e.bot.account.name
-                )
-                await this.e.bot.sendForwardMsg(this.e.contact, res, {
-                  source: '评论图片收集',
-                  summary: `查看${messageElements.length}张图片`,
-                  prompt: '抖音评论解析结果',
-                  news: [{ text: '点击查看解析结果' }]
+            /**
+             * 配置「是否收集评论区的图片」**打开时，评论里用户贴的图直接发一条**。
+             *
+             * 发成了就把 `picsSent` 带走 —— 下面挂按钮时它会把「提取评论区图片」撤掉
+             * （图已经在群里了，按钮点了只是重发一遍）。
+             */
+            const picsSent = Config.douyin.commentImageCollection
+              ? await sendCommentPicsDirectly(this.e, douyinCommentsRes.image_url, {
+                  title: VideoData.data.aweme_detail.desc,
+                  prompt: '抖音评论解析结果'
                 })
-              }
-            }
+              : false
             // 评论卡可能极长（实测 2880x40000），交给切片+md 拼接发送，避免 QQ 拒收
-            await sendSlicedImage(this.e, img)
+            /**
+             * 记两样东西，**用途不同**：
+             *   - `comment`：渲染出来的那张评论长图 —— 只当点击时的**兜底**；
+             *   - `commentPics`：**评论里用户自己贴的图**（`douyinCommentsRes.image_url`，
+             *     就是上面直接发出去的那份），按钮要的才是它。
+             *
+             * 评论区一条图都没有时**不记 `commentPics`** —— 按钮也就不显示
+             * （见 `QqPanel.hasCardImage`：没有图就不挂按钮）。以前这里不记，
+             * 按钮只能退回去重发那张长图，等于白挂一个按钮。
+             *
+             * 注意：**图直接发过也照样记** —— 手敲 `kkk评论` 还读这份缓存，
+             * 不挂按钮只是「别再点重发」，不等于这条缓存没用了。
+             */
+            rememberCardImages(douyinCardKey, {
+              comment: imageSourcesOf(img),
+              commentPics: douyinCommentsRes.image_url ?? []
+            })
+            /**
+             * 同上：评论区是每次解析都能看到的那条，提取按钮跟着它一起发（同一条消息）。
+             * `comment: !picsSent` —— 图刚直接发过就不挂按钮。
+             */
+            await sendSlicedImage(this.e, img, cardImageActions(this.e, { comment: !picsSent, key: douyinCardKey }))
           }
           })
         }
