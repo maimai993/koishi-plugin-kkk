@@ -40,7 +40,7 @@ import {
   buildBilibiliArticleRichText,
   buildBilibiliDynamicRichText,
   buildBilibiliRichTextForwardMessage,
-  buildBilibiliVideoDescRichText,
+  buildVideoDescRichText,
   getUsernameMetadata
 } from '@/platform/bilibili/dynamic-text'
 import { buildBilibiliLiveSessionId, parseBilibiliLiveStartedAt } from '@/platform/bilibili/live-status'
@@ -516,9 +516,7 @@ export class Bilibilipush extends Base {
               img = await Render(this.e, 'bilibili/dynamic/DYNAMIC_TYPE_AV', {
                 image_url: INFODATA.data.data.pic,
                 text: buildBilibiliDynamicRichText(INFODATA.data.data.title, []),
-                desc: INFODATA.data.data.desc_v2?.length
-                  ? buildBilibiliVideoDescRichText(INFODATA.data.data.desc_v2)
-                  : buildBilibiliDynamicRichText(INFODATA.data.data.desc || '', []),
+                desc: buildVideoDescRichText(INFODATA.data.data.desc_v2, INFODATA.data.data.desc),
                 dynamic_text: dynamicText,
                 dianzan: Count(INFODATA.data.data.stat.like),
                 pinglun: Count(INFODATA.data.data.stat.reply),

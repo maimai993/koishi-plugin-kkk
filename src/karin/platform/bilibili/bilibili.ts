@@ -83,7 +83,7 @@ import {
   buildBilibiliArticleRichText,
   buildBilibiliDynamicRichText,
   buildBilibiliRichTextForwardMessage,
-  buildBilibiliVideoDescRichText,
+  buildVideoDescRichText,
   getUsernameMetadata
 } from '@/platform/bilibili/dynamic-text'
 import {
@@ -390,9 +390,7 @@ export class Bilibili extends Base {
             const img = await Render(this.e, 'bilibili/videoInfo', {
               share_url: 'https://b23.tv/' + infoData.data.data.bvid,
               title: infoData.data.data.title,
-              desc: infoData.data.data.desc_v2?.length
-                ? buildBilibiliVideoDescRichText(infoData.data.data.desc_v2)
-                : buildBilibiliDynamicRichText(infoData.data.data.desc || '', []),
+              desc: buildVideoDescRichText(infoData.data.data.desc_v2, infoData.data.data.desc),
               stat: infoData.data.data.stat,
               bvid: infoData.data.data.bvid,
               ctime: infoData.data.data.ctime,
@@ -1319,9 +1317,7 @@ export class Bilibili extends Base {
               img = await Render(this.e, 'bilibili/dynamic/DYNAMIC_TYPE_AV', {
                 image_url: INFODATA.data.data.pic,
                 text: buildBilibiliDynamicRichText(INFODATA.data.data.title, []),
-                desc: INFODATA.data.data.desc_v2?.length
-                  ? buildBilibiliVideoDescRichText(INFODATA.data.data.desc_v2)
-                  : buildBilibiliDynamicRichText(INFODATA.data.data.desc || '', []),
+                desc: buildVideoDescRichText(INFODATA.data.data.desc_v2, INFODATA.data.data.desc),
                 dynamic_text: dynamicText,
                 dianzan: Count(INFODATA.data.data.stat.like),
                 pinglun: Count(INFODATA.data.data.stat.reply),

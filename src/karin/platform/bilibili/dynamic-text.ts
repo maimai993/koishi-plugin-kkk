@@ -272,9 +272,16 @@ export const buildBilibiliDynamicRichText = (
  * desc_v2 结构：
  * - type: 1 → 纯文本（含换行、链接）
  * - type: 2 → @提及（biz_id 为用户ID）
+ *
+ * **入参可能是 `null`/`undefined`**（接口在某些情况下就是这么给的，amagi 自己的类型里
+ * 也写着 `desc_v2: null`），这里必须容错 —— 直接 `for…of` 会抛 `descV2 is not iterable`。
+ * 一般不要直接调它，用 {@link buildVideoDescRichText}，它会把 `desc` 兜底也算进去。
+ *
+ * @param descV2 接口给的 desc_v2（可为空）
  */
-export const buildBilibiliVideoDescRichText = (descV2: Array<{ raw_text?: string; type?: number; biz_id?: number }>): RichTextDocument => {
+export const buildBilibiliVideoDescRichText = (descV2: Array<{ raw_text?: string; type?: number; biz_id?: number }> | null | undefined): RichTextDocument => {
   const nodes: RichTextNode[] = []
+  if (!descV2) return createRichTextDocument(nodes, { platform: 'bilibili' })
   for (const item of descV2) {
     const rawText = item.raw_text || ''
     if (!rawText) continue
@@ -299,6 +306,48 @@ export const buildBilibiliVideoDescRichText = (descV2: Array<{ raw_text?: string
     }
   }
   return createRichTextDocument(nodes, { platform: 'bilibili' })
+}
+
+/**
+ * 视频详情的简介 → 富文本（**卡片该用这个，不要自己在调用处写三元**）。
+ *
+ * ## 为什么要有它
+ *
+ * 各调用点以前是这么写的：
+ *
+ * ```ts
+ * desc: data.desc_v2?.length
+ *   ? buildBilibiliVideoDescRichText(data.desc_v2)
+ *   : buildBilibiliDynamicRichText(data.desc || '', [])
+ * ```
+ *
+ * 看着没问题，但 `desc_v2` **不保证是「非空数组」** —— 接口至少有两种给不出内容的形态：
+ *
+ * - **`null`**：amagi 自己的类型里就有一支专职写着 `desc_v2: null`；
+ * - **`[{ raw_text: '', type: 1 }]`**：数组长度是 1，但里面一个字都没有。
+ *
+ * 前者 `?.length` 是 `undefined`、后者 `?.length` 是 1，判断结果不同，
+ * 但**都不能产生可显示的简介** —— 于是交给模板的都是空文档，
+ * 而卡片模板里写的是 `props.data.desc &&`，空文档为假 ⇒ **整块简介不渲染**，
+ * 而 `desc` 纯文本里明明有内容。用户反馈的「封面卡片没有简介」就是这个。
+ *
+ * 这个函数把口径收在一处，按**能不能产出内容**判断，而不是按长度：
+ *   - `desc_v2` 能产出非空文档 → 用它（带 @ 提及、富文本样式）；
+ *   - 否则 → 用 `desc` 纯文本兜底（**关键：desc_v2 为空时不能把 desc 也一起丢掉**）；
+ *   - 两个都没有 → 返回**合法的空文档**（`nodes: []`），模板判假后自然不显示，
+ *     不会抛错、也不会渲染出 `undefined` 字样。
+ *
+ * @param descV2 接口给的 desc_v2（数组 / null / undefined / 空内容数组都可能）
+ * @param desc 接口给的 desc 纯文本（兜底用）
+ */
+export const buildVideoDescRichText = (
+  descV2: Array<{ raw_text?: string; type?: number; biz_id?: number }> | null | undefined,
+  desc: string | null | undefined
+): RichTextDocument => {
+  const fromV2 = buildBilibiliVideoDescRichText(descV2)
+  /** 真的产出了内容才用它：空数组、全空串、null 都会走到 desc 兜底 */
+  if (fromV2.nodes.length > 0) return fromV2
+  return buildBilibiliDynamicRichText(desc || '', [])
 }
 
 /** 修复图片 URL 协议。 */
