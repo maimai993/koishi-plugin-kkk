@@ -200,3 +200,58 @@ const subscriber: DouyinUserLike = Detail_Data.user_info?.data?.user ?? Detail_D
   `src/ktr/template/components/DefaultLayout.tsx`、
   `src/ktr/template/bilibili/videoInfo/components/videoInfo.tsx`、
   `src/karin/platform/xiaohongshu/{comments.ts,xiaohongshu.ts}`。
+
+---
+
+## 移植结果（2026-10-04，commit `7f1d705`，未发版）
+
+用户确认「1~6 全部搬过来」，第 7、8 条不适用。以下为实际落点，并**订正本报告前面两处误判**。
+
+| commit | 是否搬 | 落点 | 验证 |
+|---|---|---|---|
+| `ff54ba5` 缓存续期 | ✅ 全搬 | `module/db/douyin.ts` 新增 `touchAwemeCache`，清理判据 `createdAt`→`updatedAt`；`platform/douyin/push.ts` 清理时机挪到 `getDynamicList` 之后；`push/favorite.ts`、`push/recommend.ts` 换成续期调用 | `probe-aweme-ttl.cjs` 21/21 |
+| `677e213` 二维码头像 | ✅ 全搬 | 三张评论卡改 `QRCodeWithAvatar` + `AuthorAvatar`；三份 `types.ts` 加字段；xhs `noteInfo.tsx` 补 `avatarUrl`；B站/快手/小红书平台层传值 | `probe-qrcode-avatar.cjs` 25/25 |
+| `0659c2b` xhs 类型 | ✅ 全搬 | `comments.ts` / `xiaohongshu.ts` 的 `NoteComments` → `XiaohongshuNoteCommentsResponse`；子评论 `pictures` 改结构化数组 | 无专用探针，靠 tsc：**160 → 159** |
+| `2fa299a` 字体 | ✅ 全搬 | 25 个模板文件、136 行按上游 patch 逐行映射；另含本地 `DefaultLayout` 的 `By maimai` 署名行（上游无对应物，class 结构同型） | `probe-font-weight.cjs` 16/16 |
+| `f4b5312` 用户信息 | ✅ 且**扩大到 3 处** | `push/render.ts` 的 527 / 54 / 374 行 `user_info?.data?.user` → `user_info?.user` | `probe-dy-user-info.cjs` 12/12 |
+| `ee22474` 实况图 | ⚠️ 部分 | `LivePhotoTip.tsx` **全量替换**；`DefaultLayout.tsx` **不搬**（上游是给 ikenxuan 加署名，本地已有自己的页脚并写明「ROLLDOWN / VITE 整块去掉」），只取同 commit 里的分隔条对比度微调 | `probe-live-photo-tip.cjs` 20/20 |
+
+### 订正一：`f4b5312` 的 54/374 行不是「顺手核实」，是同一个真实缺陷
+
+本报告前面写「本地主路径已是新写法（`user_info?.user`）……建议顺手核实 54 行和 374 行」——
+结论对（确实要改），但**依据写反了**：本地 527 行**也还是**旧写法，上游只改了那一处。
+
+口径是怎么定死的：`DouyinUserProfileResponse` = amagi 的 `UserProfile_V0`，
+带 `[property: string]: any` 索引签名 ⇒ `.data` 与 `.user` **在类型上都能过**（tsc 帮不上忙）。
+只能看运行时 —— 本地 **15 处**一致用法（`comments.ts:132` 的 `userInfo.data.user.nickname`、
+`douyin.ts:1215` 的 `UserData.data.user.avatar_larger`、`push/live.ts:39`、
+`push.ts:829/1193`、`testPush.ts` 多处）证明 `fetchUserProfile()` 返回**信封**；
+而各推送流程传的是 `userinfo.data`（`push.ts:893`、`favorite.ts:66`、`testPush.ts:110/152`），
+所以 `user_info` 顶层就是 `.user`，没有 `.data`。三处 `.data?.user` 全部恒 `undefined`，
+静默兜底成「作品作者」/「作品自带 ip_location」。
+
+`probe-dy-user-info.cjs` 里用「用户资料 重庆 vs 作品自带 北京」制造冲突来断言，
+旧代码会明确给出「北京」。
+
+### 订正二：`ee22474` 不是「本地已有 295 行自研版」
+
+本报告前面写「本地 `LivePhotoTip.tsx` 是 295 行自研版，需逐行比对后决定合并方式」——
+**这是错的**。把上游改前版本（`2fa299a`）拉下来 `diff -u` 后发现，
+本地那份与上游改前**逐字节一致**，只差两行品牌名（`karin-plugin-kkk`→`koishi-plugin-kkk`、
+`KARIN-PLUGIN`→`KOISHI-PLUGIN`）。
+
+所以可以直接整套替换。`DefaultLayout` 才是真正分叉的那块：本地页脚已经换成了
+自己的署名（`By maimai` + QQ 头像）并明确删掉了构建工具区，
+上游 `ee22474` 给 DefaultLayout 加的是「Design By ikenxuan」+ Rolldown/Vite 两行堆叠 ——
+**与本地已有的决定冲突，故不搬**。
+
+### 回归
+
+- 探针 10 个全绿（含本报告上表 5 个新探针 + `probe-bili-desc` / `probe-extract-once` /
+  `probe-extract-buttons` / `probe-group-file-name` / `probe-md-image-size`）；
+- `smoke-koishi-commands` 46/46、`smoke-render` 36/36 路由、
+  `smoke-comments` / `smoke-commands` / `smoke-md-image` / `smoke-imports` 通过；
+- **tsc 159**（基线 160）；
+- `smoke-douyin.cjs` 的「抖音接口被风控时的提示」失败 —— 已用 `git stash` + 重建 HEAD 对照，
+  在 `837a222` 上同样失败，**属预先存在的问题**，与本批无关；
+- `deploy.mjs` 已同步本地镜像（326 文件 / 2.83MB），宿主重启后生效。
