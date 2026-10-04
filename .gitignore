@@ -11,6 +11,9 @@ data/
 data-smoke-*/
 *.log
 
+# 探针导出的 SSR HTML（脚本里写明「可直接用浏览器打开看排版」的那份）
+bili-desc-probe.html
+
 # 编辑器 / 系统
 .DS_Store
 .idea/

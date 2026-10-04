@@ -44,6 +44,7 @@ Config.Config = {
 const render = require(path.join(lib, 'karin/module/utils/Render/index.js'))
 const rich = require(path.join(lib, 'richtext/parse/index.js'))
 const dynamicText = require(path.join(lib, 'karin/platform/bilibili/dynamic-text.js'))
+const qqPanel = require(path.join(lib, 'karin/module/utils/QqPanel.js'))
 
 let failed = 0
 const check = (name, ok, detail) => {
@@ -206,6 +207,65 @@ const countOccurrences = (haystack, needle) => haystack.split(needle).length - 1
       const plain = rich.extractRichTextPlainText(mixed)
       console.log('  混合 desc_v2 → ' + JSON.stringify(plain))
       check('多段拼接后 @ 与链接都在', plain.includes('@某某UP') && plain.includes('https://b23.tv/abc'))
+    }
+
+    console.log('\n=== 5. ✅ 回归：QQ 面板那张卡也不能丢简介 ===')
+    {
+      /**
+       * **用户实际看到的卡是面板这张。**
+       *
+       * QQ 上开着解析面板时，正式解析里的详情卡片是**不发**的
+       * （bilibili.ts 里 `fromPanel` 为真就直接 return），用户在群里看到的每一张视频卡
+       * 都是面板渲染并上传到 assets 的那张。而这份数据以前是内联在 `uploadPanelCard` 里的，
+       * `desc` 被写死成 `''` —— 于是「解析卡片修好了简介」对用户毫无感知，
+       * 标题下面照样什么都没有。
+       *
+       * 这里直接测产物里导出的 `buildBilibiliPanelCardData`（面板卡片数据的唯一来源），
+       * 再把它喂给同一个模板走一遍 SSR。
+       */
+      const buildPanelCard = qqPanel.buildBilibiliPanelCardData
+      check('产物里有 buildBilibiliPanelCardData（面板卡片数据由它构造）', typeof buildPanelCard === 'function',
+        typeof buildPanelCard)
+
+      if (typeof buildPanelCard === 'function') {
+        const panelMarker = '我要笑死了'
+        /** 形状和 fetchBilibiliInfo 拿到的一致：`desc_v2` 里就是那段文字 */
+        const panelDetail = {
+          bvid: 'BV149hs6wEek',
+          title: '用一上午的时间拉了一坨大的',
+          desc_v2: [{ raw_text: panelMarker, type: 1, biz_id: 0 }],
+          desc: panelMarker,
+          stat: { view: 12234, danmaku: 12, reply: 70, like: 2006, coin: 28, share: 13, favorite: 446 },
+          ctime: 1790145537,
+          pic: 'https://i2.hdslb.com/bfs/archive/0000000000000000000000000000000000000000.jpg',
+          owner: { mid: 98865844, name: '残痕cah', face: 'https://i1.hdslb.com/bfs/face/0000000000000000000000000000000000000000.jpg' }
+        }
+
+        const panelData = buildPanelCard(panelDetail, 'BV149hs6wEek', [], null)
+        check('面板卡片数据里有简介（不再是写死的空串）',
+          rich.extractRichTextPlainText(panelData.desc).includes(panelMarker),
+          JSON.stringify(rich.extractRichTextPlainText(panelData.desc)))
+        check('面板卡片仍然带上了 bvid / 统计 / UP主（只改简介，没动别的）',
+          panelData.bvid === 'BV149hs6wEek' && panelData.stat?.like === 2006 && panelData.owner?.name === '残痕cah',
+          'bvid=' + panelData.bvid + ' like=' + (panelData.stat && panelData.stat.like) + ' owner=' + (panelData.owner && panelData.owner.name))
+
+        /** desc_v2 为 null 时也一样（和解析那边同一个口径） */
+        const panelFallback = buildPanelCard({ ...panelDetail, desc_v2: null }, 'BV149hs6wEek', [], null)
+        check('面板卡片：desc_v2 为 null → 退回 desc 兜底',
+          rich.extractRichTextPlainText(panelFallback.desc).includes(panelMarker))
+
+        /** bvid 缺失时用面板请求里的 ID 兜底 */
+        const panelNoBvid = buildPanelCard({ ...panelDetail, bvid: undefined }, 'BV149hs6wEek', [], null)
+        check('面板卡片：稿件对象没有 bvid → 用面板请求的 ID',
+          panelNoBvid.bvid === 'BV149hs6wEek' && String(panelNoBvid.share_url).includes('BV149hs6wEek'),
+          'bvid=' + panelNoBvid.bvid + ' share=' + panelNoBvid.share_url)
+
+        /** 端到端：面板数据 → SSR 出来的卡片 HTML 里必须有简介 */
+        const panelHtml = await render.renderTemplateHtml('bilibili/videoInfo', panelData, false)
+        check('面板数据 → SSR 出来的卡片里真的有简介',
+          !!panelHtml && panelHtml.includes(panelMarker),
+          panelHtml ? ('HTML ' + panelHtml.length + ' 字符，含简介=' + panelHtml.includes(panelMarker)) : 'SSR 失败')
+      }
     }
 
     console.log('\n' + (failed ? '✘ 有 ' + failed + ' 项没通过' : '✔ 全部通过'))

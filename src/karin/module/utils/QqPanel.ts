@@ -34,8 +34,8 @@ import { cardImageKeyOf, recallCardImages, rememberCardImages, rememberLastCardK
 import { getImageMetadata, Render } from '@/module/utils/Render'
 import { isUsableSize, readImageSize, scaleToWidth } from '../../../compat/imageSize'
 import { getHotDanmaku } from '@/platform/bilibili/danmaku'
-// 头像框 / 昵称颜色要从 UP 主页接口拿，和解析结果保持一致
-import { getUsernameMetadata } from '@/platform/bilibili/dynamic-text'
+// 头像框 / 昵称颜色要从 UP 主页接口拿，和解析结果保持一致；简介同样走解析那边的统一口径
+import { buildVideoDescRichText, getUsernameMetadata } from '@/platform/bilibili/dynamic-text'
 // 抖音卡片复用推送那套构建器（保真度最高）
 import { renderWorkImage } from '@/platform/douyin/push/render'
 
@@ -988,6 +988,51 @@ const panelCardInfo = (buffer: Buffer, url: string): { url: string; width: numbe
 }
 
 /**
+ * 面板卡片的 B 站数据（`bilibili/videoInfo` 模板吃的那份）。
+ *
+ * ## 单独抽成函数，是为了「这张卡也得有简介」这件事能被离线测到
+ *
+ * 这份对象以前是内联在 {@link uploadPanelCard} 里的，其中 `desc` 被写死成 `''`。
+ * 于是出现一个很隐蔽的现象：**解析卡片有简介、面板卡片永远没有**，
+ * 而 QQ 上开着面板时解析卡片是**不发**的（见 bilibili.ts 的 `fromPanel` 分支），
+ * 用户实际看到的每一张卡都是面板这张 —— 修了解析那边的简介，
+ * 用户这边「标题下面还是没有简介」。（见 scripts/probe-bili-desc.cjs）
+ *
+ * 简介和解析那边走**同一个** {@link buildVideoDescRichText}：接口有时把简介放在
+ * `desc_v2` 里、有时只在 `desc` 里，口径收在一处才不会两边不一致。
+ *
+ * @param detail 稿件对象（`fetchVideoInfo` 的 `data.data`，含 desc / desc_v2）
+ * @param fallbackId 稿件对象里没有 bvid 时用的作品 ID（面板请求里的那个）
+ * @param hotDanmaku 热门弹幕，卡片顶部飘过的那几条（和解析结果一致）
+ * @param ownerCard UP 主页卡片（头像框 / 昵称颜色），拉失败传 null
+ */
+export const buildBilibiliPanelCardData = (
+  detail: any,
+  fallbackId: string,
+  hotDanmaku: any[] = [],
+  ownerCard: any = null
+): any => ({
+  share_url: bilibiliShareUrl(String(detail?.bvid ?? fallbackId)),
+  title: detail?.title,
+  desc: buildVideoDescRichText(detail?.desc_v2, detail?.desc),
+  stat: detail?.stat,
+  bvid: detail?.bvid ?? fallbackId,
+  ctime: detail?.ctime,
+  pic: detail?.pic,
+  hotDanmaku,
+  /**
+   * 头像框和粉名都来自 UP 主页（userCard）—— 面板只拉了视频信息，
+   * 之前直接传 detail.owner 就少了 frame / usernameMeta 两个字段，
+   * 于是卡片上「没有头像框、名字也不是粉色」。这里和解析那边用同一份构造。
+   */
+  owner: {
+    ...detail?.owner,
+    usernameMeta: ownerCard ? getUsernameMetadata(ownerCard) : undefined,
+    frame: ownerCard?.pendant?.image || ''
+  }
+})
+
+/**
  * 渲染面板卡片（和解析结果同一套模板）并上传到 assets，拿到 QQ markdown 能用的图片地址。
  *
  * QQ 的 markdown 图片必须是**可访问的 https 地址**（本地文件、base64 都不认），
@@ -1042,27 +1087,7 @@ async function uploadPanelCard (
 
     const route = 'bilibili/videoInfo'
     const cardData: any = request.platform === 'bilibili'
-      ? {
-          share_url: bilibiliShareUrl(String(detail.bvid ?? request.id)),
-          title: detail.title,
-          desc: '',
-          stat: detail.stat,
-          bvid: detail.bvid ?? request.id,
-          ctime: detail.ctime,
-          pic: detail.pic,
-          // 和解析结果一致：带热门弹幕，卡片顶部就有弹幕飘过
-          hotDanmaku,
-          /**
-           * 头像框和粉名都来自 UP 主页（userCard）—— 面板只拉了视频信息，
-           * 之前直接传 detail.owner 就少了 frame / usernameMeta 两个字段，
-           * 于是卡片上「没有头像框、名字也不是粉色」。这里和解析那边用同一份构造。
-           */
-          owner: {
-            ...detail.owner,
-            usernameMeta: ownerCard ? getUsernameMetadata(ownerCard) : undefined,
-            frame: ownerCard?.pendant?.image || ''
-          }
-        }
+      ? buildBilibiliPanelCardData(detail, request.id, hotDanmaku, ownerCard)
       : {
           // 抖音卡片的数据结构由模板决定，这里先不做卡片，交给兜底面板
         }
