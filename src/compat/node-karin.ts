@@ -412,6 +412,85 @@ export class KkkBot {
   }
 
   /**
+   * 查「某个表情回应都有谁贴了」（NapCat 的 `fetch_emoji_like`）。
+   *
+   * ## 为什么要主动查
+   * NapCat 的 `group_msg_emoji_like` **推送**不是每个版本 / 每种事件配置都会发。
+   * 推送不来时「点了没反应」就无解 —— 而这个接口是**反方向**的路：
+   * 拿面板消息 id + 表情 id 直接问「谁贴了」，自己轮询。
+   *
+   * ## 为什么不能直接 `bot.internal.fetchEmojiLike()`
+   * 适配器**没有** `Internal.define('fetch_emoji_like')`（只 define 了
+   * `set_msg_emoji_like` 那几个），所以 `Internal.prototype` 上没有这个名字。
+   * 但适配器留了**通用入口**：`internal._get(action, params)` —— 它自己
+   * `POST /<action>` 并把 `{retcode, data}` 信封拆开（retcode ≠ 0 时抛错）。
+   * 所以：先找有没有别名（别的实现叫 `fetchEmojiLike` / `getEmojiLikes`…），
+   * 找不到就走 `_get`；再退一步用 `_request` 自己看 retcode。
+   *
+   * ⚠️ 大 id 不能强转数字：适配器的 `prepareArg` 只在 `|value| < 2^32` 时才转
+   * （QQ 消息 id 有的是 19 位，超出 JS 安全整数），这里跟它保持一致。
+   *
+   * @returns 贴了这个表情的用户 id 列表；**`null` = 问不到**（接口不存在或调用失败）。
+   *          调用方必须分清「没人贴」（空数组）和「问不到」（null）——
+   *          前者是正常等待，后者要停掉轮询别再打接口。
+   */
+  async fetchEmojiLikes (messageId: string, emojiId: string | number): Promise<string[] | null> {
+    const bot: any = this.bot
+    const internal: any = bot?.internal
+    const toId = (value: any): any => {
+      const num = Number(value)
+      if (!Number.isFinite(num)) return String(value)
+      return Math.abs(num) < 4294967296 ? num : String(value)
+    }
+    const params = { message_id: toId(messageId), emoji_id: toId(emojiId), count: 20 }
+    try {
+      let data: any
+      let called = false
+      for (const name of ['fetchEmojiLike', 'fetchEmojiLikes', 'getEmojiLikes', 'getEmojiLikeList']) {
+        const owner = typeof bot?.[name] === 'function' ? bot
+          : typeof internal?.[name] === 'function' ? internal : null
+        if (!owner) continue
+        data = await owner[name](params.message_id, params.emoji_id, params.count)
+        called = true
+        break
+      }
+      /**
+       * 动作名也不止一个：NapCat 文档里是 `fetch_emoji_like`，
+       * 而有些实现（以及 `koishi-plugin-adapter-napcat` 的说明）叫 `get_emoji_likes`。
+       * 两个都试，**成功一次就够**（拿不到就返回 null 让调用方停掉轮询）。
+       */
+      if (!called && typeof internal?._get === 'function') {
+        for (const action of REACTION_QUERY_ACTIONS) {
+          try {
+            data = await internal._get(action, params)
+            called = true
+            break
+          } catch { /* 这个动作名没有，试下一个 */ }
+        }
+      }
+      if (!called && typeof internal?._request === 'function') {
+        for (const action of REACTION_QUERY_ACTIONS) {
+          const response = await internal._request(action, params)
+          if (Number(response?.retcode ?? 0) !== 0) continue
+          data = response?.data
+          called = true
+          break
+        }
+      }
+      if (!called) return null
+      /** 别名那条路可能已经拆过信封，`_request` 那条没有 —— 两种都认 */
+      const list = data?.emojiLikesList ?? data?.data?.emojiLikesList
+      if (!Array.isArray(list)) return null
+      return list
+        .map((item: any) => String(item?.tinyId ?? item?.user_id ?? item?.userId ?? ''))
+        .filter((id: string) => !!id)
+    } catch (error: any) {
+      logger.debug('[compat] 查表情回应失败（' + String(bot?.platform ?? '未知') + '）: ' + String(error?.message ?? error))
+      return null
+    }
+  }
+
+  /**
    * 撤回消息。
    *
    * 必须带上频道号：QQ 适配器的 `deleteMessage(channelId, messageId)` 会在内部对
@@ -436,6 +515,9 @@ export type AdapterType = KkkBot
 /* ------------------------------------------------------------------ *
  * Message 适配
  * ------------------------------------------------------------------ */
+
+/** 查「谁贴了这个表情」可能的动作名（各家 / 各版本不一样，按顺序试） */
+const REACTION_QUERY_ACTIONS = ['fetch_emoji_like', 'get_emoji_likes']
 
 /** 仿 karin 的 Message（事件对象） */
 export class Message {

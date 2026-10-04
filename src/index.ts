@@ -1345,27 +1345,85 @@ export async function apply (ctx: Context, rawConfig: Config) {
   /**
    * OneBot 的「点表情选清晰度」：机器人往自己那条选择消息上贴一排表情，用户点一个就算选中。
    *
-   * ## 两条事件都要接（用户实测 NapCat 只发后一条）
-   *   1. `onebot/message-reactions-updated` —— OneBot 标准事件（当前数量的快照），
-   *      个别协议实现发这个；
-   *   2. **`group_msg_emoji_like`** —— **NapCat 真正发的那个**（逐次点击上报，
-   *      带 `user_id` / `is_add` / `likes`）。它在标准适配器里没有专门分支，
-   *      会话类型就是普通 `notice`，所以挂在 `notice` 上、在 ReactionPanel 里按
-   *      `session.onebot.notice_type` 过滤。
+   * ## ⚠️ 只能按「类型」监听 —— `type/subtype` 那个事件名根本不会发
    *
-   * 依赖 koishi-plugin-adapter-onebot；**没装这个适配器时事件永远不会触发**，这里注册也无害。
-   * 面板/开关的判断都在 ReactionPanel 里做 —— 这里只负责把事件递过去。
+   * `@satorijs/core` 的 `Bot.dispatch()` 里是：
+   *
+   *     let events = [session.type]
+   *     for (const event of events) this.context.emit(session, event, session)
+   *
+   * 也就是说**只派发 `session.type` 这一个名字**（`eventAliases` 只补了 message /
+   * guild 那两三条）。所以 `ctx.on('onebot/message-reactions-updated')` 永远不触发 ——
+   * 这正是「点了没反应」的第一个原因。subtype 要在回调里自己看。
+   *
+   * ## 两边的类型都接
+   *   - NapCat 的 `group_msg_emoji_like`（逐次点击上报，带 user_id / is_add / likes）
+   *     在标准适配器里**没有分支** → 会话类型就是普通 `notice`；
+   *   - 个别适配器把它归到 `onebot` 类型（和 `message_reactions_updated` 一样）——
+   *     `koishi-plugin-adapter-napcat` 甚至把它转成标准的 `reaction-added` / `reaction-removed`。
+   *
+   * 这些类型都挂上，里面的形状判断交给 ReactionPanel（`handleReactionEvent`）；
+   * 认不出来的形状它会**原样打出来**，拿到真实载荷再补精确映射。
+   *
+   * 依赖一个 OneBot 系适配器；**一个都没装时事件永远不会触发**，这里注册也无害。
    */
-  ;(ctx as any).on('onebot/message-reactions-updated', (session: any) => {
+  const onReactionEvent = (session: any): void => {
     void import('./karin/module/utils/ReactionPanel')
-      .then((module) => module.handleReactionUpdate(session))
+      .then((module) => module.handleReactionEvent(session))
       .catch((error: any) => logger.debug('[kkk] 处理表情回应失败: %s', String(error?.message ?? error)))
-  })
-  ;(ctx as any).on('notice', (session: any) => {
-    if (session?.onebot?.notice_type !== 'group_msg_emoji_like') return
+  }
+  ;(ctx as any).on('notice', onReactionEvent)
+  ;(ctx as any).on('onebot', onReactionEvent)
+  // adapter-napcat 会把 group_msg_emoji_like 转成标准名字，一并接上
+  ;(ctx as any).on('reaction-added', onReactionEvent)
+  ;(ctx as any).on('reaction-removed', onReactionEvent)
+
+  /**
+   * 排查用的总探针：把**每一条**入站事件的形状打出来。
+   *
+   * `Bot.dispatch()` 在按类型派发**之前**会无条件 `emit('internal/session', session)`
+   * （`@satorijs/core` 的 `src/bot.ts:181`），所以哪怕适配器把载荷归成了我们没监听的
+   * `type`，这条也照样会走。
+   *
+   * ## ⚠️ 但它证明不了「协议端没发」
+   * `internal/session` 是在 `Bot.dispatch()` **里面**发的。`koishi-plugin-adapter-onebot`
+   * 的 `adaptSession()` 对**不认识的 notice_type** 走 `default: return`，
+   * 于是 `dispatchSession()` 直接 `return` —— **`dispatch()` 根本没被调用**，
+   * 这里也就一行都没有。所以「没日志」不等于「协议端没发」；
+   * `group_msg_emoji_like` 恰恰就是被这样丢掉的（适配器日志里能看到上报，插件侧一片空白）。
+   *
+   * 它真正能回答的是**载荷长什么样**：
+   *   - 有、`notice_type` 是别的名字 → 照原样补一条判断即可；
+   *   - 有、`notice_type` 也对，但 `message_id` 对不上 → `handleEmojiLike` 里会把
+   *     「在等的是哪几条」一起打出来。
+   *
+   * 只在有面板等着时（或载荷长得像表情事件时）才打日志，平时不吵。
+   */
+  const onInboundSession = (session: any): void => {
     void import('./karin/module/utils/ReactionPanel')
-      .then((module) => module.handleEmojiLike(session))
-      .catch((error: any) => logger.debug('[kkk] 处理表情回应失败: %s', String(error?.message ?? error)))
+      .then((module) => module.noteInboundSession(session))
+      .catch((error: any) => logger.debug('[kkk] 入站事件探针失败: %s', String(error?.message ?? error)))
+  }
+  ;(ctx as any).on('internal/session', onInboundSession)
+
+  /**
+   * 表情面板的**文字退路**：回一个序号（1 / 2 / 3…）也能选。
+   *
+   * 表情事件完全看协议端脸色（NapCat 要够新、还要开着对应事件，别的实现形状还不一样）。
+   * 协议端不发就永远收不到点击 —— 而面板一旦发出，**这条链接就不会再走正常解析**，
+   * 用户会卡在那儿什么都拿不到。所以留一条走普通消息通道的退路：
+   * **引用**面板消息回序号（谁都能这么选），或者**发链接的人**在几分钟内直接回数字。
+   *
+   * 注册在最后：前面的中间件不认识这种「裸数字」消息，会 `next()` 放过来。
+   */
+  ctx.middleware(async (session: any, next: any) => {
+    try {
+      const { trySelectByText } = await import('./karin/module/utils/ReactionPanel')
+      if (await trySelectByText(session)) return
+    } catch (error: any) {
+      logger.debug('[kkk] 文字选档失败: %s', String(error?.message ?? error))
+    }
+    return next()
   })
 
   logger.info('koishi-plugin-kkk 已加载：命令 %d 个，定时任务 %d 个', commandQueue.length, taskQueue.length)

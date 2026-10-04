@@ -518,6 +518,21 @@ export async function sendCopyJumpMessage (
   }
 }
 
+/**
+ * 生成一个 `<qqbot-cmd-input>` —— QQ 官方 markdown 里的**点击填指令**按钮（蓝字链接那种）。
+ *
+ * ## ⚠️ 这是腾讯那套 markdown 的私货，OneBot 系不认
+ * 只有 `qq` / `qqguild` 两个适配器渲染 markdown（见 {@link supportsMarkdown}）。
+ * OneBot（NapCat / Lagrange / go-cqhttp / Chronocat）收过去就是一串**裸标签**：
+ * 用户看到的是 `<qqbot-cmd-input text="下载进度 BV17tHb6AEKt" show="查询下载进度" />` 一整行。
+ *
+ * 所以**每个调用点都必须先问一句 `supportsMarkdown(platformOf(e))`**，
+ * 不认 markdown 就写成人话（「发送「xxx」查询进度」）。别把它当通用工具用 ——
+ * 静态闸门见 `scripts/probe-onebot-no-markdown.cjs`（新增调用文件会让探针变红）。
+ *
+ * @param command 点下去要填进输入框的**完整指令**（含触发前缀）
+ * @param show 按钮上显示的文字（缺省显示指令本身）
+ */
 export function cmdInput (command: string, show?: string): string {
   const text = encodeURIComponent(command).replace(/'/g, '%27')
   const label = encodeURIComponent(show ?? command).replace(/'/g, '%27')
@@ -962,10 +977,25 @@ export async function replyReplacing (e: Message, content: any): Promise<any> {
  *
  * 按钮里带上本次任务的特征串（B站是 bvid），点它就只查**这一条**的进度，
  * 多个下载同时在跑时不会串味（下载文件名里本来就带 bvid）。
+ *
+ * ## ⚠️ OneBot 上不能发这个按钮
+ * `<qqbot-cmd-input>` 是**腾讯那套 markdown 的私货**。OneBot 系（NapCat / Lagrange…）
+ * 不渲染 markdown，收过去就是一串**裸标签**，用户看到的是
+ * `<qqbot-cmd-input text="下载进度 BV17tHb6AEKt" show="查询下载进度" …/>` 一整行。
+ *
+ * 这条提示在 OneBot 上**真的会走到**：表情面板的回退链路里 `runParse` 会带 `--p=<令牌>`，
+ * 而 `fromPanel` 的判据就是「有 `--p=` / `--panel=`」（见 `apps/tools.ts`）——
+ * 于是 OneBot 也跟着走了「面板点进来的」这条分支。所以必须在这里按平台分岔。
+ *
+ * @param e 消息事件（判平台用）。**不传就按老行为发 markdown** ——
+ *   这条原本只服务 QQ 面板链路，拿不到事件时保持原样最安全。
  */
-export function buildDownloadTip (taskId: string, text = '收到请求，开始下载'): any {
+export function buildDownloadTip (taskId: string, text = '收到请求，开始下载', e?: any): any {
   // 体积/文件形式的提示统一放到真正发送时的「发送中…」里（见 Base.ts），这里只给进度按钮
   const command = commandInvocation('下载进度') + (taskId ? ' ' + taskId : '')
+  if (e && !supportsMarkdown(platformOf(e))) {
+    return segment.text(text + '\n' + '发送「' + command + '」查询下载进度')
+  }
   return segment.markdown(text + '\n' + cmdInput(command, '查询下载进度'))
 }
 

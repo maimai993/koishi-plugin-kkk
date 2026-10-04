@@ -220,7 +220,8 @@ export class Bilibili extends Base {
     if (fromPanel) {
       // 面板点进来的：只回一句「收到请求，开始下载」，并挂一个只查本次任务的进度按钮
       // replyReplacing 会先撤掉上一条（也就是刚点的画质面板），群里只留这句提示
-      await replyReplacing(this.e, buildDownloadTip(String(iddata.bvid ?? ''), '收到请求，开始下载'))
+      // 第三个参数是事件本身：OneBot 不渲染 markdown，那条提示会退化成纯文本指令（见 buildDownloadTip）
+      await replyReplacing(this.e, buildDownloadTip(String(iddata.bvid ?? ''), '收到请求，开始下载', this.e))
     } else if (!this.storyOnly && Config.app.parseTip) {
       /**
        * 同样：发这句话时把上一条机器人消息撤掉。

@@ -13,11 +13,18 @@
  *   1. **选清晰度**：每一档画质对应一个表情；
  *   2. **是否在线播放**：只有在线播放器开着才会问（关着时视频一定发到群里，没什么可选的）。
  *
- * ## 怎么判断「用户点了哪个」
- * 适配器只给一条快照式的 `onebot/message-reactions-updated`（`current_reactions` 里是现在的
- * **每种表情的总数**），既不说是谁点的、也不说变了什么。所以这里做计数差值：
- * 机器人自己贴过一遍（每个 +1）之后，某个表情的**数量变多了**就说明有人点了它。
+ * ## 怎么判断「用户点了哪个」：三条路，一条都不能少
  *
+ *   1. **推送事件**（`notice` / `onebot` 上的 `group_msg_emoji_like`）。
+ *      ⚠️ 这条路**大概率是死的**：`koishi-plugin-adapter-onebot@6.9.4` 的 `adaptSession()`
+ *      不认这个 notice_type，直接把整条事件丢了（详见下面「轮询」那段的注释）。
+ *      代码留着 —— 换成会派发的适配器时它立刻就能用，而且零成本。
+ *   2. **主动查询**（`fetch_emoji_like`）—— **真正的主路**，不受事件派发影响，见下。
+ *   3. **文字退路**：引用面板消息回序号，或发链接的人 3 分钟内直接回数字。
+ *      `set_msg_emoji_like` 不存在（贴不上表情）时这是唯一能用的，所以面板文案里必须写。
+ *
+ * 推送那条路（`message-reactions-updated` 快照）上还有一层差值判定：
+ * `current_reactions` 只给**每种表情现在有多少**，不说是谁点的，所以拿「比基准多」当点击。
  * 基准值不写死成 1：收到快照时会把「比基准更小的值」采纳为新基准，
  * 这样万一机器人自己那排没贴成功（数量 0），用户点一下变成 1 也认得出来。
  *
@@ -73,6 +80,13 @@ interface PendingPanel {
   key: string
   channelId: string
   messageId: string
+  /**
+   * 发链接的那个人。
+   *
+   * 只给「不引用、直接回数字」那条退路当门槛用（见 trySelectByText）：
+   * 群里裸数字太常见，不加这一层就会到处吞别人的消息。
+   */
+  requester: string
   /** 第一步 = 选画质，第二步 = 选是否在线播放 */
   step: 'quality' | 'watch'
   choices: Choice[]
@@ -89,12 +103,75 @@ interface PendingPanel {
   /** 这条链路上前面已经发过的消息，选完要一起撤回 */
   recallIds: string[]
   createdAt: number
+  /**
+   * 发这条面板用的机器人（轮询去查「谁贴了」要用它）。
+   *
+   * 存下来是因为轮询是**定时器**触发的，手上没有当时那条会话 ——
+   * 事件驱动的路（推送 / 文字）都能从 session 拿 bot，轮询那条拿不到。
+   */
+  bot?: any
+  /**
+   * 轮询基线：面板刚发出、机器人把表情贴完那一刻，每个表情下面**已经**有谁。
+   *
+   * 只有「之后新冒出来的人」才算点了。这样连「机器人自己的表情也被列在
+   * `emojiLikesList` 里」这种情况都不用关心（管它列不列，反正它已经在基线里），
+   * 比按 id 比对 `selfId` 稳。`undefined` = 这条面板不走轮询。
+   */
+  polledUsers?: Map<string, Set<string>>
+  /** 轮询已经问过几轮（到上限就停，别一直打接口） */
+  pollRounds?: number
 }
 
 /** 等待中的面板：key = `会话ID:消息ID` */
 const pending = new Map<string, PendingPanel>()
 
 const keyOf = (channelId: string, messageId: string): string => channelId + ':' + messageId
+
+/**
+ * 一个消息 id 的几种「写法」。
+ *
+ * OneBot11 的 `message_id` 是 **int32**，而我们记下的 id 是适配器给的字符串。
+ * 大 id 被截成 32 位有符号整数之后会长得完全不一样（例如 `2975774273` → `-1319195023`），
+ * 直接 `===` 比就永远对不上 —— 于是「点了没反应」。这里把所有可能的写法都列出来逐个试。
+ */
+const idVariants = (messageId: string): string[] => {
+  const raw = String(messageId ?? '').trim()
+  if (!raw) return []
+  const out = new Set<string>([raw])
+  const num = Number(raw)
+  if (Number.isFinite(num) && Number.isInteger(num)) {
+    /** 截成 32 位有符号（协议端上报的就是这个） */
+    out.add(String(num | 0))
+    /** 反过来：上报的是负数、我们记的是无符号 */
+    out.add(String(num >>> 0))
+    /** 有些实现只是把负号丢了 */
+    out.add(String(Math.abs(num | 0)))
+  }
+  return [...out]
+}
+
+/** 日志里放原始载荷：太长就砍掉，别把日志刷爆 */
+const brief = (value: any, limit = 400): string => {
+  try {
+    const text = typeof value === 'string' ? value : JSON.stringify(value)
+    return text.length > limit ? text.slice(0, limit) + '…' : text
+  } catch {
+    return String(value)
+  }
+}
+
+/** 现在有哪些面板在等（排查「消息 ID 对不上」时要靠它） */
+const describePending = (): string => {
+  if (!pending.size) return '无'
+  return [...pending.values()].map((item) => item.channelId + ':' + item.messageId + '(' + item.step + ')').join(' / ')
+}
+
+/** 这个频道有没有在等的面板 */
+export const hasPendingIn = (channelId: string): boolean =>
+  !!channelId && [...pending.values()].some((item) => item.channelId === channelId)
+
+/** 排查用：把原始载荷转成一行短文本 */
+export const briefPayload = (value: any): string => brief(value)
 
 /** 清理过期/超量的面板 */
 const sweep = (): void => {
@@ -104,6 +181,211 @@ const sweep = (): void => {
     if (now - panel.createdAt > PANEL_TTL_MS) pending.delete(key)
   }
   while (pending.size > PANEL_MAX) pending.delete(pending.keys().next().value as string)
+  stopPollTimerIfIdle()
+}
+
+/* ------------------------------------------------------------------ *
+ * 轮询：推送事件不来时的第二条路
+ *
+ * ## 为什么要有（**这条现在是主路，不是备胎**）
+ * `group_msg_emoji_like` 这条推送**到不了插件**，而且是硬性的：
+ * `koishi-plugin-adapter-onebot@6.9.4` 的 `adaptSession()` 里那个 `switch (data.notice_type)`
+ * **根本没有 `group_msg_emoji_like` 这个 case** —— 未知 notice 走 `default: return`，
+ * 于是 `dispatchSession()` 拿到 `undefined` 直接 `return`，**连 `bot.dispatch()` 都不会调**
+ * （`lib/index.js:537-539` + `:409-412`）。
+ *
+ * 结论：**适配器日志里那句「WebSocket 事件上报 notice.group_msg_emoji_like」只能证明协议端发了，
+ * 不能证明 Koishi 收到了。** 我们挂的任何监听（包括 `internal/session`）都看不见它 ——
+ * 因为 `internal/session` 是在 `Bot.dispatch()` 里发的，而这一步根本没走到。
+ * 用户那边看到的现象就是：协议端日志有事件、插件一行日志都没有、「点了没反应」。
+ *
+ * 既然等不到推送，那就**反着问**：拿面板消息 id + 表情 id
+ * 调 `fetch_emoji_like`（兼容层 `KkkBot.fetchEmojiLikes`），自己盯着谁贴了。
+ *
+ * ## 为什么用「基线」而不是直接看有没有人
+ * 面板下面那排表情是**机器人自己贴的**，`emojiLikesList` 里很可能就有机器人。
+ * 所以面板刚发出时先记一份「每个表情下面已经有谁」，之后**新冒出来的人**才算点击 ——
+ * 这样连机器人自己的 id 长什么样都不用关心。
+ *
+ * ## 代价
+ * 每轮要对**每一档**问一次（接口只吃单个 emoji_id），所以间隔不能太小、轮数要有上限。
+ * 接口不存在（老 NapCat）时**一次就判定不再问**，绝不反复打。
+ * ------------------------------------------------------------------ */
+
+/** 轮询间隔：每次都要往腾讯服务器往返一趟，别太密 */
+const POLL_INTERVAL_MS = 3000
+/**
+ * 一条面板最多问多少轮（≈3 分钟）。
+ *
+ * 推送那条路大概率是死的（见本段文件头），所以这段时间里**轮询就是唯一的点击通道**，
+ * 太短会变成「刚过两分钟再点就没反应」。之后交给文字退路，面板本身仍然有效。
+ */
+const POLL_MAX_ROUNDS = 60
+
+/** 已经确认「问不到表情回应」的机器人（老协议端没这个接口）—— 别再拿它去打接口 */
+const pollUnsupported = new WeakSet<object>()
+let pollTimer: any = null
+
+/** 包装前的原始机器人对象（WeakSet 要拿它做键，包一层就是新对象了） */
+const rawBotOf = (bot: any): any => (bot instanceof KkkBot ? (bot as any).bot ?? bot : bot)
+
+const stopPollTimerIfIdle = (): void => {
+  if (!pollTimer) return
+  const alive = [...pending.values()].some(
+    (item) => item.polledUsers && (item.pollRounds ?? 0) < POLL_MAX_ROUNDS
+  )
+  if (alive) return
+  clearInterval(pollTimer)
+  pollTimer = null
+}
+
+const ensurePollTimer = (): void => {
+  if (pollTimer) return
+  if (![...pending.values()].some((item) => !!item.polledUsers)) return
+  pollTimer = setInterval(() => { void debugPollOnce() }, POLL_INTERVAL_MS)
+  // 别让这个定时器把进程吊着（探针跑完要能自己退出）
+  pollTimer?.unref?.()
+}
+
+/** 往面板所在的群补一句提示（失败就当没这回事，不能因为它把面板搞没） */
+const sendHint = async (panel: PendingPanel, text: string): Promise<void> => {
+  try {
+    const session: any = panel.session
+    if (session && typeof session.send === 'function') await session.send(text)
+  } catch (error: any) {
+    logger.debug('[表情面板] 补发提示失败（已忽略）: ' + String(error?.message ?? error))
+  }
+}
+
+/** 这个协议端问不到表情回应 → 记一笔，并说清楚「点击只能靠推送或文字」 */
+const markPollUnsupported = (bot: any, panel: PendingPanel): void => {
+  const raw = rawBotOf(bot)
+  if (raw && typeof raw === 'object') {
+    if (pollUnsupported.has(raw)) return
+    pollUnsupported.add(raw)
+  }
+  logger.mark('[表情面板] 这个协议端查不到表情回应（没有 fetch_emoji_like / get_emoji_likes）—— '
+    + '面板 %s 的点击只能等推送事件，或让用户引用面板消息回序号', panel.key)
+  /**
+   * 最难受的一种情况：**表情贴得上去、但读不回来** ——
+   * 面板下面那一排看起来能点，用户点了却什么都不会发生。
+   * 推送那条路在 adapter-onebot 上还是死的（见文件头），所以这时必须当面说清楚：回序号。
+   *
+   * 只在面板还等着的时候补这一句；一个机器人只补一次（能力不会变）。
+   */
+  if (pending.has(panel.key)) {
+    void sendHint(panel, '（这个协议端读不到表情回应，点表情可能没反应 —— 直接回序号就行）')
+  }
+}
+
+/**
+ * 面板发出、表情贴完之后：先记基线，再把它交给轮询。
+ *
+ * 基线和「贴表情」之间有个几毫秒的窗口，理论上用户在这一瞬间点了就会被记进基线。
+ * 实际不可能：面板刚发出去，用户还没看见。所以按「新出现的人」判定是安全的。
+ */
+const trackPanelForPolling = (bot: any, panel: PendingPanel): void => {
+  if (pollUnsupported.has(rawBotOf(bot))) return
+  panel.bot = bot
+  void (async () => {
+    const users = new Map<string, Set<string>>()
+    for (const choice of panel.choices) {
+      const list = await kkkBotOf(bot).fetchEmojiLikes(panel.messageId, choice.emojiId)
+      if (list === null) {
+        markPollUnsupported(bot, panel)
+        return
+      }
+      users.set(choice.emojiId, new Set(list))
+    }
+    /** 面板可能在这几毫秒里已经被推送事件 / 文字退路用掉了 */
+    if (!pending.has(panel.key)) return
+    panel.polledUsers = users
+    panel.pollRounds = 0
+    ensurePollTimer()
+    /**
+     * 这一行是「点击通道真的通了」的唯一证据，必须打出来：
+     * 协议端日志里有 `group_msg_emoji_like`、插件这边一行都没有的时候，
+     * 看有没有这行就能区分「轮询没起来」和「用户没点」。
+     */
+    logger.mark('[表情面板] 已开始主动查询表情回应（面板 %s，%d 档，每 %d 秒问一次，最多 %d 轮）',
+      panel.key, panel.choices.length, POLL_INTERVAL_MS / 1000, POLL_MAX_ROUNDS)
+  })().catch((error: any) => {
+    logger.debug('[表情面板] 初始化轮询失败（已忽略）: ' + String(error?.message ?? error))
+  })
+}
+
+/**
+ * 选中某一档之后的公共收尾：第一步问第二个问题，第二步才真正落地成解析。
+ *
+ * 四条路（推送事件 / emoji 点击 / 文字退路 / 轮询）都走这里 ——
+ * 各写一份必然飘（这几条路的收尾逻辑本来就一模一样）。
+ */
+const dispatchPicked = async (
+  panel: PendingPanel,
+  picked: Choice,
+  bot: any,
+  fallbackSession?: any
+): Promise<boolean> => {
+  /** 优先用**原来那条链接消息**的会话：信息比「回了个数字」/「定时器」手上的全 */
+  const session = panel.session ?? fallbackSession
+  if (!session) {
+    logger.debug('[表情面板] 面板上没有可用会话，放弃这次选择（%s）', panel.key)
+    return false
+  }
+  if (panel.step === 'quality') {
+    return await sendWatchQuestion(session, panel, String(picked.qualityId ?? ''), String(picked.label ?? picked.qualityId ?? ''), bot)
+  }
+  await clearPanel(bot, panel)
+  await runParse(session, panel, picked.onlineWatch === true)
+  return true
+}
+
+/**
+ * 轮询一轮（导出是为了探针不用等定时器）。
+ *
+ * 每一轮：对每条在等的面板，问它每一档「现在有谁贴了」，有新出现的人就算点了。
+ * @returns 这一轮选中了几条面板
+ */
+export const debugPollOnce = async (): Promise<number> => {
+  if (!isReactionPanelEnabled()) {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+    return 0
+  }
+  let pickedCount = 0
+  for (const panel of [...pending.values()]) {
+    if (!panel.polledUsers) continue
+    if ((panel.pollRounds ?? 0) >= POLL_MAX_ROUNDS) continue
+    panel.pollRounds = (panel.pollRounds ?? 0) + 1
+
+    const asks = await Promise.all(panel.choices.map(async (choice) => {
+      const list = await kkkBotOf(panel.bot).fetchEmojiLikes(panel.messageId, choice.emojiId)
+      return { choice, list }
+    }))
+    let picked: Choice | undefined
+    for (const ask of asks) {
+      if (ask.list === null) {
+        markPollUnsupported(panel.bot, panel)
+        panel.polledUsers = undefined
+        break
+      }
+      const known = panel.polledUsers.get(ask.choice.emojiId) ?? new Set<string>()
+      /** 基线里没有的人 = 面板发出之后才贴的 = 点了它 */
+      const fresh = ask.list.filter((id) => !known.has(id))
+      if (fresh.length) {
+        logger.mark('[表情面板] 轮询发现有人贴了 %s（%s）→ 第 %d 档',
+          ask.choice.emojiId, fresh.join(','), panel.choices.indexOf(ask.choice) + 1)
+        picked = ask.choice
+        break
+      }
+    }
+    if (!picked) continue
+
+    pickedCount++
+    pending.delete(panel.key)
+    await dispatchPicked(panel, picked, panel.bot)
+  }
+  stopPollTimerIfIdle()
+  return pickedCount
 }
 
 /** 这个开关「OneBot 用表情选清晰度」是不是开着 */
@@ -280,6 +562,8 @@ export async function sendQualityReactionPanel (e: Message, request: PanelReques
         ? '下面这排表情从左到右数，第几个就是上面第几档'
         : '从左到右数第几个表情，就是上面第几档'
     ) + '）')
+    /** 文字退路：协议端不发表情事件时只有这条能用，必须写在面板上 */
+    body.push('（点不动表情就引用本条消息，回复序号 1 / 2 / 3；发链接的人直接回数字也行）')
 
     const list: any[] = []
     if (card?.url) list.push(segment.image(card.url))
@@ -311,28 +595,53 @@ export async function sendQualityReactionPanel (e: Message, request: PanelReques
   await recallQuietly(e.bot, channelId, loadingId)
 
   sweep()
-  pending.set(keyOf(channelId, messageId), {
+  const panel: PendingPanel = {
     key: keyOf(channelId, messageId),
     channelId,
     messageId,
+    requester: String(e.userId ?? (e as any).sender?.userId ?? ''),
     step: 'quality',
     choices,
     token,
     baseline: new Map(choices.map((choice) => [choice.emojiId, 1])),
     request,
     session: (e as any).session,
+    bot: e.bot,
     recallIds: [],
     createdAt: Date.now()
-  })
+  }
+  pending.set(panel.key, panel)
 
   /**
    * 贴表情放在登记之后：万一这两个通知发得比登记早，处理函数已经能查到面板了。
    * 有一个贴失败不影响其它 —— 少一个按钮用户还能少选一档，不至于整个面板失效。
+   *
+   * **贴成功的个数要打出来**：这是判断「协议端到底支不支持表情」的唯一直接证据。
+   * 一个都贴不上去（`set_msg_emoji_like` 这个方法不存在）时，点击事件也一定不会来 ——
+   * 那种情况下只有文字退路能用，日志里必须说清楚，否则又是一轮「点了没反应」的猜谜。
    */
+  let stuck = 0
   for (const choice of choices) {
-    await setReaction(e.bot, messageId, choice.emojiId, true)
+    if (await setReaction(e.bot, messageId, choice.emojiId, true)) stuck++
   }
-  logger.mark('[表情面板] 已发出清晰度面板（%d 档%s），等待用户点表情…', choices.length, card ? '，带卡片图' : '')
+  logger.mark('[表情面板] 已发出清晰度面板（%d 档%s），贴表情成功 %d/%d，等待用户点表情… 面板 key = %s',
+    choices.length, card ? '，带卡片图' : '', stuck, choices.length, panel.key)
+  if (!stuck) {
+    logger.warn('[表情面板] 一个表情都没贴上去：这个协议端不支持 set_msg_emoji_like '
+      + '（NapCat 要 v4.12.1+）。用户没有表情可点，只能引用面板消息回序号 —— 或升级协议端')
+    return true
+  }
+  /**
+   * 表情贴上了 → 开始主动查询。
+   *
+   * **不 await**：这一步要挨个调接口问「谁贴了」，会拖慢面板回复。
+   * 一个表情都没贴上去（上面那个分支）就完全不问 —— 用户没有表情可点，问了也白问。
+   *
+   * ⚠️ 注意顺序：这里是**轮询而不是等推送**，因为推送那条路在
+   * `koishi-plugin-adapter-onebot` 上是被适配器直接丢掉的（见上面文件头）。
+   * 表情贴得上去 ≠ 点击事件能收到，两件事要分开看。
+   */
+  trackPanelForPolling(e.bot, panel)
   return true
 }
 
@@ -392,14 +701,7 @@ export async function handleReactionUpdate (session: any): Promise<boolean> {
   pending.delete(key)
   const bot = session.bot
 
-  if (panel.step === 'quality') {
-    return await sendWatchQuestion(session, panel, String(picked.qualityId ?? ''), String(picked.label ?? picked.qualityId ?? ''), bot)
-  }
-
-  // 第二步：拿到「是否在线播放」的答案，落地成一次真正的解析
-  await clearPanel(bot, panel)
-  await runParse(panel.session ?? session, panel, picked.onlineWatch === true)
-  return true
+  return await dispatchPicked(panel, picked, bot, session)
 }
 
 /**
@@ -432,20 +734,59 @@ export async function handleEmojiLike (session: any): Promise<boolean> {
   const messageId = String(data.message_id ?? session.messageId ?? '')
   if (!channelId || !messageId) return false
 
+  /** likes 提前拆出来：下面两处（兜底判定 + 选中判定）都要用 */
+  const likes: Array<{ emoji_id: string; count: number }> = Array.isArray(data.likes) ? data.likes : []
+
   const key = keyOf(channelId, messageId)
-  const panel = pending.get(key)
+  let panel: PendingPanel | undefined = pending.get(key)
+
   if (!panel) {
-    // 别人随便贴的表情、或这条面板早就被点过了 —— 常态，只记 debug
-    logger.debug('[表情面板] 收到表情回应（%s:%s），但没有在等的面板', channelId, messageId)
+    /**
+     * ## 兜底：message_id 的「形态」可能不一样
+     * 面板记下的 id 是 `e.reply()` 返回给我们的字符串，而协议端上报的是
+     * **OneBot11 的 int32** —— 用户日志里出现过 `-1319195023` 这种负数，
+     * 大 id 被截成 32 位有符号整数之后长得跟原始值完全不同，直接 `===` 就对不上。
+     *
+     * 所以这里把收到的 id 展开成几种可能的写法再逐个试（有符号 / 无符号 / 去负号）。
+     * **不做「同群里唯一命中就算」那种宽松匹配**：301 / 320 / 333 这些是 QQ 常用小黄脸，
+     * 别人在别的消息上随手贴一个就会被误认成选择。
+     */
+    for (const variant of idVariants(messageId)) {
+      if (variant === messageId) continue
+      panel = pending.get(keyOf(channelId, variant))
+      if (panel) {
+        logger.mark('[表情面板] 表情事件的 message_id（%s）和面板记下的 id 形态不同，'
+          + '按 %s 认下这条（面板 %s）', messageId, variant, panel.key)
+        break
+      }
+    }
+  }
+
+  if (!panel) {
+    /**
+     * 消息 ID 对不上时要把「在等的是哪几条」也打出来 —— 这是最可能出问题的地方
+     * （比如面板消息 ID 和回应里的 message_id 不是一个东西）。
+     */
+    const sameChannel = [...pending.values()].some((item) => item.channelId === channelId)
+    if (sameChannel) {
+      logger.mark('[表情面板] 收到表情回应，但消息对不上：收到 %s；在等的是 %s', key, describePending())
+    } else {
+      // 别人随便贴的表情、或这条面板早就被点过了 —— 常态，只记 debug
+      logger.debug('[表情面板] 收到表情回应（%s），但没有在等的面板', key)
+    }
     return false
   }
+
+  logger.mark(
+    '[表情面板] 收到表情回应（消息 %s）user=%s is_add=%s likes=%s',
+    messageId, who || '-', String(data.is_add), brief(data.likes)
+  )
 
   /**
    * 给这条消息贴上**选项里的**表情 = 选中。
    * likes 有的实现给「这次点了什么」（单项）、有的给整份快照；
    * 快照那种可能好几个都在，取「比基准多」的那个，取不到（比如上报人就是自己贴的第一下）取第一个匹配的。
    */
-  const likes: Array<{ emoji_id: string; count: number }> = Array.isArray(data.likes) ? data.likes : []
   let picked: Choice | undefined
   for (const like of likes) {
     const emojiId = String(like?.emoji_id ?? '')
@@ -461,7 +802,7 @@ export async function handleEmojiLike (session: any): Promise<boolean> {
    * 到这一步就已经选中了 —— 立刻把面板从表里摘掉：
    * 同一个人可能连点两下、QQ 也会因为「取消再贴」再发一遍事件，留着只会重复解析。
    */
-  pending.delete(key)
+  pending.delete(panel.key)
   const bot = session.bot
   logger.mark(
     '[表情面板] 用户点中表情 %s → %s',
@@ -471,14 +812,173 @@ export async function handleEmojiLike (session: any): Promise<boolean> {
       : picked.onlineWatch ? '在线播放' : '直接发视频'
   )
 
-  if (panel.step === 'quality') {
-    return await sendWatchQuestion(session, panel, String(picked.qualityId ?? ''), String(picked.label ?? picked.qualityId ?? ''), bot)
-  }
+  return await dispatchPicked(panel, picked, bot, session)
+}
 
-  // 第二步：拿到「是否在线播放」的答案，落地成一次真正的解析
-  await clearPanel(bot, panel)
-  await runParse(panel.session ?? session, panel, picked.onlineWatch === true)
-  return true
+/**
+ * 排查用：把**每一条**入站事件打出来。`index.ts` 把它挂在 `internal/session` 上。
+ *
+ * ## 为什么挂 `internal/session`
+ * `@satorijs/core` 的 `Bot.dispatch()` 在按 `session.type` 派发**之前**，会先无条件
+ * `emit('internal/session', session)`（`src/bot.ts:181`）。哪怕适配器把某个载荷
+ * 归成了我们没监听的类型（甚至 `type` 被改写成别的），这里照样看得见。
+ *
+ * ## ⚠️ 但它**证明不了**「协议端没发」
+ * `internal/session` 是在 `Bot.dispatch()` **里面**发的，而 `dispatch()` 只在
+ * `dispatchSession()` 拿到 session 之后才会调。
+ * `koishi-plugin-adapter-onebot@6.9.4` 的 `adaptSession()` 对**不认识的 notice_type**
+ * 走 `default: return`（`lib/index.js:537-539`），于是
+ * `dispatchSession()` 里 `if (!session) return`（`:409-412`）—— **`dispatch()` 根本没被调用**。
+ *
+ * 所以：**这里一行日志都没有 ≠ 协议端没发**。`group_msg_emoji_like` 恰恰就是被这样丢掉的
+ * （适配器日志里能看到「WebSocket 事件上报 notice.group_msg_emoji_like」，插件侧却一片空白）。
+ * 真正能作数的是 **协议端自己**的日志，以及本文件里那条
+ * 「已开始主动查询表情回应」—— 轮询走的是主动调接口，不受事件派发影响。
+ *
+ * 顺带一提：机器人自己贴那排表情时协议端**也会上报**，所以面板刚发出就该有日志，
+ * 不用等人点就能判断这个协议端发不发表情事件 —— 前提是这一族事件没被适配器丢掉。
+ *
+ * ## 什么时候打
+ * 有面板在等回应时打全部；没有面板但载荷长得像表情事件（`*emoji_like*` / `*reaction*`）
+ * 也打 —— 那种情况说明我们对不上号，日志必须留证。普通消息跳过（群里刷屏会把日志冲没）。
+ */
+export const noteInboundSession = (session: any): void => {
+  const type = String(session?.type ?? '')
+  const data = session?.onebot ?? session?.event?._data ?? {}
+  const shape = String(data?.notice_type ?? '') + ' ' + String(data?.sub_type ?? '')
+  const looksLikeReaction = /emoji_like|reaction/i.test(shape)
+  if (!pending.size && !looksLikeReaction) return
+  // 普通消息在群里太频繁；面板等的是一次「点击」，不会是消息
+  if (type === 'message' || type === 'message-created') return
+  logger.mark(
+    '[表情面板] 面板等待期间收到入站事件：type=%s subtype=%s notice_type=%s channel=%s message=%s user=%s 载荷=%s',
+    type || '-', String(session?.subtype ?? '-'), String(data?.notice_type ?? '-'),
+    String(session?.channelId ?? session?.guildId ?? '-'), String(session?.messageId ?? '-'),
+    String(session?.userId ?? '-'), brief(data)
+  )
+}
+
+/**
+ * 表情回应的总入口：把各家实现的形状路由到对应的处理函数。
+ *
+ * ## 为什么需要它
+ * Koishi 的 `Bot.dispatch()` **只派发 `session.type` 一个事件名**
+ * （`emit(session, session.type, session)`；`type/subtype` 那条根本不发）。
+ * 所以 `index.ts` 只能按类型挂 `notice` + `onebot` 两个监听，
+ * 「到底是不是表情事件、是哪一种」只能在这里看载荷。
+ *
+ *   - `notice_type === 'group_msg_emoji_like'` → NapCat 的逐次点击上报；
+ *   - `subtype === 'message-reactions-updated'` / 载荷里有 `current_reactions`
+ *     → OneBot 标准的快照形式。
+ *
+ * 长得像表情事件、但两种形状都不是的，**原样打出来** ——
+ * 各家实现的名字差很多（`reaction` / `reaction_add` / `group_msg_emoji_like`…），
+ * 没有这条日志就只能猜对面发的是什么。
+ *
+ * 至于「面板等着的时候都收到了什么」，统一交给 {@link noteInboundSession}
+ * （挂在 `internal/session` 上，任何类型的载荷都跑不掉），这里不重复打。
+ */
+export async function handleReactionEvent (session: any): Promise<boolean> {
+  if (!session) return false
+  const data: any = session.onebot ?? {}
+  const noticeType = String(data.notice_type ?? '')
+
+  if (noticeType === 'group_msg_emoji_like') return await handleEmojiLike(session)
+  if (String(session.subtype ?? '') === 'message-reactions-updated') {
+    /** 名字对上了但载荷不是那一套 —— 打出来才知道它长什么样 */
+    if (!Array.isArray(data.current_reactions)) {
+      logger.mark('[表情面板] 收到 message-reactions-updated，但载荷里没有 current_reactions：%s', brief(data))
+      return false
+    }
+    return await handleReactionUpdate(session)
+  }
+  if (Array.isArray(data.current_reactions)) return await handleReactionUpdate(session)
+  if (/emoji_like|reaction/i.test(noticeType) || /emoji_like|reaction/i.test(String(data.sub_type ?? ''))) {
+    logger.mark('[表情面板] 收到未识别的表情事件（notice_type=%s sub_type=%s），原始载荷：%s',
+      noticeType || '-', String(data.sub_type ?? '-'), brief(data))
+    return false
+  }
+  /**
+   * 最后一种可能：装的不是 `koishi-plugin-adapter-onebot`，而是
+   * `koishi-plugin-adapter-napcat` —— 那个适配器会把 `group_msg_emoji_like`
+   * **转成标准的 `reaction-added` / `reaction-removed` 事件**。
+   *
+   * 这种标准形状我们还没见过（表情 id 可能带 `face|` / `emoji|` 前缀，
+   * 会话上的字段也未必是 `session.onebot`），**先原样打出来**：
+   * 拿到一行真实载荷就能照着补精确映射，比瞎猜强。
+   */
+  if (/reaction/i.test(String(session.type ?? ''))) {
+    logger.mark('[表情面板] 收到 reaction 类事件（type=%s），原始载荷：%s',
+      String(session.type ?? '-'), brief(session.event ?? data))
+  }
+  return false
+}
+
+/** 「没引用、直接回数字」这条路的时间窗：超过它就不认了（见 trySelectByText） */
+export const PLAIN_REPLY_WINDOW_MS = 3 * 60 * 1000
+
+/**
+ * 表情面板的**文字退路**：回一个序号（1 / 2 / 3…）也能选。
+ *
+ * ## 为什么必须有它
+ * 表情回应事件完全看协议端脸色 —— NapCat 要够新、要开着对应事件，别的实现形状还不一样。
+ * 协议端不发，我们就永远收不到点击；而**面板一旦发出，这条链接就不会再走正常解析**，
+ * 用户会卡在那里什么都拿不到。留一条走普通消息通道的退路，最差也能用。
+ *
+ * ## 两种认法，门槛不一样
+ *   1. **引用了面板那条消息**（`session.quote` 指到 `messageId`）—— 任何人都能这么选，
+ *      引用本身就是「我在回应它」的明确表达；
+ *   2. **没引用，但发数字的人是发链接的那个人** —— 只在面板发出后的
+ *      {@link PLAIN_REPLY_WINDOW_MS} 内认。
+ *
+ * 第 2 条是给「协议端根本不发表情事件」准备的：那种情况下要让用户去学「引用」这个动作
+ * 纯属折磨人。`1`、`2` 这种数字在群里太常见，所以加了双重门槛（同一个人 + 短时间窗），
+ * 不去引用就只能在这两条同时成立时才算数。
+ *
+ * @returns true = 这条消息被当成了一次选择（调用方不要再往后传）
+ */
+export async function trySelectByText (session: any): Promise<boolean> {
+  if (!session) return false
+  if (!isReactionPanelEnabled()) return false
+
+  const text = String(session.content ?? '').trim()
+  if (!/^\d{1,2}$/.test(text)) return false
+  const index = Number(text)
+  if (!Number.isInteger(index) || index < 1) return false
+
+  const channelId = String(session.channelId ?? session.guildId ?? '')
+  if (!channelId) return false
+
+  /** 引用着我们的面板消息（Koishi 把 reply 段解到 session.quote 上）→ 谁都能这么选 */
+  const quoteId = String(session.quote?.id ?? session.event?.message?.quote?.id ?? '')
+  let key = quoteId ? keyOf(channelId, quoteId) : ''
+  let panel = key ? pending.get(key) : undefined
+
+  /** 没引用：只认「发链接的人自己回的数字」，而且只认刚发出去那一小会儿 */
+  if (!panel && !quoteId) {
+    const me = String(session.userId ?? '')
+    if (me) {
+      const mine = [...pending.values()]
+        .filter((item) => item.channelId === channelId && item.requester === me
+          && Date.now() - item.createdAt <= PLAIN_REPLY_WINDOW_MS)
+        .sort((a, b) => b.createdAt - a.createdAt)
+      panel = mine[0]
+      if (panel) key = panel.key
+    }
+  }
+  if (!panel) return false
+  const picked = panel.choices[index - 1]
+  if (!picked) return false
+
+  pending.delete(key)
+  const bot = session.bot
+  logger.mark('[表情面板] 用户用**文字**选了第 %d 项%s → %s', index,
+    quoteId ? '（引用）' : '（直接回数字）',
+    panel.step === 'quality'
+      ? String(picked.label ?? picked.qualityId ?? '')
+      : picked.onlineWatch ? '在线播放' : '直接发视频')
+
+  return await dispatchPicked(panel, picked, bot, session)
 }
 
 /**
@@ -528,7 +1028,8 @@ const sendWatchQuestion = async (
         withFace
           ? '下面这排表情从左到右数，第几个就是上面第几步'
           : '从左到右数第几个表情，就是上面第几步'
-      ) + '）'
+      ) + '）',
+      '（点不动表情就引用本条消息，回复序号 1 / 2）'
     ]
     const list: any[] = [segment.text(body.join('\n'))]
     if (withFace) for (const row of rows) list.push(segment.face(row.emojiId))
@@ -563,26 +1064,34 @@ const sendWatchQuestion = async (
 
   sweep()
   const channelId = String(session.channelId ?? session.guildId ?? previous.channelId)
-  pending.set(keyOf(channelId, messageId), {
+  const panel: PendingPanel = {
     key: keyOf(channelId, messageId),
     channelId,
     messageId,
+    // 第二步还是同一个人在做选择（文字退路按这个判定）
+    requester: previous.requester,
     step: 'watch',
     choices: YES_NO_CHOICES,
     token: previous.token,
     baseline: new Map(YES_NO_CHOICES.map((choice) => [choice.emojiId, 1])),
     request: previous.request,
     session: previous.session ?? session,
+    bot: session.bot ?? previous.bot,
     qualityId,
     qualityLabel: qualityIdLabel,
     // 上一条「选画质」的消息连着一起撤：群里不留中间过程
     recallIds: [...previous.recallIds, previous.messageId],
     createdAt: Date.now()
-  })
-
-  for (const choice of YES_NO_CHOICES) {
-    await setReaction(session.bot, messageId, choice.emojiId, true)
   }
+  pending.set(panel.key, panel)
+
+  let stuck = 0
+  for (const choice of YES_NO_CHOICES) {
+    if (await setReaction(session.bot, messageId, choice.emojiId, true)) stuck++
+  }
+  logger.mark('[表情面板] 已发出「是否在线播放」面板（%s），贴表情成功 %d/%d，面板 key = %s',
+    qualityIdLabel, stuck, YES_NO_CHOICES.length, panel.key)
+  if (stuck) trackPanelForPolling(panel.bot, panel)
 
   /**
    * 清掉上一条「选画质」那排表情。
@@ -629,6 +1138,9 @@ const runParse = async (
 /** 探针用：看现在有几个面板在等着被点 */
 export const debugPendingCount = (): number => pending.size
 /** 探针用：强制清空（避免用例之间互相干扰） */
-export const debugClear = (): void => { pending.clear() }
+export const debugClear = (): void => {
+  pending.clear()
+  stopPollTimerIfIdle()
+}
 
 export default sendQualityReactionPanel

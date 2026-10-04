@@ -5,6 +5,7 @@ import type { Message } from 'node-karin'
 import { logger } from 'node-karin'
 
 import { Config } from './Config'
+import { isOneBotLike, platformOf } from './ImageSlice'
 
 /**
  * 各平台表情 ID 配置
@@ -84,7 +85,26 @@ export type EmojiType = 'EYES' | 'PROCESSING' | 'SUCCESS' | 'ERROR'
  * @returns 表情 ID
  */
 export function getEmojiId(e: Message, type: EmojiType): string | number {
-  const platform = e.bot?.adapter?.platform || 'other'
+  /**
+   * ## ⚠️ 平台名不能读 `e.bot.adapter.platform`
+   * `e.bot` 是 **KkkBot 包装**，它的 `.adapter` 是**适配器信息**（name / version，
+   * 见 `compat/adapter-info`）—— **上面没有 platform 字段**，于是 `|| 'other'` 永远生效：
+   * 连官方 QQ 都会落到占位符那一档。
+   *
+   * OneBot（NapCat）上的实锤：日志里那条
+   * `set_msg_emoji_like { emoji_id: 'OTHER_PROCESSING_PLACEHOLDER', set: false }` 就是这么来的 ——
+   * 拿一串占位符当表情 id 发给协议端，协议端根本不认，等于一直在打无效请求。
+   *
+   * 统一改用 `platformOf`（项目里的标准取法，能穿透 KkkBot 包装拿到真实平台名）。
+   */
+  const platform = platformOf(e)
+  /**
+   * ## OneBot 系要用 **QQ 那一套**
+   * OneBot（NapCat / Lagrange…）跑的就是 QQ，`set_msg_emoji_like` 认的也是
+   * **QQ 系统表情 id** —— 和清晰度面板那排（301 / 320 / 333…、478 / 479）同一套。
+   * 只有真不认 QQ 表情的平台（微信 / Telegram / KOOK…）才给占位符。
+   */
+  if (isOneBotLike(platform)) return PLATFORM_EMOJI_IDS.qq[type]
   // node-karin 的 AdapterPlatform 联合里有本表未覆盖的取值（如 dingtalk），
   // 索引前先按「表里有没有这个键」收窄，缺的一律落到 other
   const platformEmojis = platform in PLATFORM_EMOJI_IDS ? PLATFORM_EMOJI_IDS[platform as keyof typeof PLATFORM_EMOJI_IDS] : PLATFORM_EMOJI_IDS.other
