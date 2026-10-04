@@ -687,8 +687,13 @@ export class DouyinDBBase {
   }
 
   /**
-   * 清理旧的作品缓存记录
-   * @param days 保留最近几天的记录
+   * 清理过期的作品缓存记录
+   *
+   * 判据用 `updatedAt`（最后一次仍出现在列表中的时间）而非 `createdAt`：喜欢/推荐列表会长期返回
+   * 同一批作品，只要作品还在列表里，每轮推送都会通过 {@link touchAwemeCache} 续期，其去重记录就不会
+   * 被清理，从而避免过往作品被反复重推；一旦作品掉出列表、不再续期，超过保留期后即回收，保证缓存表
+   * 规模有界。作品列表(post)/直播(live)从不续期，行为与旧逻辑一致（且 post 另有 24h 闸门兜底）。
+   * @param days 保留最近几天内仍出现过的记录
    * @returns 删除的记录数量
    */
   async cleanOldAwemeCache(days: number = 7): Promise<number> {
@@ -696,9 +701,32 @@ export class DouyinDBBase {
     cutoffDate.setDate(cutoffDate.getDate() - days)
 
     const result = await this.db.remove(TABLE.douyinAwemeCache, {
-      createdAt: { $lt: cutoffDate.toISOString() }
+      updatedAt: { $lt: cutoffDate.toISOString() }
     })
     return result.removed ?? 0
+  }
+
+  /**
+   * 为「仍在列表中」的作品续期去重记录（滑动 TTL）
+   *
+   * 喜欢/推荐列表每轮都用当前返回的全部 aweme_id 调用此方法，把这些记录的 `updatedAt` 刷新到当前
+   * 时间。配合 {@link cleanOldAwemeCache} 按 `updatedAt` 清理：仍在列表里的作品永不过期（不会重推），
+   * 掉出列表的作品因不再续期而在保留期后被回收（缓存表规模有界）。
+   * @param sec_uid 抖音用户sec_uid
+   * @param pushType 推送类型
+   * @param aweme_ids 当前列表中的全部作品ID
+   */
+  async touchAwemeCache(sec_uid: string, pushType: string, aweme_ids: string[]): Promise<void> {
+    const ids = [...new Set(aweme_ids)]
+    if (ids.length === 0) return
+
+    await this.db.set(TABLE.douyinAwemeCache, {
+      sec_uid,
+      pushType,
+      aweme_id: { $in: ids }
+    }, {
+      updatedAt: now()
+    })
   }
 
   /** 为了向后兼容，保留groupRepository和awemeCacheRepository属性 */

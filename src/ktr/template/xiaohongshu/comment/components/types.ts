@@ -12,6 +12,8 @@ export interface XiaohongshuCommentData {
   ImageLength?: number
   /** 分享链接 */
   share_url: string
+  /** 笔记作者头像（用于二维码中心） */
+  AuthorAvatar?: string
   /** 评论数据 - 简化为直接的评论数组 */
   CommentsData: XiaohongshuCommentItem[]
   /**
@@ -99,7 +101,16 @@ interface XiaohongshuSubComment {
   /** 是否已点赞 */
   liked: boolean
   /** 评论图片 */
-  pictures: string[]
+  pictures: Array<{
+    height: number
+    width: number
+    url_pre: string
+    url_default: string
+    info_list: Array<{
+      image_scene: string
+      url: string
+    }>
+  }>
   /** 显示标签 */
   show_tags: string[]
   /** @用户列表 */

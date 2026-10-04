@@ -82,7 +82,7 @@ export const DefaultLayout: React.FC<DefaultLayoutProps> = ({ children, ctx, cla
                 <div className="flex items-center mb-1 space-x-2 text-sm font-bold uppercase text-foreground/80">
                   <span>{version.plugin}</span>
                 </div>
-                <span className="text-5xl font-black">{version.pluginName}</span>
+                <span className="text-5xl font-bold">{version.pluginName}</span>
               </div>
             </div>
 
@@ -116,7 +116,7 @@ export const DefaultLayout: React.FC<DefaultLayoutProps> = ({ children, ctx, cla
               </span>
             </div>
 
-            <div className="w-1 h-14 opacity-90 bg-foreground" />
+            <div className="w-1 h-14 opacity-90 bg-foreground/70" />
 
             {/* 框架信息 */}
             <div className="flex items-end space-x-8">
@@ -134,7 +134,7 @@ export const DefaultLayout: React.FC<DefaultLayoutProps> = ({ children, ctx, cla
                   <span className="opacity-90">Power By</span>
                 </div>
                 <div className="flex items-end space-x-2">
-                  <span className="text-5xl font-black leading-none opacity-90">{version.poweredBy}</span>
+                  <span className="text-5xl font-bold leading-none opacity-90">{version.poweredBy}</span>
                   <span className="pb-1 text-2xl font-bold leading-none opacity-90">v{version.frameworkVersion}</span>
                 </div>
               </div>
@@ -151,7 +151,7 @@ export const DefaultLayout: React.FC<DefaultLayoutProps> = ({ children, ctx, cla
               />
               <div className="flex flex-col items-start">
                 <span className="text-sm font-bold tracking-widest uppercase opacity-80">By</span>
-                <span className="text-3xl font-black leading-none opacity-90">maimai</span>
+                <span className="text-3xl font-bold leading-none opacity-90">maimai</span>
               </div>
             </div>
 

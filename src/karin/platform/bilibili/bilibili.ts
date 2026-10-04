@@ -642,7 +642,8 @@ export class Bilibili extends Base {
                 Resolution:
                   useAnonymousQuality
                     ? null
-                    : `${playUrlData.data.data.dash.video[0].width} x ${playUrlData.data.data.dash.video[0].height}`
+                    : `${playUrlData.data.data.dash.video[0].width} x ${playUrlData.data.data.dash.video[0].height}`,
+                AuthorAvatar: infoData.data.data.owner?.face
               })
               // 评论卡可能极长（实测 2880x40000），交给切片+md 拼接发送，避免 QQ 拒收
               /** 评论区那张长图也记下来，「提取评论区图片」按钮点的是它 */
@@ -1513,7 +1514,8 @@ export class Bilibili extends Base {
                     : `https://t.bilibili.com/${dynamicInfo.data.data.item.id_str}`,
                 ImageLength: dynamicInfo.data.data.item.modules?.module_dynamic?.major?.draw?.items?.length ?? 0,
                 shareurl: '动态分享链接',
-                Resolution: null
+                Resolution: null,
+                AuthorAvatar: dynamicInfo.data.data.item.modules?.module_author?.face
               })
               /** 动态评论区下面只带「提取评论区图片」，封面那个归动态卡片 */
               rememberCardImages(dynamicCardKey, { comment: imageSourcesOf(img) })

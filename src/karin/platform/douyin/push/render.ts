@@ -51,7 +51,7 @@ function buildCooperationInfo(Detail_Data: DouyinWorkDetailData):
   if (!raw) return undefined
 
   const rawCreators = Array.isArray(raw.co_creators) ? raw.co_creators : []
-  const subscriber: DouyinUserLike = Detail_Data.user_info?.data?.user ?? Detail_Data.author
+  const subscriber: DouyinUserLike = Detail_Data.user_info?.user ?? Detail_Data.author
 
   const subscriberUid = subscriber?.uid
   const subscriberSecUid = subscriber?.sec_uid
@@ -371,7 +371,7 @@ function appendTextSegments(text: string, target: RichTextNode[]) {
  * @returns IP 属地文本（如 "重庆"），不存在时返回 undefined
  */
 function extractIpLocation(Detail_Data: DouyinWorkDetailData): string | undefined {
-  let raw: string | undefined = Detail_Data.user_info?.data?.user?.ip_location
+  let raw: string | undefined = Detail_Data.user_info?.user?.ip_location
   if (!raw) raw = Detail_Data.ip_location
   if (!raw || typeof raw !== 'string') return undefined
   const label = raw.replace(/^IP属地[：:]?\s*/, '').trim()
@@ -524,7 +524,7 @@ export async function renderWorkImage(options: RenderWorkImageOptions): Promise<
   const dynamicTypeLabel = options.dynamicTypeLabel ?? getDefaultPushLabel(workTypeInfo)
   const coverUrl = getWorkCoverUrl(workTypeInfo, Detail_Data)
   const formatTime = format(fromUnixTime(create_time), 'yyyy-MM-dd HH:mm')
-  const user = Detail_Data.user_info?.data?.user ?? Detail_Data.author
+  const user = Detail_Data.user_info?.user ?? Detail_Data.author
   if (!user) return []
   const userDouyinId = douyinId(user)
   const avatarUrl = getUserAvatar(user) || getUserAvatar(Detail_Data.author)

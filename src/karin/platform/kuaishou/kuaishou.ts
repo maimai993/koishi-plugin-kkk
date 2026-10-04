@@ -216,7 +216,8 @@ export class Kuaishou extends Base {
       CommentLength: CommentsData?.length ?? 0,
       share_url: cardShareUrl,
       VideoSize: fileSizeInMB,
-      likeCount: work.photo.likeCount
+      likeCount: work.photo.likeCount,
+      AuthorAvatar: work.photo.headUrl
     })
     /**
      * 记下评论区那张长图（兜底用）与评论里用户贴的图（`commentPics`，按钮真正要发的）。

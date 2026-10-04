@@ -4,7 +4,7 @@ import { sendParseTip } from '@/module/utils/parseTip'
 import { cardImageKeyOf, imageSourcesOf, rememberCardImages, rememberLastCardKey } from '@/module/utils/CardImageCache'
 import { sendSlicedImage } from '@/module/utils/ImageSlice'
 
-import type { NoteComments, XiaohongshuEmojiListResponse } from '@ikenxuan/amagi'
+import type { XiaohongshuNoteCommentsResponse, XiaohongshuEmojiListResponse } from '@ikenxuan/amagi'
 import type { RichTextEmojiDefinition } from '@kkk/richtext'
 import { format } from 'date-fns'
 import { common, type Elements, type Message, segment } from 'node-karin'
@@ -84,12 +84,12 @@ export class Xiaohongshu extends Base {
    * 携带、跨页条目由端点的 `normalize` 回填到最后一页原位 —— 所以这里不再手写
    * cursor 循环（v6 时代那 30 行）。
    *
-   * 这条端点在 amagi 那边还没有生成响应类型（声明回退 `any`），形状仍按手写快照树的
-   * `NoteComments` 断言；等它补上样本、生成类型之后换成生成的那份。
+   * 用 amagi 生成的 `XiaohongshuNoteCommentsResponse`（早期这里回退到手写的
+   * `NoteComments` 快照，端点补上样本后已换成生成的那份）。
    * @param data - 笔记 id 与 xsec_token
    * @returns 响应体（fetcher 失败即抛），`data.comments` 已是合并后的全部评论
    */
-  private async fetchConfiguredNoteComments(data: XiaohongshuIdData): Promise<NoteComments> {
+  private async fetchConfiguredNoteComments(data: XiaohongshuIdData): Promise<XiaohongshuNoteCommentsResponse> {
     return (
       await this.amagi.xiaohongshu.fetcher.fetchNoteComments({
         note_id: data.note_id,
@@ -408,7 +408,8 @@ export class Xiaohongshu extends Base {
               ImageLength: noteCard.image_list?.length || 0,
               // 提示直接写进卡片（模板的 ErrorText），不再单独发文字、也不带 emoji
               ErrorText: '评论数据获取失败，稍后再试试',
-              share_url: shareUrl
+              share_url: shareUrl,
+              AuthorAvatar: noteCard.user?.avatar
             })
             await this.e.reply(emptyCommentCard)
             logger.mark('[小红书] 已发出空的评论卡片（占位）')
@@ -428,7 +429,8 @@ export class Xiaohongshu extends Base {
           CommentsData: processedComments,
           CommentLength: processedComments.length,
           ImageLength: noteCard.image_list?.length || 0,
-          share_url: shareUrl
+          share_url: shareUrl,
+          AuthorAvatar: noteCard.user?.avatar
         })
         /**
          * 记两样东西：
