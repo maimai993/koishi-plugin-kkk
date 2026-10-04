@@ -19,6 +19,7 @@ import { Message, NEXT } from './compat/node-karin'
 import { bindRuntime, commandPrefixes, commandQueue, eventQueue, taskQueue, tryGetRuntime } from './compat/runtime'
 import { buildQqSchema, QQ_KEYS, readQqOptions } from './qqOptions'
 import { isOnlinePlayerEnabled, setupOnlinePlayer } from './player'
+import { setupVerifyPage } from './verify'
 import { registerWebUi } from './webui'
 import { applyUpstreamOverrides } from './configBridge'
 import { resolveQqCardContent } from './karin/module/utils/QqCardResolve'
@@ -1211,6 +1212,8 @@ export async function apply (ctx: Context, rawConfig: Config) {
       // 老配置里没有这个键时也必须是开的，所以判据写成 !== false。
       playerEnabled: (config as any).playerEnabled !== false,
       playerBaseUrl: String((config as any).playerBaseUrl ?? ''),
+      // 人机验证页的公网地址（留空 → 退化成本机 IP + Koishi 端口，并打一次警告）
+      verifyBaseUrl: String((config as any).verifyBaseUrl ?? ''),
       playerPort: (() => {
         const raw = (config as any).playerPort
         const num = Number(raw)
@@ -1319,11 +1322,23 @@ export async function apply (ctx: Context, rawConfig: Config) {
    * 开关关着时这里什么都不做，行为和以前完全一致。
    */
   const disposeOnlinePlayer = setupOnlinePlayer(ctx)
+  /**
+   * 人机验证页（`/kkk/geetest`）：平台风控时把验证页发给用户自己过。
+   *
+   * 同样必须在 bindRuntime 之后（链接要读运行时配置里的公网地址）。
+   * 没有总开关 —— 挂一条路由是零成本的，等真遇到风控再发现挂不出去就晚了。
+   */
+  const disposeVerifyPage = setupVerifyPage(ctx)
   ctx.on('dispose', () => {
     try {
       disposeOnlinePlayer()
     } catch (error: any) {
       logger.debug('[kkk] 卸载在线播放器失败: ' + String(error?.message ?? error))
+    }
+    try {
+      disposeVerifyPage()
+    } catch (error: any) {
+      logger.debug('[kkk] 卸载人机验证页失败: ' + String(error?.message ?? error))
     }
   })
 

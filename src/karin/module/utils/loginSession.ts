@@ -14,6 +14,8 @@
 import axios from 'node-karin/axios'
 import { logger } from 'node-karin'
 
+import { logRiskSample } from '../../../verify'
+
 /** 登录凭证 */
 export interface LoginCredential {
   /** 完整登录 cookie（name=value; ...） */
@@ -248,9 +250,19 @@ export function createDouyinLoginSession (fetcher: any): LoginNamespace {
                   await options.onScanned?.()
                 }
                 break
+              /**
+               * 短信二次验证：amagi 给的是 `SmsChallenge`（只有手机号和发码函数），
+               * 没有验证页地址。整份 payload 打进日志，等真实样本再决定怎么接。
+               */
               case 'verify':
+                logRiskSample('抖音扫码登录', { kind: 'verify', reason: '短信二次验证', raw: payload })
                 return { ok: false, error: new LoginSessionError('unsupported', 'NEED_VERIFY', '抖音触发了短信二次验证，当前暂不支持') }
+              /**
+               * 风控：`payload` 里通常只有一个 `message`，**没有验证页地址** ——
+               * 所以现在只能如实告诉用户，同时把原文打进日志留样本。
+               */
               case 'risk':
+                logRiskSample('抖音扫码登录', { kind: 'risk', reason: payload?.message, raw: payload })
                 return { ok: false, error: new LoginSessionError('risk', 'RISK', payload?.message ?? '登录请求被抖音风控拦截') }
               case 'expired':
                 return { ok: false, error: new LoginSessionError('api', 'COOKIE_EXPIRED', '二维码已失效') }

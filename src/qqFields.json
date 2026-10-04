@@ -234,6 +234,16 @@
     "description": "填适配器平台名（默认 bilibili，也就是 B站私聊机器人）。从这里进来的消息解析完只给播放链接，不发视频文件。多个用逗号隔开，留空表示不强制。"
   },
   {
+    "key": "verifyBaseUrl",
+    "group": "通用",
+    "renderIn": "app",
+    "section": "人机验证设置",
+    "type": "string",
+    "default": "",
+    "label": "验证页公网地址",
+    "description": "平台要人机验证时（比如 B站风控）发给用户的验证链接用的域名，例如 https://kkk.example.com。验证页挂在 Koishi 自己的端口上，所以这里要填指向（或反向代理到）Koishi 端口的地址，不是在线播放器那个域名。留空就只能本机或内网打开，群里的人点不开。"
+  },
+  {
     "key": "errorReportUpload",
     "group": "通用",
     "renderIn": "app",

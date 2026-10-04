@@ -7,6 +7,7 @@ import { Common, Render } from '@/module'
 import { getAmagiClient, reloadAmagiConfig } from '@/module/utils/amagiClient'
 import { resolveTriggerAvatarUrl } from '@/module/utils/bot'
 import { Config } from '@/module/utils/Config'
+import { logRiskSample } from '../../../verify'
 
 /** 等待用户扫码的时限上限，与消息可撤回窗口（2 分钟）对齐 */
 const SCAN_TIMEOUT = 120_000
@@ -211,6 +212,16 @@ export const douyinLogin = async (e: Message) => {
         scanned = true
         clearTimeout(scanTimer)
         if (challenge.kind !== 'sms') {
+          /**
+           * 图形验证码：amagi 的 `CaptchaChallenge` 只有 `imageUrl` + `payload`，
+           * **没有可以直接发给用户的验证页地址**。先把整份 challenge 打进日志 ——
+           * 等拿到真实样本再决定是「把图发出来让用户输入」还是「托管一张验证页」。
+           */
+          logRiskSample('抖音扫码登录', {
+            kind: 'captcha',
+            challenge,
+            raw: (challenge as any)?.payload
+          })
           throw new LoginAborted('账号触发了图形验证码，当前仅支持短信验证码')
         }
         return { code: await collectSmsCode(e, challenge, tracker) }

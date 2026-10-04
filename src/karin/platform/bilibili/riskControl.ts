@@ -10,6 +10,7 @@ import {
   sendErrorToAllMasters,
   sendErrorToMaster
 } from '@/module/utils/ErrorHandler'
+import { buildVerifyLink } from '../../../verify'
 
 /**
  * B站风控验证策略
@@ -42,7 +43,15 @@ export const bilibiliRiskControlStrategy: ErrorStrategy = {
 
     const geetest = verification.data.data.geetest
     const token = verification.data.data.token
-    const verifyUrl = `https://koishi-plugin-kkk-docs.vercel.app/geetest?v=3&gt=${geetest.gt}&challenge=${geetest.challenge}`
+    /**
+     * 验证页现在由**插件自己**托管（挂 Koishi 端口的 `/kkk/geetest`），
+     * 公网地址走配置项「验证页公网地址」。
+     *
+     * 以前写死的是一个第三方站点，国内经常连不上 —— 用户打不开验证页，
+     * 风控就变成「无解」，只能干等。自带页面之后唯一的外部依赖是极验自己的 CDN。
+     * 宿主没有 server 服务时 `buildVerifyLink` 会退回那个第三方页面（并在日志里说清楚）。
+     */
+    const verifyUrl = buildVerifyLink({ gt: geetest.gt, challenge: geetest.challenge })
 
     // 渲染带二维码的验证图片
     const img = await renderErrorImage(ctx, {

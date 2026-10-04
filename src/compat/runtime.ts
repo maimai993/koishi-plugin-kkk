@@ -41,6 +41,8 @@ export interface KkkRuntimeConfig {
   playerMaxFileMB?: number
   /** 超限转在线播放（默认关）：视频超过全局体积上限时不拒绝，改为在线播放 */
   playerOnOversize?: boolean
+  /** 人机验证页的公网地址（例如 https://kkk.example.com）；留空退化成「本机 IP + 端口」并警告 */
+  verifyBaseUrl?: string
 }
 
 export interface KkkRuntime {

@@ -19,6 +19,8 @@ import Client, {
   type SuccessDouyinFetcher,
   type SuccessKuaishouFetcher,
   type SuccessXiaohongshuFetcher,
+  // 风控挑战（验证页地址 + 票据）：`kind === 'risk'` 且平台认得出这份响应时才有
+  type RiskChallenge,
   // 包级 fetcher：抖音的 passport（扫码登录）只在它上面，client 上绑定过的精简版没有这些方法
   douyinFetcher as amagiDouyinFetcher
 } from '@ikenxuan/amagi'
@@ -115,12 +117,24 @@ export class AmagiError extends Error {
   issues?: AmagiErrorContract['issues']
   /** 整条失败信封，`meta.requestId` / `attempts` / `durationMs` 在里面 */
   envelope: AmagiFailure
+  /**
+   * 风控挑战：**「怎么过去」这条必要信息**，不受 amagi 的 `debug` 开关影响。
+   *
+   * ⚠️ 只有**装了提取器**的平台才给。amagi 的 `PLATFORM_RUNTIME` 里目前**只有快手**
+   * 装了 `challenge: parseKuaishouCaptcha` —— 抖音 / B站 / 小红书恒为 `undefined`。
+   * 所以「有没有地址」要按平台分开看，不能因为 `kind === 'risk'` 就以为一定有验证页。
+   *
+   * 以前这一项**没有透出到包装类上**（在 `rawError.challenge` 里），
+   * 于是快手明明给了滑块页地址、插件却拿不到，只能回一句「过一会儿再试试」。
+   */
+  challenge?: RiskChallenge
 
   constructor(envelope: AmagiFailure) {
     const error: any = (envelope as any).error ?? {}
     super(describeFailure(envelope))
     this.name = 'AmagiError'
     this.code = legacyCode(error, envelope)
+    this.challenge = error.challenge
     // 平台原始响应体：v7 在 error.raw，6.6.0 在信封顶层 data（B站风控要读里面的 v_voucher）
     this.data = error.raw ?? (envelope as any).data
     this.rawError = error

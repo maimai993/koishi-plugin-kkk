@@ -1,5 +1,12 @@
 import '@/module/server'
 import '@/platform/bilibili/riskControl'
+/**
+ * 通用风控策略（任何平台的人机验证）。
+ *
+ * ⚠️ **必须排在 B站那一支之后**：ErrorHandler 先匹配先赢，B站 -352 的 kind 也是 risk，
+ * 被这里先截走就拿不到 `v_voucher`、极验流程会断。
+ */
+import '../verify/riskStrategy'
 import karin, { AdapterType, BOT_CONNECT, config, ImageElement, logger, Message, mkdirSync, SendMessage } from 'node-karin'
 import { karinPathBase } from 'node-karin/root'
 
