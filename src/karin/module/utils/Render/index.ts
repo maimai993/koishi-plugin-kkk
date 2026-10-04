@@ -39,8 +39,19 @@ let cachedCss: string | null = null
 function loadTemplateCss (): string {
   if (cachedCss !== null) return cachedCss
   try {
-    const cssPath = path.resolve(Root.pluginPath, 'resources', 'template', 'style.css')
-    const raw = fs.readFileSync(cssPath, 'utf8')
+    const dir = path.resolve(Root.pluginPath, 'resources', 'template')
+    let raw = fs.readFileSync(path.join(dir, 'style.css'), 'utf8')
+    /**
+     * style.css 是 tailwind v4 的**按需产物**，只含构建那一刻扫描到的类。
+     * 模板跟着上游更新后，新引入的工具类不会自动出现 —— 页面不报错，只是静默掉间距、
+     * 掉尺寸、图标塌成 0 宽（实况照片提示卡就这么崩过）。
+     * scripts/sync-template-css.mjs 把上游产物里对应的规则抽到 extra-utilities.css，这里追加。
+     */
+    try {
+      raw += '\n' + fs.readFileSync(path.join(dir, 'extra-utilities.css'), 'utf8')
+    } catch {
+      // 没有这个文件就是没同步过，按原样用 style.css
+    }
     cachedCss = raw.replace(/url\("?http:\/\/localhost:\d+\/config\/commonResource\//g, 'url("./template-fonts/')
   } catch (error: any) {
     logger.debug('[Render] 读取模板样式失败，将使用无样式渲染: ' + String(error?.message ?? error))

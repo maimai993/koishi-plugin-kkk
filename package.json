@@ -46,6 +46,7 @@
     "smoke:db": "node scripts/smoke-db-koishi.cjs",
     "placeholders": "node scripts/make-demo-placeholders.mjs",
     "smoke:render": "node scripts/smoke-render.cjs",
+    "sync-css": "node scripts/sync-template-css.mjs",
     "check-types": "tsc -p tsconfig.json"
   },
   "peerDependencies": {

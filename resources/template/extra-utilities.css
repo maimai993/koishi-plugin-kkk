@@ -1,0 +1,272 @@
+/* 本文件由 scripts/sync-template-css.mjs 自动生成，请勿手改。
+ *
+ * resources/template/style.css 是 tailwind v4 的按需构建产物，只含「构建那一刻」扫描到的类。
+ * 模板跟随上游更新后引入的新类不会自动出现，页面不报错、只是静默丢样式（掉间距 / 掉尺寸 / 图标塌成 0 宽）。
+ * 这里把上游 npm 产物（lib/style.css）里对应的规则抽出来补上。
+ *
+ * 来源：style.css
+ * 生成时间：2026-10-04T02:34:56.295Z
+ * 补齐类名：60 个
+ */
+:root, :host {
+  --font-bilifont: bilifont, "HarmonyOS Sans SC";
+}
+
+@layer utilities {
+  .font-bilifont {
+    font-family: var(--font-bilifont);
+  }
+
+  .tracking-\[0\.12em\] {
+    --tw-tracking: .12em;
+    letter-spacing: .12em;
+  }
+
+  .gap-x-12 {
+    column-gap: calc(var(--spacing) * 12);
+  }
+
+  .w-39 {
+    width: calc(var(--spacing) * 39);
+  }
+
+  .h-39 {
+    height: calc(var(--spacing) * 39);
+  }
+
+  .rounded-\[46px\] {
+    border-radius: 46px;
+  }
+
+  .-top-110 {
+    top: calc(var(--spacing) * -110);
+  }
+
+  .-right-75 {
+    right: calc(var(--spacing) * -75);
+  }
+
+  .w-362\.5 {
+    width: calc(var(--spacing) * 362.5);
+  }
+
+  .blur-\[170px\] {
+    --tw-blur: blur(170px);
+    filter: var(--tw-blur, ) var(--tw-brightness, ) var(--tw-contrast, ) var(--tw-grayscale, ) var(--tw-hue-rotate, ) var(--tw-invert, ) var(--tw-saturate, ) var(--tw-sepia, ) var(--tw-drop-shadow, );
+  }
+
+  .h-260 {
+    height: calc(var(--spacing) * 260);
+  }
+
+  .w-255 {
+    width: calc(var(--spacing) * 255);
+  }
+
+  .-bottom-95 {
+    bottom: calc(var(--spacing) * -95);
+  }
+
+  .-left-55 {
+    left: calc(var(--spacing) * -55);
+  }
+
+  .h-235 {
+    height: calc(var(--spacing) * 235);
+  }
+
+  .w-325 {
+    width: calc(var(--spacing) * 325);
+  }
+
+  .blur-\[210px\] {
+    --tw-blur: blur(210px);
+    filter: var(--tw-blur, ) var(--tw-brightness, ) var(--tw-contrast, ) var(--tw-grayscale, ) var(--tw-hue-rotate, ) var(--tw-invert, ) var(--tw-saturate, ) var(--tw-sepia, ) var(--tw-drop-shadow, );
+  }
+
+  .-right-70 {
+    right: calc(var(--spacing) * -70);
+  }
+
+  .-bottom-85 {
+    bottom: calc(var(--spacing) * -85);
+  }
+
+  .w-262\.5 {
+    width: calc(var(--spacing) * 262.5);
+  }
+
+  .blur-\[190px\] {
+    --tw-blur: blur(190px);
+    filter: var(--tw-blur, ) var(--tw-brightness, ) var(--tw-contrast, ) var(--tw-grayscale, ) var(--tw-hue-rotate, ) var(--tw-invert, ) var(--tw-saturate, ) var(--tw-sepia, ) var(--tw-drop-shadow, );
+  }
+
+  .top-16 {
+    top: calc(var(--spacing) * 16);
+  }
+
+  .-right-10 {
+    right: calc(var(--spacing) * -10);
+  }
+
+  .top-110 {
+    top: calc(var(--spacing) * 110);
+  }
+
+  .right-28 {
+    right: calc(var(--spacing) * 28);
+  }
+
+  .gap-3\.25 {
+    gap: calc(var(--spacing) * 3.25);
+  }
+
+  .h-1\.75 {
+    height: calc(var(--spacing) * 1.75);
+  }
+
+  .w-1\.75 {
+    width: calc(var(--spacing) * 1.75);
+  }
+
+  .inset-x-30 {
+    inset-inline: calc(var(--spacing) * 30);
+  }
+
+  .px-27 {
+    padding-inline: calc(var(--spacing) * 27);
+  }
+
+  .pt-29 {
+    padding-top: calc(var(--spacing) * 29);
+  }
+
+  .gap-6\.5 {
+    gap: calc(var(--spacing) * 6.5);
+  }
+
+  .h-4\.5 {
+    height: calc(var(--spacing) * 4.5);
+  }
+
+  .w-4\.5 {
+    width: calc(var(--spacing) * 4.5);
+  }
+
+  .text-\[132px\] {
+    font-size: 132px;
+  }
+
+  .leading-\[1\.08\] {
+    --tw-leading: 1.08;
+    line-height: 1.08;
+  }
+
+  .rounded-\[56px\] {
+    border-radius: 56px;
+  }
+
+  .py-13 {
+    padding-block: calc(var(--spacing) * 13);
+  }
+
+  .h-11\.5 {
+    height: calc(var(--spacing) * 11.5);
+  }
+
+  .w-11\.5 {
+    width: calc(var(--spacing) * 11.5);
+  }
+
+  .mt-8\.5 {
+    margin-top: calc(var(--spacing) * 8.5);
+  }
+
+  .pt-33 {
+    padding-top: calc(var(--spacing) * 33);
+  }
+
+  .gap-5\.5 {
+    gap: calc(var(--spacing) * 5.5);
+  }
+
+  .w-19 {
+    width: calc(var(--spacing) * 19);
+  }
+
+  .w-17 {
+    width: calc(var(--spacing) * 17);
+  }
+
+  .w-26\.5 {
+    width: calc(var(--spacing) * 26.5);
+  }
+
+  .w-27 {
+    width: calc(var(--spacing) * 27);
+  }
+
+  .gap-4\.5 {
+    gap: calc(var(--spacing) * 4.5);
+  }
+
+  .h-8\.5 {
+    height: calc(var(--spacing) * 8.5);
+  }
+
+  .w-8\.5 {
+    width: calc(var(--spacing) * 8.5);
+  }
+
+  .w-7\.5 {
+    width: calc(var(--spacing) * 7.5);
+  }
+
+  .w-13\.5 {
+    width: calc(var(--spacing) * 13.5);
+  }
+
+  .bg-surface-secondary\/60 {
+    background-color: var(--surface-secondary);
+  }
+
+  @supports (color: color-mix(in lab, red, red)) {
+    .bg-surface-secondary\/60 {
+      background-color: color-mix(in oklab, var(--surface-secondary) 60%, transparent);
+    }
+  }
+
+  .text-muted\/60 {
+    color: var(--muted);
+  }
+
+  @supports (color: color-mix(in lab, red, red)) {
+    .text-muted\/60 {
+      color: color-mix(in oklab, var(--muted) 60%, transparent);
+    }
+  }
+
+  .p-14 {
+    padding: calc(var(--spacing) * 14);
+  }
+
+  .grid-cols-6 {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+
+  .h-80 {
+    height: calc(var(--spacing) * 80);
+  }
+
+  .pt-6 {
+    padding-top: calc(var(--spacing) * 6);
+  }
+
+  .max-w-140 {
+    max-width: calc(var(--spacing) * 140);
+  }
+
+  .grid-cols-\[1fr_1\.35fr\] {
+    grid-template-columns: 1fr 1.35fr;
+  }
+}
