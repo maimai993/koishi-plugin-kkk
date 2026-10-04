@@ -61,7 +61,7 @@ export interface PanelRequest {
 }
 
 /** 一个可选画质 */
-interface QualityOption {
+export interface QualityOption {
   /** 平台画质标识（B站 qn / 抖音档位名） */
   id: string
   /** 按钮文案 */
@@ -71,7 +71,7 @@ interface QualityOption {
 }
 
 /** 面板要展示的作品信息 */
-interface PanelInfo {
+export interface PanelInfo {
   title: string
   author: string
   duration: string
@@ -302,8 +302,14 @@ async function fetchDouyinInfo (request: PanelRequest): Promise<PanelInfo | null
   }
 }
 
-/** 带缓存地拉取面板信息（失败也缓存，避免用户在坏链接上连点） */
-async function fetchPanelInfo (request: PanelRequest): Promise<PanelInfo | null> {
+/**
+ * 带缓存地拉取面板信息（失败也缓存，避免用户在坏链接上连点）。
+ *
+ * 导出去是因为 OneBot 那边要用同一份数据出「表情选择面板」（见 ReactionPanel）——
+ * 画质列表怎么算。只有一份实现，两边不会算出不一样的档位。
+ * @see ./ReactionPanel.ts
+ */
+export async function fetchPanelInfo (request: PanelRequest): Promise<PanelInfo | null> {
   const key = request.platform + ':' + request.id + ':' + (request.page ?? '')
   const cached = infoCache.get(key)
   if (cached && Date.now() - cached.at < INFO_TTL) return cached.info

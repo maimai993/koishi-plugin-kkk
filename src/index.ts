@@ -568,6 +568,15 @@ const permissionNotified = new Set<string>()
  */
 const EMPTY_RESULT = ''
 
+/**
+ * 命令重放入口（由 `registerCommands` 造好后挂上来）。
+ *
+ * 它建立在命令注册表之上，而注册表是 `registerCommands` 的局部变量，
+ * 外面（比如 `apply` 里调 `bindRuntime`）根本拿不到 —— 先存在这里，
+ * 表情面板选完画质要靠它把「选择」变成一次真正的解析（见 karin/module/utils/ReactionPanel.ts）。
+ */
+let replayCommand: ((session: any, text: string) => Promise<boolean>) | null = null
+
 function registerCommands (
   ctx: Context,
   logger: ReturnType<Context['logger']>,
@@ -856,6 +865,11 @@ function registerCommands (
     }
     return false
   }
+  /**
+   * 挂到模块级：命令注册表是这里的局部变量，`apply` 里的 `bindRuntime` 拿不到它，
+   * 而 OneBot 的表情面板选完画质后要靠这个函数把选择变成一次真正的解析。
+   */
+  replayCommand = runTextCommand
 
   // 2) 文本兜底：旧的 \`#\` 写法 + 「Koishi 没认出来的指令文本」都从这里走。
   //
@@ -1166,6 +1180,14 @@ export async function apply (ctx: Context, rawConfig: Config) {
   bindRuntime({
     ctx,
     /**
+     * 表情面板（OneBot）选完画质后靠它把「选择」变成一次真正的解析。
+     *
+     * 必须在这里传进去而不是让 ReactionPanel 自己 import：这个函数依赖命令注册表（局部在
+     * `registerCommands` 里），走别的路会拿到空注册表 —— 所以由那里赋值出来的 `replayCommand` 转交。
+     */
+    runCommand: (session: any, text: string) =>
+      replayCommand ? replayCommand(session, text) : Promise.resolve(false),
+    /**
      * ⚠️ 这份 config **不是**原封不动转发，而是运行时真正读的那一份（`tryGetRuntime().config`）。
      *
      * 以前它是一个**手写白名单** —— 于是每加一个新开关（例如「强制在线播放的适配器」
@@ -1318,6 +1340,19 @@ export async function apply (ctx: Context, rawConfig: Config) {
         .then(() => item.handler(bot))
         .catch((error: any) => logger.error('bot-connect 处理器失败: %s', error?.stack ?? error))
     }
+  })
+
+  /**
+   * OneBot 的「点表情选清晰度」：机器人往自己那条选择消息上贴一排表情，
+   * 用户点其中一个时 QQ 会推 `message_reactions_updated`，适配器转成 `onebot/message-reactions-updated`。
+   *
+   * 依赖 koishi-plugin-adapter-onebot；**没装这个适配器时事件永远不会触发**，这里注册也无害。
+   * 面板/开关的判断都在 ReactionPanel 里做 —— 这里只负责把事件递过去。
+   */
+  ;(ctx as any).on('onebot/message-reactions-updated', (session: any) => {
+    void import('./karin/module/utils/ReactionPanel')
+      .then((module) => module.handleReactionUpdate(session))
+      .catch((error: any) => logger.debug('[kkk] 处理表情回应失败: %s', String(error?.message ?? error)))
   })
 
   logger.info('koishi-plugin-kkk 已加载：命令 %d 个，定时任务 %d 个', commandQueue.length, taskQueue.length)

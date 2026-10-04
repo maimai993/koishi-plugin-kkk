@@ -46,6 +46,15 @@ export interface KkkRuntimeConfig {
 export interface KkkRuntime {
   ctx: Context
   config: KkkRuntimeConfig
+  /**
+   * 按「用户视角的一条指令文本」重新跑一遍命令注册表。
+   *
+   * 表情面板选完画质之后就要靠它落地成一次真正的解析（面板不是页面，点完不能直接调解析函数），
+   * 走的和 QQ markdown 按钮完全相同：按钮里本来就是一串 `解析 <链接> --qn=80`，
+   * 这里复用同一条通路，行为（含去壳/去重/权限校验）不会有出入。
+   * 由 `src/index.ts` 在 apply 时注入（`runTextCommand`）。
+   */
+  runCommand?: (session: any, text: string) => Promise<boolean>
   /** 插件根目录（含 lib/、resources/） */
   pluginRoot: string
   /** 数据根目录 */

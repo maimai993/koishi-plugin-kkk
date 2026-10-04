@@ -74,8 +74,14 @@ import {
   resolvePanelQualitySize,
   resolvePanelToken,
   sendQqParsePanel,
+  isQqPlatform,
   type PanelRequest
 } from '@/module/utils/QqPanel'
+/**
+ * OneBot 的表情版面板（同一个概念的另一种实现）：没有 markdown 按钮，改用「贴表情当按钮」。
+ * 哪一条能成立由平台决定 —— 详见 tryQqPanel 的分支。
+ */
+import { sendQualityReactionPanel } from '@/module/utils/ReactionPanel'
 import { isBurnDanmakuForbidden, isBurnDanmakuSupported } from '@/module/utils/DanmakuPolicy'
 // 解析结果合并转发（支持的平台）：把一次解析产生的所有内容合并成一条转发，过程提示不进去
 import { withParseForward } from '@/module/utils/ParseForward'
@@ -178,21 +184,31 @@ const expandPanelToken = (e: Message, flags: ReturnType<typeof parseParseFlags>)
  *   - 明确说了「#弹幕解析」的不用问；
  *   - 已经带参数的（画质/弹幕/面板切换）说明用户已经选过或正在切换，直接往下走；
  *   - 剩下的裸链接消息在 QQ 上先出面板，其它平台原样返回 false（行为不变）。
+ * QQ 用 markdown 按钮，OneBot 只能贴表情 —— 平台不同但都是「先问一句再解析」，见 ReactionPanel。
  * @param e 消息事件
  * @param request 作品信息（按钮指令里带着它的规范链接）
  * @param flags 已经从消息里解析出来的参数
  * @returns true 表示面板已发出，本次不再解析
  */
+const showParsePanel = async (e: Message, request: PanelRequest): Promise<boolean> => {
+  if (isQqPlatform(e)) return await sendQqParsePanel(e, request)
+  /**
+   * 只有 OneBot 系有可能走表情面板，其它平台（微信 / Telegram / Discord…）保持原样直接解析。
+   * 面板自己也会检查开关和群聊条件，这里不用前置判断。
+   */
+  return await sendQualityReactionPanel(e, request)
+}
+
 const tryQqPanel = async (
   e: Message,
   request: PanelRequest,
   flags: ReturnType<typeof parseParseFlags>
 ): Promise<boolean> => {
   // 番剧分集按钮发的是 \`解析 <链接> --panel=1\`，它只是想重发一次面板，不该直接开解析
-  if (flags.panel !== undefined) return await sendQqParsePanel(e, request)
+  if (flags.panel !== undefined) return await showParsePanel(e, request)
   if (/^#?弹幕解析/.test(e.msg)) return false
   if (flags.hasAny) return false
-  return await sendQqParsePanel(e, request)
+  return await showParsePanel(e, request)
 }
 
 // 包装抖音处理函数

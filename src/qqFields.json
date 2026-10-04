@@ -100,6 +100,14 @@
     "description": "面板表格下面挂一个「打开原站」按钮，点它直接去平台看原视频。默认打开。"
   },
   {
+    "key": "onebotQualityPanel",
+    "group": "解析面板",
+    "type": "boolean",
+    "default": true,
+    "label": "OneBot 用表情选清晰度",
+    "description": "OneBot（NapCat / Lagrange 等个人号）没有 QQ 官方那种 Markdown 按钮，所以换成表情当按钮：机器人先发一条「第几个表情对应哪一档」的选择消息，再在它下面贴一排表情，用户点下面那个表情就算选中。选完还会问一句「是否在线播放」。关掉就直接按配置里的画质解析。"
+  },
+  {
     "key": "qqGroupFileLimitMB",
     "group": "视频发送",
     "type": "number",

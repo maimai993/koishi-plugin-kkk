@@ -372,11 +372,21 @@ export class KkkBot {
 
   /**
    * 消息表情回应（karin 的 bot.setMsgReaction）。
-   * Satori 机器人没有统一接口，能调则调，不能调就静默返回 false —— 原插件只用它做「处理中/成功」提示。
+   *
+   * Satori 没有统一接口，各家名字都不一样，**按顺序试**：
+   *   1. \`setMessageReaction\` —— QQ 官方适配器（Satori 标准名）；
+   *   2. \`setMsgEmojiLike\` —— OneBot 适配器（\`Internal.define('set_msg_emoji_like', …)\`
+   *      会把下划线转成驼峰挂到 bot 上）。**这一条是 OneBot 唯一的路**：
+   *      它没有 Satori 的标准方法，以前这里只能返回 false，「贴表情」在 OneBot 上从来没生效过；
+   *   3. \`setMsgReaction\` —— 旧写法 / 其它实现。
+   * 都找不到就静默返回 false：表情只是提示，失败不该影响主流程。
+   *
+   * 参数顺序三者一致：\`(messageId, emojiId, isAdd)\`。
+   * @param isAdd true = 贴表情，false = 取消
    */
   async setMsgReaction (_contact: Contact | string, messageId: string, emojiId: string | number, isAdd = true): Promise<boolean> {
     const bot: any = this.bot
-    const fn = bot.setMessageReaction ?? bot.setMsgReaction
+    const fn = bot.setMessageReaction ?? bot.setMsgEmojiLike ?? bot.setMsgReaction
     if (typeof fn !== 'function') return false
     try {
       await fn.call(bot, messageId, String(emojiId), isAdd)

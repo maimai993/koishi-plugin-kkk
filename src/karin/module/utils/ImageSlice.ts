@@ -51,7 +51,8 @@ export const platformOf = (e: any): string =>
  * 所以这条链路要改发**普通图片段**。
  */
 const ONEBOT_LIKE = /onebot|napcat|lagrange|go-?cqhttp|chronocat|mirai/i
-const isOneBotLike = (platform: string): boolean => ONEBOT_LIKE.test(platform)
+/** 导出给面板选路用：OneBot 没有 markdown 按钮，只能走「贴表情」那条路（见 ReactionPanel） */
+export const isOneBotLike = (platform: string): boolean => ONEBOT_LIKE.test(platform)
 
 /**
  * 官方 QQ 适配器（qq-crack / adapter-qq）：markdown 里的连续图片**紧贴渲染**，
