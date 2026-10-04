@@ -1039,13 +1039,18 @@ export const buildBilibiliPanelCardData = (
 })
 
 /**
- * 渲染面板卡片（和解析结果同一套模板）并上传到 assets，拿到 QQ markdown 能用的图片地址。
+ * 渲染面板卡片（和解析结果同一套模板）并上传到 assets，拿到能直接发出去的图片地址。
  *
  * QQ 的 markdown 图片必须是**可访问的 https 地址**（本地文件、base64 都不认），
  * 所以这里：渲染 → data URL → 交给宿主 assets 服务转存 → 拿 URL。
  * 拿不到 URL 就返回 null，调用方退回原来的纯文字表格面板。
+ *
+ * ## 导出去是因为 OneBot 也要这张卡
+ * OneBot 群里以前只发一条干巴巴的文字选择表（用户反馈「为什么没有渲染图片一起发出来」）。
+ * 它拿不到 markdown 图片，但**普通图片段是能发的**，所以复用同一张卡、换个发法即可。
+ * @see ./ReactionPanel.ts
  */
-async function uploadPanelCard (
+export async function uploadPanelCard (
   e: Message,
   request: PanelRequest,
   detail: any,

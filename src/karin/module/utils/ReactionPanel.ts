@@ -30,18 +30,24 @@ import { logger } from 'node-karin'
 
 import { commandInvocation, tryGetRuntime } from '../../../compat/runtime'
 import { KkkBot } from '../../../compat/node-karin'
+import { segment } from '../../../compat/segment'
 import { isOnlinePlayerEnabled } from '../../../player'
 import { platformOf, isOneBotLike } from './ImageSlice'
-import { fetchPanelInfo, rememberPanelRequest, type PanelRequest } from './QqPanel'
+import { fetchPanelInfo, rememberPanelRequest, uploadPanelCard, type PanelRequest } from './QqPanel'
 
 /**
- * 画质选择用的表情 id，**必须升序**（见文件头的排序说明）。
+ * 画质选择用的表情（QQ 系统表情 id），**必须升序**（见文件头的排序说明）。
  *
- * 都是 QQNT 系统表情（https://koishi.js.org/QFace/#/qqnt/<id>），挑的都是图形差异大、
- * 一眼能数出第几个的那种：301 好闪 / 320 庆祝 / 333 烟花 / 351 敲敲 / 355 耶 /
- * 369 彩虹 / 371 冒泡 / 383 企鹅爱心 / 396 狼狗 / 405 好运来。
+ * ## 为什么不用 Unicode emoji
+ * `set_msg_emoji_like` 认两种 id：QQ 系统表情（三位以内）和 Unicode 码点（如 👍 = 128077）。
+ * 但**不少客户端 / 协议端只认 QQ 系统表情**，传码点过去要么贴不上、要么显示成一个问号框；
+ * 而且码点没法直接印在消息里 —— 想让选项前面出现表情，只能写真正的 emoji 字符，
+ * 又有一批老客户端 / 协议端打不出来。
+ *
+ * 全用 QQ 系统表情就没这些问题：**贴得上去**，并且**同一个 id 能用 `face` 段印进消息里**
+ * （`segment.face(id)`），选项前面直接显示那张表情图，和下面那排按钮一一对应。
  */
-const QUALITY_EMOJI_IDS = ['301', '320', '333', '351', '355', '369', '371', '383', '396', '405'] as const
+const QUALITY_EMOJI_IDS = ['301', '320', '333', '351', '355', '369', '371', '383', '396', '405']
 
 /** 「是」= 478 对的对的，「否」= 479 不对不对（用户指定的一对） */
 const YES_EMOJI_ID = '478'
@@ -208,37 +214,106 @@ export async function sendQualityReactionPanel (e: Message, request: PanelReques
   for (const option of info.options) sizes[String(option.id)] = option.sizeMB
   const token = rememberPanelRequest(request, sizes)
 
+  const channelId = String(e.contact?.peer ?? '')
+
   const choices: Choice[] = shown.map((option, index) => ({
     emojiId: QUALITY_EMOJI_IDS[index],
     qualityId: String(option.id),
     label: option.label
   }))
 
-  const lines: string[] = []
-  if (info.title) lines.push('《' + info.title + '》')
-  const meta = [info.author && 'UP：' + info.author, info.duration && info.duration].filter(Boolean).join(' · ')
-  if (meta) lines.push(meta)
-  if (lines.length) lines.push('')
-  lines.push('点这条消息下面的表情，选一档清晰度：')
-  shown.forEach((option, index) => {
-    lines.push((index + 1) + '. ' + option.label + ' · ' + sizeText(option.sizeMB))
-  })
-  lines.push('（从左到右数第几个表情，就是上面第几档）')
-
-  let sent: any
+  /**
+   * 渲染卡片要点时间（大卡片十几秒），先回一句「加载中…」，卡片发出去后再撤掉。
+   *
+   * **没有 assets 服务时干脆不提示**：那种情况下根本没有卡片、面板是秒发的，
+   * 发一句再撤掉只是在群里闪一下。
+   */
+  const hasAssets = typeof (runtime as any)?.ctx?.assets?.upload === 'function'
+  let loadingId = ''
+  if (hasAssets) {
+    try {
+      const tip: any = await e.reply('正在加载卡片…')
+      loadingId = String(tip?.messageId ?? '')
+    } catch (error: any) {
+      logger.debug('[表情面板] 「加载中」提示发送失败（不影响面板）: ' + String(error?.message ?? error))
+    }
+  }
+  let card: { url: string; width: number; height: number } | null = null
   try {
-    sent = await e.reply(lines.join('\n'))
+    card = await uploadPanelCard(e, request, info.detail, info.hotDanmaku ?? [])
   } catch (error: any) {
-    logger.debug('[表情面板] 发送选择消息失败: ' + String(error?.message ?? error))
+    logger.debug('[表情面板] 渲染卡片失败（退回纯文字面板）: ' + String(error?.message ?? error))
+  }
+
+  /**
+   * 拼一条消息：**卡片图 + 一段完整文字 + 最后排一行表情**。
+   *
+   * 卡片和 QQ 面板用的是同一张（同一套模板渲染出来，见 uploadPanelCard），
+   * 只是这里发成**普通图片段** —— OneBot 不认 markdown，写成 md 就是一串纯文本。
+   *
+   * ## 三个坑
+   *   1. **标题 / UP / 时长**：有卡片时这些已经在卡里了，文字里再发一遍是重复（用户反馈）；
+   *   2. **表情不能和每行文字交错排**：「face → 1. … → face → 2. …」这种结构，
+   *      QQ 会**吞掉中间的文本段**（用户实测 5 行选项只剩首尾两行）。
+   *      所以文字全部收进**一个** text 段里；
+   *   3. 表情还是要有（用户反馈「放在选项前面更直观」），所以改成**整条消息最后排一行**，
+   *      顺序和下面那排回应完全一致，照着数就行。
+   *
+   * @param withFace 末尾要不要排表情（`face` 段）。
+   *   有个别协议端不认 `face`，那时整条消息会发送失败，所以留了不带表情的退路：
+   *   **面板本身比表情那行重要**，发不出去等于什么都没有。
+   */
+  const buildPanel = (withFace: boolean): any[] => {
+    const body: string[] = []
+    if (!card?.url) {
+      if (info.title) body.push('《' + info.title + '》')
+      const meta = [info.author && 'UP：' + info.author, info.duration && info.duration].filter(Boolean).join(' · ')
+      if (meta) body.push(meta)
+      if (body.length) body.push('')
+    }
+    body.push('点这条消息下面的表情，选一档清晰度：')
+    shown.forEach((option, index) => {
+      body.push((index + 1) + '. ' + option.label + ' · ' + sizeText(option.sizeMB))
+    })
+    body.push('（' + (
+      withFace
+        ? '下面这排表情从左到右数，第几个就是上面第几档'
+        : '从左到右数第几个表情，就是上面第几档'
+    ) + '）')
+
+    const list: any[] = []
+    if (card?.url) list.push(segment.image(card.url))
+    list.push(segment.text(body.join('\n')))
+    if (withFace) {
+      for (let index = 0; index < shown.length; index++) list.push(segment.face(QUALITY_EMOJI_IDS[index]))
+    }
+    return list
+  }
+
+  let messageId = ''
+  try {
+    messageId = String((await e.reply(buildPanel(true)))?.messageId ?? '')
+  } catch (error: any) {
+    logger.debug('[表情面板] 带表情的面板发送失败（协议端可能不认 face 段），退回纯文本: ' + String(error?.message ?? error))
+  }
+  if (!messageId) {
+    try {
+      messageId = String((await e.reply(buildPanel(false)))?.messageId ?? '')
+    } catch (error: any) {
+      logger.debug('[表情面板] 发送选择消息失败: ' + String(error?.message ?? error))
+    }
+  }
+  if (!messageId) {
+    await recallQuietly(e.bot, channelId, loadingId)
     return false
   }
-  const messageId = String(sent?.messageId ?? '')
-  if (!messageId) return false
+  /** 卡片已经并进面板这条消息了，「加载中」那句就没用了 */
+  await recallQuietly(e.bot, channelId, loadingId)
 
   sweep()
-  pending.set(keyOf(String(e.contact?.peer ?? ''), messageId), {
-    key: keyOf(String(e.contact?.peer ?? ''), messageId),
-    channelId: String(e.contact?.peer ?? ''),
+  pending.set(keyOf(channelId, messageId), {
+    key: keyOf(channelId, messageId),
+    channelId,
     messageId,
     step: 'quality',
     choices,
@@ -257,7 +332,7 @@ export async function sendQualityReactionPanel (e: Message, request: PanelReques
   for (const choice of choices) {
     await setReaction(e.bot, messageId, choice.emojiId, true)
   }
-  logger.debug('[表情面板] 已发出清晰度面板（%d 档，messageId=%s）', choices.length, messageId)
+  logger.mark('[表情面板] 已发出清晰度面板（%d 档%s），等待用户点表情…', choices.length, card ? '，带卡片图' : '')
   return true
 }
 
@@ -328,6 +403,85 @@ export async function handleReactionUpdate (session: any): Promise<boolean> {
 }
 
 /**
+ * 收到 NapCat 的「群表情回应」事件（`group_msg_emoji_like`）。
+ *
+ * ## 为什么必须单独接这条
+ * 先做的版本只监听 OneBot 标准事件 `message_reactions_updated`（当前数量的快照），
+ * 但 **NapCat 根本不发那个**：它发的是自己的 `group_msg_emoji_like` ——
+ * 逐次点击上报（`user_id` / `is_add` / `likes: [{emoji_id, count}]`）。
+ * 用户实测「点了没反应」就是因为监听挂在了那条收不到的事件上。
+ *
+ * 这条事件其实更好用：**`is_add=true` 就是有人新贴了一个**，不用再对计数做差值。
+ * 机器人自己贴的那排（和选完后撤掉的那排）也会上报 —— 靠 `user_id !== selfId` 滤掉。
+ */
+export async function handleEmojiLike (session: any): Promise<boolean> {
+  if (!session) return false
+  if (!isReactionPanelEnabled()) return false
+  const data: any = session.onebot ?? {}
+  if (data.notice_type !== 'group_msg_emoji_like') return false
+  if (data.is_add === false) return false
+
+  /** 机器人自己贴的（以及撤掉的）不上来算 —— 只认别的用户 */
+  const selfId = String(session.selfId ?? session.bot?.selfId ?? '')
+  const who = String(data.user_id ?? '')
+  if (selfId && who && who === selfId) return false
+  /** 个别实现不带上报人：没 user_id 时只能靠计数差值判定（退回和老快照那套一样） */
+  const whoKnown = who !== ''
+
+  const channelId = String(data.group_id ?? session.channelId ?? session.guildId ?? '')
+  const messageId = String(data.message_id ?? session.messageId ?? '')
+  if (!channelId || !messageId) return false
+
+  const key = keyOf(channelId, messageId)
+  const panel = pending.get(key)
+  if (!panel) {
+    // 别人随便贴的表情、或这条面板早就被点过了 —— 常态，只记 debug
+    logger.debug('[表情面板] 收到表情回应（%s:%s），但没有在等的面板', channelId, messageId)
+    return false
+  }
+
+  /**
+   * 给这条消息贴上**选项里的**表情 = 选中。
+   * likes 有的实现给「这次点了什么」（单项）、有的给整份快照；
+   * 快照那种可能好几个都在，取「比基准多」的那个，取不到（比如上报人就是自己贴的第一下）取第一个匹配的。
+   */
+  const likes: Array<{ emoji_id: string; count: number }> = Array.isArray(data.likes) ? data.likes : []
+  let picked: Choice | undefined
+  for (const like of likes) {
+    const emojiId = String(like?.emoji_id ?? '')
+    const choice = panel.choices.find((item) => item.emojiId === emojiId)
+    if (!choice) continue
+    const count = Number(like?.count ?? 0)
+    if (count > (panel.baseline.get(emojiId) ?? 0)) { picked = choice; break }
+    if (whoKnown && !picked) picked = choice
+  }
+  if (!picked) return false
+
+  /*
+   * 到这一步就已经选中了 —— 立刻把面板从表里摘掉：
+   * 同一个人可能连点两下、QQ 也会因为「取消再贴」再发一遍事件，留着只会重复解析。
+   */
+  pending.delete(key)
+  const bot = session.bot
+  logger.mark(
+    '[表情面板] 用户点中表情 %s → %s',
+    picked.emojiId,
+    panel.step === 'quality'
+      ? String(picked.label ?? picked.qualityId ?? '')
+      : picked.onlineWatch ? '在线播放' : '直接发视频'
+  )
+
+  if (panel.step === 'quality') {
+    return await sendWatchQuestion(session, panel, String(picked.qualityId ?? ''), String(picked.label ?? picked.qualityId ?? ''), bot)
+  }
+
+  // 第二步：拿到「是否在线播放」的答案，落地成一次真正的解析
+  await clearPanel(bot, panel)
+  await runParse(panel.session ?? session, panel, picked.onlineWatch === true)
+  return true
+}
+
+/**
  * 发第二条：已经选好画质了，问一句要不要在线播放。
  * @returns true = 问题已发出（本次还没开始解析）
  */
@@ -353,22 +507,47 @@ const sendWatchQuestion = async (
     return true
   }
 
-  /** 回显给用户已选的那一档：第二步拿不到档位名时就用画质标识本身 */
-  const lines: string[] = [
-    '已选 ' + qualityIdLabel,
-    '',
-    '点这条消息下面的表情，选怎么给你：',
-    '1. 在线播放 —— 发一个链接，视频不占群空间',
-    '2. 直接发视频 —— 把视频文件发到群里',
-    '（从左到右数第几个表情，就是上面第几步）'
+  /**
+   * 回显给用户已选的那一档：第二步拿不到档位名时就用画质标识本身。
+   *
+   * 和第一步一样：文字收进一个 text 段（交错 face 段会被吞，见 buildPanel 的说明），
+   * 表情排在消息最后。
+   */
+  const rows = [
+    { emojiId: YES_EMOJI_ID, text: '在线播放 —— 发一个链接，视频不占群空间' },
+    { emojiId: NO_EMOJI_ID, text: '直接发视频 —— 把视频文件发到群里' }
   ]
+  const buildAsk = (withFace: boolean): any[] => {
+    const body: string[] = [
+      '已选 ' + qualityIdLabel,
+      '',
+      '点这条消息下面的表情，选怎么给你：',
+      '1. ' + rows[0].text,
+      '2. ' + rows[1].text,
+      '（' + (
+        withFace
+          ? '下面这排表情从左到右数，第几个就是上面第几步'
+          : '从左到右数第几个表情，就是上面第几步'
+      ) + '）'
+    ]
+    const list: any[] = [segment.text(body.join('\n'))]
+    if (withFace) for (const row of rows) list.push(segment.face(row.emojiId))
+    return list
+  }
 
   let messageId = ''
+  const idsOf = (sent: any): string => String((Array.isArray(sent) ? sent[0] : sent) ?? '')
   try {
-    const ids: any = await session.send(lines.join('\n'))
-    messageId = String((Array.isArray(ids) ? ids[0] : ids) ?? '')
+    messageId = idsOf(await session.send(buildAsk(true)))
   } catch (error: any) {
-    logger.debug('[表情面板] 发送「是否在线播放」失败: ' + String(error?.message ?? error))
+    logger.debug('[表情面板] 发「是否在线播放」带表情版失败，退回纯文本: ' + String(error?.message ?? error))
+  }
+  if (!messageId) {
+    try {
+      messageId = idsOf(await session.send(buildAsk(false)))
+    } catch (error: any) {
+      logger.debug('[表情面板] 发送「是否在线播放」失败: ' + String(error?.message ?? error))
+    }
   }
   if (!messageId) {
     // 发不出来就把问题跳过去，别让用户白选一遍画质

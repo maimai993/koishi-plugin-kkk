@@ -375,10 +375,15 @@ export class KkkBot {
    *
    * Satori 没有统一接口，各家名字都不一样，**按顺序试**：
    *   1. \`setMessageReaction\` —— QQ 官方适配器（Satori 标准名）；
-   *   2. \`setMsgEmojiLike\` —— OneBot 适配器（\`Internal.define('set_msg_emoji_like', …)\`
-   *      会把下划线转成驼峰挂到 bot 上）。**这一条是 OneBot 唯一的路**：
+   *   2. \`setMsgEmojiLike\` —— OneBot 适配器。**这一条是 OneBot 唯一的路**：
    *      它没有 Satori 的标准方法，以前这里只能返回 false，「贴表情」在 OneBot 上从来没生效过；
    *   3. \`setMsgReaction\` —— 旧写法 / 其它实现。
+   *
+   * ⚠️ **每个名字都要在 bot 本体和 \`bot.internal\` 上各找一遍。**
+   * OneBot 适配器是用 \`Internal.define('set_msg_emoji_like', …)\` 声明的，而它把方法
+   * 定义在 \`Internal.prototype\` 上（见适配器源码），**只有 \`bot.internal.setMsgEmojiLike\` 存在**，
+   * \`bot.setMsgEmojiLike\` 是 undefined —— 只查本体等于永远贴不上去（面板下面一排表情就是空的）。
+   *
    * 都找不到就静默返回 false：表情只是提示，失败不该影响主流程。
    *
    * 参数顺序三者一致：\`(messageId, emojiId, isAdd)\`。
@@ -386,10 +391,20 @@ export class KkkBot {
    */
   async setMsgReaction (_contact: Contact | string, messageId: string, emojiId: string | number, isAdd = true): Promise<boolean> {
     const bot: any = this.bot
-    const fn = bot.setMessageReaction ?? bot.setMsgEmojiLike ?? bot.setMsgReaction
-    if (typeof fn !== 'function') return false
+    const internal: any = bot?.internal
+    const names = ['setMessageReaction', 'setMsgEmojiLike', 'setMsgReaction']
+    let fn: any
+    let owner: any
+    for (const name of names) {
+      if (typeof bot?.[name] === 'function') { fn = bot[name]; owner = bot; break }
+      if (typeof internal?.[name] === 'function') { fn = internal[name]; owner = internal; break }
+    }
+    if (typeof fn !== 'function') {
+      logger.debug('[compat] 这个适配器没有可用的表情回应接口（' + String(bot?.platform ?? '未知') + '），跳过')
+      return false
+    }
     try {
-      await fn.call(bot, messageId, String(emojiId), isAdd)
+      await fn.call(owner, messageId, String(emojiId), isAdd)
       return true
     } catch {
       return false

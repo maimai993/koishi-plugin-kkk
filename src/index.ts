@@ -1343,8 +1343,15 @@ export async function apply (ctx: Context, rawConfig: Config) {
   })
 
   /**
-   * OneBot 的「点表情选清晰度」：机器人往自己那条选择消息上贴一排表情，
-   * 用户点其中一个时 QQ 会推 `message_reactions_updated`，适配器转成 `onebot/message-reactions-updated`。
+   * OneBot 的「点表情选清晰度」：机器人往自己那条选择消息上贴一排表情，用户点一个就算选中。
+   *
+   * ## 两条事件都要接（用户实测 NapCat 只发后一条）
+   *   1. `onebot/message-reactions-updated` —— OneBot 标准事件（当前数量的快照），
+   *      个别协议实现发这个；
+   *   2. **`group_msg_emoji_like`** —— **NapCat 真正发的那个**（逐次点击上报，
+   *      带 `user_id` / `is_add` / `likes`）。它在标准适配器里没有专门分支，
+   *      会话类型就是普通 `notice`，所以挂在 `notice` 上、在 ReactionPanel 里按
+   *      `session.onebot.notice_type` 过滤。
    *
    * 依赖 koishi-plugin-adapter-onebot；**没装这个适配器时事件永远不会触发**，这里注册也无害。
    * 面板/开关的判断都在 ReactionPanel 里做 —— 这里只负责把事件递过去。
@@ -1352,6 +1359,12 @@ export async function apply (ctx: Context, rawConfig: Config) {
   ;(ctx as any).on('onebot/message-reactions-updated', (session: any) => {
     void import('./karin/module/utils/ReactionPanel')
       .then((module) => module.handleReactionUpdate(session))
+      .catch((error: any) => logger.debug('[kkk] 处理表情回应失败: %s', String(error?.message ?? error)))
+  })
+  ;(ctx as any).on('notice', (session: any) => {
+    if (session?.onebot?.notice_type !== 'group_msg_emoji_like') return
+    void import('./karin/module/utils/ReactionPanel')
+      .then((module) => module.handleEmojiLike(session))
       .catch((error: any) => logger.debug('[kkk] 处理表情回应失败: %s', String(error?.message ?? error)))
   })
 
