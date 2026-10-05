@@ -16,6 +16,12 @@ import karin, { logger, Message, segment, withForwardKind, withoutForwardCollect
 import { Render } from '@/module'
 import { crawlInteractiveGraph, peekCachedGraph, type InteractiveGraph } from '@/module/utils/InteractiveGraph'
 import { cmdInput, isQqPlatform } from '@/module/utils/QqPanel'
+import {
+  attachEmojiChoicePanel,
+  choiceEmojiIds,
+  isReactionPanelCapable,
+  type EmojiPick
+} from '@/module/utils/ReactionPanel'
 import { commandInvocation } from '../../../compat/runtime'
 import { wrapWithErrorHandler } from '@/module/utils/ErrorHandler'
 import {
@@ -91,14 +97,22 @@ const sessionKeyOf = (e: Message): string => interactiveKey(platformOf(e), chann
  * 标题、进度、题目、B站 的提示语都会带上；QQ 走 markdown + 按钮，其它平台走纯文字。
  *
  * @param node 当前剧情节点
- * @param options 标题 / 已走过的剧情 / 等待秒数 / 是否加按钮
+ * @param options 标题 / 已走过的剧情 / 等待秒数 / 是否加按钮 / 是否加表情提示
  * @returns 要发送的文本
  */
 export const buildChoiceMessage = (
   node: InteractiveNode,
-  options: { title?: string; path?: string[]; waitSeconds?: number; buttons: boolean; detailed?: boolean }
+  options: {
+    title?: string
+    path?: string[]
+    waitSeconds?: number
+    buttons: boolean
+    detailed?: boolean
+    /** 消息末尾会挂一排表情回应（OneBot）；文案要跟着说明「第几个表情 = 第几个选项」 */
+    emoji?: boolean
+  }
 ): string => {
-  const { title, path = [], waitSeconds = CHOICE_WAIT_SECONDS, buttons, detailed = true } = options
+  const { title, path = [], waitSeconds = CHOICE_WAIT_SECONDS, buttons, detailed = true, emoji = false } = options
   const lines: string[] = []
 
   /**
@@ -134,6 +148,14 @@ export const buildChoiceMessage = (
     ? cmdInput(commandInvocation(RENDER_CHART_COMMAND), '渲染流程图')
     : '回复「' + RENDER_CHART_COMMAND + '」可以重新画一张流程图')
 
+  /**
+   * OneBot 用表情当按钮：消息末尾会多一排表情（见 {@link sendInteractiveChoices}），
+   * 所以这里要把「第几个表情 = 第几个选项」说清楚 —— 最后一个是「渲染流程图」。
+   */
+  if (emoji && !buttons) {
+    lines.push('（下面那排表情从左到右数，第几个就是上面第几个选项；最后一个是「' + RENDER_CHART_COMMAND + '」）')
+  }
+
   if (detailed) {
     lines.push('')
     if (node.notice) lines.push(node.notice)
@@ -158,9 +180,23 @@ const recallLastChoices = async (e: Message): Promise<void> => {
 }
 
 /**
+ * 「渲染流程图」那一项在表情面板里的 value。
+ *
+ * 用负数是因为前面几个都是选项下标（0 / 1 / 2…），拿它当哨兵不会和下标撞上。
+ */
+export const CHART_CHOICE_VALUE = -1
+
+/**
  * 发一条剧情选项消息。
  *
- * QQ 上先试 markdown（能出按钮），失败就退回纯文字 —— 按钮只是体验，剧情不能因为发不出去而中断。
+ * 三种形态，按平台能力挑一种：
+ *
+ *   1. **QQ 官方适配器** → markdown + `<qqbot-cmd-input>` 按钮；
+ *   2. **OneBot** → 纯文字 + 末尾一排**表情回应**（按钮的替代品，见 ReactionPanel）。
+ *      表情只是印在消息里，真正让它变成按钮的是调用方拿返回的 messageId 去挂面板；
+ *   3. 其它 → 纯文字，用户回字母。
+ *
+ * 按钮只是体验，剧情不能因为发不出去而中断，所以 markdown 失败会退回纯文字。
  * 纯文本会被「合并转发」收集，所以统一用 withoutForwardCollect 包起来。
  */
 export const sendInteractiveChoices = async (
@@ -170,16 +206,30 @@ export const sendInteractiveChoices = async (
 ): Promise<string | undefined> => {
   await recallLastChoices(e)
   const useButtons = isQqPlatform(e) && node.choices.length > 0
+  /** 有按钮就不画表情（QQ 官方那套更好用）；没有按钮、又是 OneBot 时才拿表情顶上 */
+  const useEmoji = !useButtons && isReactionPanelCapable(e) && node.choices.length > 0
   const send = async (content: any) => withoutForwardCollect(() => e.reply(content))
+  /**
+   * 表情**排在消息最后一行**，不能和文字交错：
+   * 「face → A. … → face → B. …」这种结构 QQ 会**吞掉中间的文本段**
+   * （实测 5 行选项只剩首尾两行），所以文字全部收进一个 text 段。
+   */
+  const withEmoji = (): any[] => [
+    segment.text(buildChoiceMessage(node, { ...options, buttons: false, emoji: true })),
+    /** 选项数 + 1（多出来的那个是「渲染流程图」） */
+    ...choiceEmojiIds(node.choices.length + 1).map((id) => segment.face(id))
+  ]
 
   let sent: any
   try {
     sent = await send(useButtons
       ? segment.markdown(buildChoiceMessage(node, { ...options, buttons: true }))
-      : buildChoiceMessage(node, { ...options, buttons: false }))
+      : useEmoji
+        ? withEmoji()
+        : buildChoiceMessage(node, { ...options, buttons: false }))
   } catch (error: any) {
-    if (!useButtons) throw error
-    logger.warn('[互动视频] markdown 按钮消息发送失败（' + String(error?.message ?? error).slice(0, 120) + '），改用文字发送')
+    if (!useButtons && !useEmoji) throw error
+    logger.warn('[互动视频] 带按钮/表情的选项消息发送失败（' + String(error?.message ?? error).slice(0, 120) + '），改用文字发送')
     sent = await send(buildChoiceMessage(node, { ...options, buttons: false }))
   }
   const messageId = String(sent?.messageId ?? '')
@@ -341,7 +391,7 @@ export const runInteractiveStory = async (options: StoryOptions): Promise<StoryR
         logger.warn('[互动视频] 剧情图卡片渲染失败: ' + String(error?.message ?? error).slice(0, 160))
       }
     }
-    await sendInteractiveChoices(target, currentNode, {
+    const choiceMessageId = await sendInteractiveChoices(target, currentNode, {
       title: title || node.title,
       path,
       waitSeconds,
@@ -350,7 +400,54 @@ export const runInteractiveStory = async (options: StoryOptions): Promise<StoryR
     firstChoices = false
 
     /**
-     * 等用户选出这一段的走向。
+     * OneBot 上把表情面板**挂到刚发出去那条选项消息上**（不另发消息）。
+     *
+     * 表情那排已经印在消息末尾了（见 {@link sendInteractiveChoices}），这里只负责
+     * 「把表情真的贴上去 + 等有人点」。选项之外多挂一个「渲染流程图」——
+     * QQ 上它是个按钮，OneBot 上同样得有得点。
+     *
+     * 面板是**一次性**的：点过就摘掉。所以点了「渲染流程图」之后要重新挂一张，
+     * 否则用户画完图回来发现选项点不动了。
+     */
+    const openEmojiPanel = (): Promise<EmojiPick | null> | null => {
+      if (!choiceMessageId || !isReactionPanelCapable(target)) return null
+      return attachEmojiChoicePanel(target, choiceMessageId, {
+        subject: '互动视频选项',
+        options: [
+          ...currentNode.choices.map((item, index) => ({ label: item.label + ' ' + item.text, value: index })),
+          { label: RENDER_CHART_COMMAND, value: CHART_CHOICE_VALUE }
+        ],
+        /** 好几项，必须点对那一个；随手贴个别的表情不该被当成选剧情 */
+        anyEmoji: false,
+        timeoutMs: waitSeconds * 1000
+      })
+    }
+    let emojiPanel = openEmojiPanel()
+
+    /** 点「渲染流程图」时走这里：重新画一张当前位置的图 */
+    const renderChartNow = async (): Promise<void> => {
+      try {
+        const done = await renderInteractiveChart({
+          e: target,
+          bvid,
+          graphVersion,
+          cid: currentCid,
+          entry,
+          title: title || currentNode.title,
+          path,
+          notice: currentNode.notice
+        })
+        if (!done.sent) await sendStoryTip(target, '流程图这次没画出来（接口没返回剧情数据），过一会儿再点一次试试')
+      } catch (error: any) {
+        logger.warn('[互动视频] 渲染流程图失败: ' + String(error?.message ?? error).slice(0, 160))
+      }
+    }
+
+    /**
+     * 等用户选出这一段的走向 —— **表情和文字同时等，谁先来算谁**。
+     *
+     * 表情点击不走消息通道（用户只是贴了个表情），所以不能只 `wait()`：
+     * 那样点了表情也要等到超时才算数。文字那条路照旧（回字母 / 数字）。
      *
      * **认不出来就什么都不发，继续等**：群里别人正常聊天、或者用户自己随便说句话，
      * 都不该被机器人插一句「没认出你的选择」—— 之前那样做，群一热闹就一直刷提示。
@@ -358,7 +455,39 @@ export const runInteractiveStory = async (options: StoryOptions): Promise<StoryR
      */
     let choice: InteractiveChoice | null = null
     while (!choice) {
-      const answer = await wait(waitSeconds)
+      /**
+       * 面板已经用掉（或没挂上）就只等文字。
+       *
+       * **绝不能把同一个 Promise 再塞进 race 一次**：它已经 resolve 了，
+       * 会立刻返回同一个结果，循环就变成死循环。
+       */
+      const got: { answer?: any; pick?: EmojiPick | null } = emojiPanel
+        ? await Promise.race([
+          wait(waitSeconds).then((value) => ({ answer: value })),
+          emojiPanel.then((value) => ({ pick: value }))
+        ])
+        : { answer: await wait(waitSeconds) }
+
+      if (emojiPanel && 'pick' in got) {
+        const pick = got.pick
+        /** 这一张已经用完了，先清掉再决定要不要重开 */
+        emojiPanel = null
+        const value = Number(pick?.value)
+        if (pick && value === CHART_CHOICE_VALUE) {
+          await renderChartNow()
+          emojiPanel = openEmojiPanel()
+          continue
+        }
+        if (pick && value >= 0 && value < currentNode.choices.length) {
+          choice = currentNode.choices[value]
+          break
+        }
+        /** 点了但序号对不上（比如选项比面板多）：重开一张接着等 */
+        emojiPanel = openEmojiPanel()
+        continue
+      }
+
+      const answer = got.answer
       /** 拿用户那句回复当新的发送目标（被动回复窗口就在它身上） */
       const answerMessage: Message | null = answer && typeof answer === 'object' ? answer : null
       const answerText = answerMessage ? String((answerMessage as any).msg ?? '') : String(answer ?? '')

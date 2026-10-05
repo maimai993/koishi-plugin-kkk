@@ -5,6 +5,7 @@ import { Config } from '@/module/utils/Config'
 import { wrapWithErrorHandler } from '@/module/utils/ErrorHandler'
 import { collectRuntimeReport, getLocalChangelog } from '@/module/utils/runtime-report'
 
+import { sendSlicedImage } from '@/module/utils/ImageSlice'
 import { classifySendFailure, describeSendFailure } from '../../compat/sendError'
 
 type Role = 'master' | 'member'
@@ -151,6 +152,23 @@ const buildMenuForRole = (role: Role) => {
   }).filter((g) => g.items.length > 0 || (g.subGroups && g.subGroups.length > 0))
 }
 
+/**
+ * 发一张渲染出来的卡片（帮助 / 版本 / 更新日志那三张）。
+ *
+ * **必须走 `sendSlicedImage`**：这些卡片本身就大 —— 版本海报实测超过 9MB，
+ * 而 QQ 系的协议端（含 Milky，见 `isQqFamily`）都有**单图体积上限**，
+ * 原样发就是 Milky 那种 `HTTP Upload failed with code 921`，整条命令直接报错。
+ *
+ * `sendSlicedImage` 是「**先按普通图片发一次，被拒了才切片重发**」——
+ * 小卡走的是和以前一模一样的路径，只有大卡才会被切开。
+ * 它返回 false（取不到图片内容）时退回原来的 `e.reply(img)`，老行为不变。
+ */
+const replyCardImage = async (e: any, img: any): Promise<void> => {
+  if (await sendSlicedImage(e, img)) return
+  logger.debug('[kkk] 卡片取不到内容、没能走切片，按原图发送')
+  await e.reply(img)
+}
+
 // 包装帮助命令
 const handleHelp = wrapWithErrorHandler(
   async (e) => {
@@ -181,7 +199,7 @@ const handleHelp = wrapWithErrorHandler(
       list,
       role
     })
-    await e.reply(img)
+    await replyCardImage(e, img)
     return true
   },
   {
@@ -193,7 +211,7 @@ const handleHelp = wrapWithErrorHandler(
 const handleVersion = wrapWithErrorHandler(
   async (e) => {
     const img = await Render(e, 'other/runtime', await collectRuntimeReport(e))
-    await e.reply(img)
+    await replyCardImage(e, img)
     return true
   },
   {
@@ -228,7 +246,7 @@ const handleChangelog = wrapWithErrorHandler(
       remoteVersion: ''
     })
     try {
-      await e.reply(img)
+      await replyCardImage(e, img)
     } catch (error) {
       /**
        * 图片发不出去（体积超限、主动消息被拒、适配器抽风…）时退回纯文字。

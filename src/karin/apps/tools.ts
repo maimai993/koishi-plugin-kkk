@@ -75,6 +75,7 @@ import {
   resolvePanelToken,
   sendQqParsePanel,
   isQqPlatform,
+  willSendVideo,
   type PanelRequest
 } from '@/module/utils/QqPanel'
 /**
@@ -96,7 +97,6 @@ import { getXiaohongshuID, Xiaohongshu } from '@/platform/xiaohongshu'
 
 const reg = {
   douyin: /(https?:\/\/)?(www|v|jx|m|jingxuan)\.(douyin|iesdouyin)\.com/i,
-  douyinCDN: /https:\/\/aweme\.snssdk\.com\/aweme\/v1\/play/i, // 抖音 CDN 下载链接
   bilibili: /(bilibili\.com|b23\.tv|t\.bilibili\.com|bili2233\.cn|\bBV[1-9a-zA-Z]{10}\b|\bav\d+\b)/i,
   kuaishou: /(快手.*快手|v\.kuaishou\.com|kuaishou\.com)/,
   xiaohongshu: /(xiaohongshu\.com|xhslink\.(?:com|cn))/
@@ -105,6 +105,29 @@ const reg = {
 // 管理类命令本身内嵌平台链接（如 #kkk推送全局忽略{url}），需放行给对应命令处理，
 // 否则会被「默认解析」(videoTool 开启时优先级为 -Infinity) 的解析器抢先消费
 const passthroughCommandReg = /^#kkk推送全局忽略/
+
+/**
+ * 从消息中提取并校验抖音 CDN 播放直链。
+ *
+ * 旧实现用非锚定正则 test 整条消息、再把整条消息当 URL 交给下载器：只要消息里混入
+ * `https://aweme.snssdk.com/aweme/v1/play` 子串（例如放在片段里），就能让 bot 从任意
+ * URL 拉取内容。这里改为逐个解析候选 URL，严格校验主机与路径后再放行。
+ * @param msg 消息文本
+ * @returns 校验通过的规范 URL；不匹配返回 null
+ */
+const parseDouyinPlayUrl = (msg: string): string | null => {
+  for (const urlMatch of msg.matchAll(/https?:\/\/[^\s]+/gi)) {
+    try {
+      const parsed = new URL(urlMatch[0])
+      if (parsed.hostname === 'aweme.snssdk.com' && parsed.pathname.toLowerCase().startsWith('/aweme/v1/play')) {
+        return parsed.href
+      }
+    } catch {
+      // 无法解析的候选 URL 直接跳过
+    }
+  }
+  return null
+}
 
 /**
  * 记录一次解析统计。
@@ -191,10 +214,28 @@ const expandPanelToken = (e: Message, flags: ReturnType<typeof parseParseFlags>)
  * @returns true 表示面板已发出，本次不再解析
  */
 const showParsePanel = async (e: Message, request: PanelRequest): Promise<boolean> => {
+  /**
+   * **不发视频就别问清晰度。**
+   *
+   * 「解析时发送的内容」里没勾「视频文件」时（比如只勾了「评论图片」），
+   * 弹一个「选哪档清晰度」没有任何意义 —— 根本没有视频会发出去。
+   * 直接跳过面板走正常解析，该发的信息卡片 / 评论区卡片照发
+   * （用户反馈：「没勾选发送视频的话，就不要提示选择清晰度什么的了，
+   * 如果当前还勾选了发送评论区卡片的话，就直接发评论区卡片」）。
+   */
+  if (!willSendVideo(request.platform)) {
+    logger.debug('[kkk] 本次不发视频（%s.sendContent 里没有 video），跳过清晰度面板', String(request.platform))
+    return false
+  }
+  /** QQ 官方适配器有 markdown + 原生按钮，用那一套（它自己看 `qqPanel` 开关） */
   if (isQqPlatform(e)) return await sendQqParsePanel(e, request)
   /**
-   * 只有 OneBot 系有可能走表情面板，其它平台（微信 / Telegram / Discord…）保持原样直接解析。
-   * 面板自己也会检查开关和群聊条件，这里不用前置判断。
+   * 其余**所有平台**都走这里（微信 / Telegram / Discord / Milky / OneBot…）：
+   * QQ 系且开着「用表情当按钮」时是表情面板，别的都是**数字列表**（回序号选）。
+   *
+   * ⚠️ 「要不要问」只看通用里那个「发链接后先问清晰度」总开关 —— 它关掉就**完全不问**，
+   * 直接按配置里的默认画质解析。开关判断都在 {@link sendQualityReactionPanel} 里，
+   * 这里不要再加条件（加过一次，结果「没勾选还是要求选择清晰度」）。
    */
   return await sendQualityReactionPanel(e, request)
 }
@@ -562,14 +603,15 @@ const handlePrefix = wrapWithErrorHandler(
     expandPanelToken(e, parseParseFlags(e.msg))
 
     // 检查是否是抖音 CDN 下载链接（推送配置中渲染的二维码）
-    if (reg.douyinCDN.test(e.msg)) {
+    const cdnPlayUrl = parseDouyinPlayUrl(e.msg)
+    if (cdnPlayUrl) {
       // 这是一个 CDN 下载链接，需要直接下载而不是解析
       logger.debug('检测到抖音 CDN 下载链接，直接下载视频')
-      const videoIdMatch = e.msg.match(/video_id=([^&]+)/)
+      const videoIdMatch = cdnPlayUrl.match(/video_id=([^&]+)/)
       const videoId = videoIdMatch ? videoIdMatch[1] : Date.now().toString()
 
       await downloadVideo(e, {
-        video_url: e.msg,
+        video_url: cdnPlayUrl,
         title: {
           timestampTitle: `tmp_${Date.now()}.mp4`,
           originTitle: `抖音视频_${videoId}.mp4`

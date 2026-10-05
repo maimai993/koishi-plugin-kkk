@@ -771,22 +771,36 @@ const FORWARD_START = '/*KKK-FORWARD-START*/'
 const FORWARD_END = '/*KKK-FORWARD-END*/'
 
 const forwardOption = ([value, label]) => '{value:' + q(value) + ',label:' + q(label) + '}'
-const FORWARD_OPTIONS = '[' + [['text', '文字'], ['image', '图片'], ['video', '视频'], ['file', '文件']]
-  .map(forwardOption).join(',') + ']'
+/**
+ * 「评论区图片」= 评论里**用户自己贴**的那些图（对应 `commentPic`）。
+ *
+ * 它**只有打开本平台的「是否收集评论区的图片」时才有这一路内容** —— 那个开关就是
+ * 「自动发送评论区图片」：开着时这批图会被单独发出来，关着时压根没有这批图可谈。
+ *
+ * 默认**不勾**（不进聊天记录）：评论长图里已经把这些图画过一遍了，
+ * 再在合并转发里收一份原图，同一批图会在一条聊天记录里出现两遍 —— 没意义。
+ */
+const FORWARD_OPTIONS = '[' + [
+  ['text', '文字'], ['image', '图片'], ['video', '视频'], ['file', '文件'], ['commentPic', '评论区图片']
+].map(forwardOption).join(',') + ']'
 /**
  * 「流程图」只有 B站互动视频有（它是剧情图，本身是图片但可以单独控制），
  * 所以只补在 **B站** 和 **通用（全局）** 这两处候选里：抖音 / 快手 / 小红书 加了也是永远匹配不到的假选项，
  * 跟当初删掉「语音 / markdown」是同一个理由（见 ParseForward 的说明）。
  */
-const FORWARD_OPTIONS_CHART = '[' + [['text', '文字'], ['image', '图片'], ['video', '视频'], ['file', '文件'], ['chart', '流程图']]
-  .map(forwardOption).join(',') + ']'
+const FORWARD_OPTIONS_CHART = '[' + [
+  ['text', '文字'], ['image', '图片'], ['video', '视频'], ['file', '文件'], ['chart', '流程图'], ['commentPic', '评论区图片']
+].map(forwardOption).join(',') + ']'
 
 const FORWARD_SWITCH_DESC = '本平台单独打开合并转发。注意全局优先：通用里的「解析结果合并转发」打开时所有平台都会合并，这个开关开不开都一样；只有全局关着时它才起作用。默认关闭。'
+const COMMENT_PIC_DESC = '「评论区图片」是评论里用户自己贴的那些图：只有打开本平台的「是否收集评论区的图片」时才有这一路（那个开关就是自动发送评论区图片）。默认不勾 —— 评论长图里已经画过一遍，再收一份原图就是同一批图发两遍；勾上才会进聊天记录。'
 const FORWARD_CONTENT_DESC = '合并转发里放哪些内容：没勾的会单独发出去、不进聊天记录。留空表示用通用里那份全局设置。视频体积大时有些适配器（比如 NapCat）会拒绝整条聊天记录，这时会自动改成单独发送，不会丢内容。'
-const FORWARD_GLOBAL_CONTENT_DESC = '全局合并转发里放哪些内容（通用页那个开关打开时生效，所有平台共用）：没勾的单独发。视频建议先不勾，聊天记录太大时适配器会整条拒绝。语音和 markdown 不在候选里：QQ 的聊天记录不支持语音气泡，markdown 只有官方 bot 认、而官方适配器没有合并转发能力。「流程图」是 B站互动视频的剧情图，勾上才会进聊天记录。'
+const FORWARD_GLOBAL_CONTENT_DESC = '全局合并转发里放哪些内容（通用页那个开关打开时生效，所有平台共用）：没勾的单独发。视频建议先不勾，聊天记录太大时适配器会整条拒绝。语音和 markdown 不在候选里：QQ 的聊天记录不支持语音气泡，markdown 只有官方 bot 认、而官方适配器没有合并转发能力。「流程图」是 B站互动视频的剧情图，勾上才会进聊天记录。' + COMMENT_PIC_DESC
 
 /** B站那一栏多说一句：流程图只有 B站有（别的平台页里连候选项都没有） */
-const FORWARD_CONTENT_DESC_BILIBILI = FORWARD_CONTENT_DESC + '「流程图」是互动视频的剧情图：勾上就进聊天记录，不勾就单独发出去。'
+const FORWARD_CONTENT_DESC_BILIBILI = FORWARD_CONTENT_DESC
+  + '「流程图」是互动视频的剧情图：勾上就进聊天记录，不勾就单独发出去。'
+  + COMMENT_PIC_DESC
 
 /** 平台页的锚点：紧跟在「解析开关」那一项之后插入 */
 const FORWARD_TABS = [

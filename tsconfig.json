@@ -61,6 +61,9 @@
       ],
       "@template/*": [
         "src/ktr/*"
+      ],
+      "@kkk/richtext": [
+        "src/richtext/index.ts"
       ]
     },
     "jsx": "react-jsx",

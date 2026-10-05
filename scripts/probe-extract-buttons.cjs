@@ -20,6 +20,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 
 const lib = path.join(__dirname, '..', 'lib')
+const root = path.join(__dirname, '..')
 
 /**
  * **先把图片落地这一步打桩，再 require 业务代码。**
@@ -147,6 +148,14 @@ const server = http.createServer((req, res) => {
 
 server.listen(0, '127.0.0.1', async () => {
   const base = 'http://127.0.0.1:' + server.address().port
+  /**
+   * §5/§6/§7 都要读源码（产物 + 源文件），在这里**统一读一次**：
+   * 之前 §5 在自己的块作用域里 `const bilibili`，§6 用的时候就 `ReferenceError` 了。
+   */
+  const read = (rel) => fs.readFileSync(path.join(lib, 'karin/platform', rel), 'utf8')
+  const bilibili = read('bilibili/bilibili.js')
+  const douyin = read('douyin/douyin.js')
+  const readSrc = (rel) => fs.readFileSync(path.join(root, 'src', rel), 'utf8')
   try {
     console.log('\n=== 1. 缓存里有没有图，决定按钮挂不挂（四个平台一致）===')
     {
@@ -297,9 +306,6 @@ server.listen(0, '127.0.0.1', async () => {
 
     console.log('\n=== 5. 源码守卫：那个开关不许再被短路掉 ===')
     {
-      const read = (rel) => fs.readFileSync(path.join(lib, 'karin/platform', rel), 'utf8')
-      const bilibili = read('bilibili/bilibili.js')
-      const douyin = read('douyin/douyin.js')
       check('B站产物里调用了 sendCommentPicsDirectly', bilibili.includes('sendCommentPicsDirectly'))
       check('抖音产物里调用了 sendCommentPicsDirectly', douyin.includes('sendCommentPicsDirectly'))
       /**
@@ -311,6 +317,180 @@ server.listen(0, '127.0.0.1', async () => {
       /** 反向：不许再用字面量 false 把配置短路掉 */
       check('没有 `if (false && Config.…)` 这种短路', !/if\s*\(\s*false\s*&&\s*(?:Config|config)\./.test(bilibili) && !/if\s*\(\s*false\s*&&\s*(?:Config|config)\./.test(douyin))
       check('两个平台的按钮都跟着 picsSent 走', /comment:\s*!picsSent/.test(bilibili) && /comment:\s*!picsSent/.test(douyin))
+    }
+
+    /**
+     * 「打开视频发送 → 出面板 → 选清晰度」这条路上，详情卡（封面按钮原本挂的那条）
+     * 是**不发**的（`fromPanel` 跳过），于是用户根本看不到「提取封面图」
+     * —— 用户反馈：「我打开了视频发送的话，它会根本不会出现这个按钮」。
+     *
+     * 修法分两步（后一步是用户再一次反馈后改的）：
+     *   ① 详情卡不发时，把 `cover` 补到评论区那条长图上；
+     *   ② **面板路径**下不再补在长图上 —— 封面入口并进了清晰度面板（最右边那个 ✅️），
+     *      而长图挂表情还得另发一条消息，用户明确要求「不要再单独发一条消息」。
+     */
+    console.log('\n=== 6. 面板路径下「提取封面图」必须还有入口 ===')
+    {
+      /**
+       * 产物里 `if (!infoCardSent)\n    return`（esbuild 会换行），所以只匹配到条件为止。
+       * 关键是**详情卡和评论卡用的是同一个变量** —— 详情卡不发时，评论卡必须顶上。
+       */
+      check('B站：详情卡发不发抽成了变量（和 renderInfoCard 同一个条件）',
+        /const infoCardSent = /.test(bilibili) && /if \(!infoCardSent\)/.test(bilibili))
+      check('B站：评论卡按它补 cover（详情卡没发、且不是面板路径、且图没直接发过）',
+        /cover:\s*!picsSent\s*&&\s*!infoCardSent\s*&&\s*!fromPanel/.test(bilibili), 'bilibili.ts')
+      check('抖音：同样按 douyinInfoCardSent 补 cover',
+        /const douyinInfoCardSent = /.test(douyin)
+        && /cover:\s*!picsSent\s*&&\s*!douyinInfoCardSent\s*&&\s*!fromPanelDouyin/.test(douyin), 'douyin.ts')
+      /** 反向：不许又退回「评论卡永远不带 cover」 */
+      check('评论卡不是写死只带 comment',
+        !/sendSlicedImageWithActions\([^)]*\{\s*comment:\s*!picsSent,\s*key:/.test(bilibili))
+      /**
+       * 面板路径（`fromPanel`）下**不许**在评论卡上重复挂封面：
+       * 那条路上封面入口在清晰度面板上（最右边那个 ✅️，见 probe-onebot-reaction-panel 第 30 节），
+       * 而长图挂表情还得**另发一条消息** —— 用户明确要求不要再多发一条。
+       */
+      check('面板路径下评论卡不带 cover（封面归清晰度面板，且不额外发消息）',
+        /cover:\s*!picsSent\s*&&\s*!infoCardSent\s*&&\s*!fromPanel\b/.test(bilibili)
+        && /cover:\s*!picsSent\s*&&\s*!douyinInfoCardSent\s*&&\s*!fromPanelDouyin\b/.test(douyin))
+    }
+
+    /**
+     * 「解析结果合并转发」开着时，面板阶段是**不渲染卡片**的（只问清晰度，见
+     * probe-onebot-reaction-panel 第 31 节），所以真正解析那一步必须把详情卡补上 ——
+     * 用户要求：「这种情况下先不要渲染图片，先询问清晰度，后面再合成一条」。
+     * 不补的话那条唯一的合并转发里就一张卡片都没有（用户反馈：「合并转发里面也没有那个卡片啊」）。
+     *
+     * 注意读 **TS 源码**：产物里 `isForwardCollecting()` 会被 esbuild 改写成
+     * `(0, import_node_karin.isForwardCollecting)()`，正则对不上。
+     */
+    console.log('\n=== 6c. 合并转发开着时，面板路径也要补发详情卡 ===')
+    {
+      const biliSrc = readSrc('karin/platform/bilibili/bilibili.ts')
+      const dySrc = readSrc('karin/platform/douyin/douyin.ts')
+      check('B站：fromPanel 挡卡片时给「合并转发」留了例外',
+        /const infoCardSent =[\s\S]{0,200}\(!fromPanel \|\| isForwardCollecting\(\)\)/.test(biliSrc),
+        'bilibili.ts')
+      check('抖音：同样给「合并转发」留了例外',
+        /const douyinInfoCardSent =[\s\S]{0,200}\(!fromPanelDouyin \|\| isForwardCollecting\(\)\)/.test(dySrc),
+        'douyin.ts')
+      /** 反向：不是把 fromPanel 判断直接删了（那样不开合并转发时会发两张卡） */
+      check('  不是无脑去掉 fromPanel 判断（不开转发时面板路径仍不发卡）',
+        /!fromPanel/.test(biliSrc) && /!fromPanelDouyin/.test(dySrc))
+    }
+
+    /**
+     * 评论区的图**已经直接发过**时，那条消息下面什么都不该挂 ——
+     * 用户反馈：「打开了收集评论区图片，会主动发送评论区图片。就不要发提示了，也不要贴表情」。
+     */
+    console.log('\n=== 6b. 评论图直接发过 → 不发提示、不贴表情 ===')
+    {
+      const src = fs.readFileSync(path.join(root, 'src', 'karin', 'module', 'utils', 'QqPanel.ts'), 'utf8')
+      check('长图那条路一律不写「贴个表情」（切片拿不到消息 id，挂不上）',
+        /sendSlicedImageWithActions[\s\S]{0,600}emoji:\s*false/.test(src),
+        'QqPanel.ts')
+      check('拿不到消息 id 时不再自己发一条短消息',
+        /不再另发一条短消息[\s\S]{0,200}return false/.test(
+          fs.readFileSync(path.join(root, 'src', 'karin', 'module', 'utils', 'ReactionPanel.ts'), 'utf8')))
+      /** 反向：不许留着「自己发一条短面板」那条路 */
+      check('  attachCardImageEmojiPanel 里没有 sendEmojiActionPanel 了',
+        !/const attachCardImageEmojiPanel = [\s\S]{0,1600}sendEmojiActionPanel/.test(
+          fs.readFileSync(path.join(lib, 'karin', 'module', 'utils', 'ReactionPanel.js'), 'utf8')))
+    }
+
+    /**
+     * 卡片正文那句文字退路要写明「也能贴表情」—— 用户反馈：
+     * 「下方没有说可以点击表情提取」。但**只在真的会贴表情时才写**：
+     * 写一句做不到的提示比不写更糟（用户照着贴了，然后「没有反应」）。
+     */
+    console.log('\n=== 7. 文字退路里要不要写「也可以贴个表情」 ===')
+    {
+      const { e } = makeEvent('onebot', 'g6a')
+      const key = CardImageCache.cardImageKeyOf('bilibili', 'BVemoji')
+      CardImageCache.rememberCardImages(key, { cover: 'https://cdn/b/cover-emoji.jpg' })
+
+      const withEmoji = QqPanel.cardImageActions(e, { cover: true, key, emoji: true })
+      const text = textOf(withEmoji[0])
+      check('能贴表情 → 文字里写明「也可以直接给这条消息贴个表情」',
+        text.includes('贴个表情') && text.includes('kkk封面 ' + key), text)
+      check('  指令本身（引用退路）还在', text.includes('引用这条消息发送'), text.slice(0, 60))
+
+      const noEmoji = QqPanel.cardImageActions(e, { cover: true, key })
+      check('不能贴表情（开关关着 / 不是 QQ 系）→ 不写这句',
+        !textOf(noEmoji[0]).includes('贴个表情'), textOf(noEmoji[0]))
+
+      /** 官方 QQ 走 markdown 文字链，本来就有真按钮，不需要这句 */
+      const { e: qq } = makeEvent('qq', 'g6b')
+      const qqList = QqPanel.cardImageActions(qq, { cover: true, key })
+      check('官方 QQ 是原生按钮 → 不加这句（它有真按钮可点）',
+        !textOf(qqList[0]).includes('贴个表情'), textOf(qqList[0]).slice(0, 60))
+      /** `canAttachEmoji` 和真正挂面板用的是同一个判定，说法不会两边不一致 */
+      check('「能不能贴」复用了 canUseEmojiButtons（不是另写一份判断）',
+        /canAttachEmoji[\s\S]{0,400}import\('\.\/ReactionPanel'\)/.test(
+          readSrc('karin/module/utils/QqPanel.ts')))
+    }
+
+    /**
+     * 「合并转发内容」里新增的「评论区图片」（`commentPic`）。
+     *
+     * 用户反馈：「这个选项里面啊，要再加一个评论区图片…如果开了这个（收集评论区图片）
+     * 要是单独发，不要带任何里面的勾选这个东西，不然合并转发里面又发一遍就没有意义了」。
+     *
+     * 也就是：评论区里用户贴的那些图**不能按「图片」归类** —— 评论长图里已经把它们
+     * 画过一遍了，再按 image 收进聊天记录就是同一批图在一条转发里出现两遍。
+     */
+    console.log('\n=== 8. 合并转发内容：评论区图片单独一类 ===')
+    {
+      const fc = require(path.join(lib, 'compat/forward-collect.js'))
+      const PF = require(path.join(lib, 'karin/module/utils/ParseForward.js'))
+      const { Config } = require(path.join(lib, 'karin/module/utils/Config.js'))
+      const img = () => ({ type: 'img', attrs: { src: 'https://cdn.example.com/x.png' } })
+
+      /**
+       * 默认（`DEFAULT_FORWARD_CONTENT = ['text','image']`）：
+       * 标了 `commentPic` 的那张 → 单独发；没标的普通图片 → 进聊天记录。
+       */
+      let groups = []
+      await fc.runWithForwardBag('20001', async () => {
+        await fc.withForwardKind('commentPic', () => { fc.collectForward('20001', [img()]) })
+        fc.collectForward('20001', [img()])
+        groups = fc.drainForwardGroups()
+      })
+      const split = PF.splitForwardableGroups(groups, 'bilibili')
+      check('默认：评论区图片**不进**聊天记录（单独发出去）',
+        split.direct.length === 1 && split.forwardGroups.length === 1,
+        '直发 ' + split.direct.length + ' / 转发 ' + split.forwardGroups.length)
+      check('  普通图片照旧进聊天记录（没被这条改动连累）', split.forwardGroups.length === 1)
+
+      /**
+       * 「勾上就进聊天记录」这条**没法在探针里跑通**：`Config` 是只读 Proxy（只有 get 陷阱，
+       * 写进去的值读不出来），而真改盘上的 config.json 会把用户的配置弄脏。
+       * 所以改成验「配置里写了 commentPic 就一定被采纳」这件事的两个前提：
+       *   ① `FORWARD_KINDS` 里有它；② `normalizeKinds` 正是拿 `FORWARD_KINDS` 过滤的。
+       * 两条都成立，用户勾上它就一定进得去。
+       */
+      check('  前提①：类别表里有 commentPic（下面那条源码守卫同款）',
+        /FORWARD_KINDS = \[[^\]]*'commentPic'/.test(
+          fs.readFileSync(path.join(lib, 'karin/module/utils/ParseForward.js'), 'utf8')))
+      check('  前提②：配置值正是按 FORWARD_KINDS 过滤的（不是另写一份白名单）',
+        /\.filter\(\(item\) => FORWARD_KINDS\.includes\(item\)\)/.test(
+          fs.readFileSync(path.join(lib, 'karin/module/utils/ParseForward.js'), 'utf8')))
+
+      /** 源码守卫：类别表 / 默认值 / 真的标上了 / 两个 UI 都加了这一项 */
+      const pfSrc = fs.readFileSync(path.join(lib, 'karin/module/utils/ParseForward.js'), 'utf8')
+      check('类别表里有 commentPic', /FORWARD_KINDS = \[[^\]]*'commentPic'/.test(pfSrc))
+      check('默认**不含** commentPic（不然又会同一批图发两遍）',
+        /DEFAULT_FORWARD_CONTENT = \['text',\s*'image'\]/.test(pfSrc), '默认值')
+      check('发评论图那一路真的标了 commentPic',
+        /withForwardKind\('commentPic'/.test(
+          fs.readFileSync(path.join(lib, 'karin/module/utils/CommentPics.js'), 'utf8')))
+      const webui = fs.readFileSync(path.join(root, 'scripts', 'patch-webui.mjs'), 'utf8')
+      check('WebUI 里加了「评论区图片」这一项', /'commentPic',\s*'评论区图片'/.test(webui))
+      check('控制台 Schema 里也加了', /'text', 'image', 'video', 'file', 'chart', 'commentPic'/.test(
+        fs.readFileSync(path.join(root, 'src', 'index.ts'), 'utf8')))
+      check('配置类型里也加了（不然写配置会报类型错）',
+        /'text' \| 'image' \| 'video' \| 'file' \| 'commentPic'/.test(
+          fs.readFileSync(path.join(root, 'src', 'karin', 'types', 'config', 'app.ts'), 'utf8')))
     }
 
     console.log('\n' + (failed ? '✘ 有 ' + failed + ' 项没通过' : '✔ 全部通过'))

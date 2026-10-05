@@ -251,3 +251,17 @@ export function decorateSendError (error: any, failure: SendFailure): any {
 export function isPassiveLimitFailure (failure: SendFailure): boolean {
   return failure.kind === 'passive-limit'
 }
+
+/**
+ * 是不是「适配器没报错，但也没给消息 ID」。
+ *
+ * ⚠️ 这种失败**绝对不能重试**：它只说明「没确认」，不说明「没发出去」 ——
+ * 实际上是发出去了的可能性很大（LLOneBot 发视频就是不回 message_id 的），
+ * 一重试群里就躺着两条一样的视频。判定放宽到 name，免得跨 bundle 时 instanceof 失灵。
+ */
+export function isUnconfirmedSendError (error: unknown): boolean {
+  if (error instanceof UnconfirmedSendError) return true
+  const anyError = error as any
+  return String(anyError?.sendFailureKind ?? '') === 'unconfirmed' ||
+    String(anyError?.name ?? '') === 'UnconfirmedSendError'
+}

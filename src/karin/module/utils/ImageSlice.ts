@@ -20,6 +20,7 @@ import path from 'node:path'
 import { logger, resolveFfmpegBin, segment, type Message } from 'node-karin'
 
 import { isForwardCollecting } from '../../../compat/forward-collect'
+import { canUseMarkdownImage } from '../../../compat/imageMarkdown'
 import { commandInvocation, tryGetRuntime } from '../../../compat/runtime'
 import { getImageMetadata } from '@/module/utils/Render'
 import { classifySendFailure, describeSendFailure, failureFromReplyResult, type SendFailure } from '../../../compat/sendError'
@@ -50,15 +51,52 @@ export const platformOf = (e: any): string =>
  * 群里只看到一串 URL 文字、图片根本出不来（用户反馈：「onebot 平台给我评论区图片发不出来」）。
  * 所以这条链路要改发**普通图片段**。
  */
-const ONEBOT_LIKE = /onebot|napcat|lagrange|go-?cqhttp|chronocat|mirai/i
-/** 导出给面板选路用：OneBot 没有 markdown 按钮，只能走「贴表情」那条路（见 ReactionPanel） */
-export const isOneBotLike = (platform: string): boolean => ONEBOT_LIKE.test(platform)
+/**
+ * 名单本体在 `compat/imageMarkdown`（`isOneBotLike`）——
+ * 这里只是转出来，方便同目录的模块继续按老名字引用，**别在这再抄一份正则**。
+ */
+export { isOneBotLike } from '../../../compat/imageMarkdown'
 
 /**
- * 官方 QQ 适配器（qq-crack / adapter-qq）：markdown 里的连续图片**紧贴渲染**，
- * 是「视觉上仍是一整张卡片」的正解，所以这条链路上继续用 markdown。
+ * **Milky**（QQ NT 的另一套实现端）。
+ *
+ * 它**不是** OneBot（没有 `set_msg_emoji_like`），但实现了 **Satori 标准**的
+ * `createReaction(channelId, messageId, emojiId)` / `deleteReaction(...)`
+ * （适配器 `koishi-plugin-adapter-milky` 的 `MilkyBot`），所以「贴表情当按钮」这条路
+ * 在 Milky 上是**通的** —— 只是接口形状和 OneBot 完全不一样：
+ *
+ *   |          | 贴表情                                                  | 表情 id 写法  | 点击事件                    |
+ *   |----------|---------------------------------------------------------|---------------|-----------------------------|
+ *   | OneBot   | `set_msg_emoji_like(messageId, emojiId, isAdd)`          | `301`         | `group_msg_emoji_like`（常被适配器丢掉） |
+ *   | Milky    | `createReaction(channelId, messageId, 'face\|301')`      | `face\|301`   | `reaction-added`（标准名，稳） |
+ *
+ * 表情 id 那列尤其要当心：Milky 自己上报的事件里也是 `face|301` 这种写法，
+ * **贴和认必须用同一个转换**，不然贴上去的 id 和回来的 id 对不上号。
  */
-const isOfficialQq = (platform: string): boolean => /^qq/i.test(platform)
+export const isMilkyLike = (platform: string): boolean => /^milky$/i.test(String(platform ?? '').trim())
+
+/**
+ * **QQ 那一族**（平台名）＝ 官方 QQ / QQ 频道 + OneBot 系 + Milky。
+ *
+ * 只用来判「**图片上传受 QQ 那套限制约束吗**」和「**表情 id 用 QQ 系统表情那套吗**」。
+ *
+ * ⚠️ `milky` 必须算进来：Milky 是 QQ NT 的实现端，和 NapCat 一样有
+ * **单图体积上限**（实测 9MB 附近就 `HTTP Upload failed with code 921`），
+ * 以前没算进来 → 那张 `#kkk版本` 的大海报被当「其它平台」原样发出去，
+ * 上传失败、命令直接报错。表情 id 同理：漏了它就落到占位符那一档
+ * （`OTHER_*_PLACEHOLDER`，协议端根本不认，见 `EmojiReaction.getEmojiId`）。
+ *
+ * 注意它**不是**「要不要开表情面板」的判据 —— 那个认 OneBot 系 **+ Milky**
+ * （见 {@link isReactionPanelCapable}），Milky 走的是 Satori 标准的 `createReaction`。
+ */
+const QQ_FAMILY = /^(qq|qqguild|onebot|napcat|lagrange|go-?cqhttp|chronocat|mirai|milky)/i
+export const isQqFamily = (platform: string): boolean => QQ_FAMILY.test(platform)
+
+/**
+ * 官方 QQ 适配器（`qq` / `qqguild`）：**文字** markdown 能用（见 QqPanel.supportsMarkdown）。
+ * 注意这是「文字 md」的判据，**图片** md 要走 compat/imageMarkdown 的 `canUseMarkdownImage`。
+ */
+export const isOfficialQq = (platform: string): boolean => /^qq/i.test(platform)
 
 /** OneBot 一条消息里最多塞几片（每片 1440x2000 的 jpeg ≈ 200KB，base64 后 ≈ 270KB） */
 const SLICES_PER_MESSAGE = 5
@@ -199,11 +237,10 @@ export const sendSlicedImage = async (e: Message, input: any, extra: any[] = [])
    * 适配器报的平台名是 `onebot`，底下的限制和 QQ 官方一模一样 ——
    * 实测 2880x35862 的评论卡直接发会拿到 `Error with request send_group_msg … retcode: 1200`，
    * 而这里以前只认 `/qq/`，于是**跳过切片**、把大图原样发出去，结果就是「评论卡发不出来」。
-   * 现在把 QQ 协议的常见平台名都算进来。
+   * 现在把 QQ 协议的常见平台名都算进来（含 `milky`，见 {@link isQqFamily}）。
    */
   const platform = String((e as any)?.bot?.bot?.platform ?? (e as any)?.platform ?? (e as any)?.bot?.platform ?? '')
-  const QQ_LIKE_PLATFORM = /^(qq|qqguild|onebot|napcat|lagrange|go-?cqhttp|chronocat|mirai)/i
-  if (platform && !QQ_LIKE_PLATFORM.test(platform)) {
+  if (platform && !isQqFamily(platform)) {
     logger.debug('[图片切片] 当前平台 ' + platform + ' 不是 QQ 链路，按普通图片发送')
     await e.reply(withExtra(segment.image(source)))
     return true
@@ -423,12 +460,18 @@ export const sendSlicedImage = async (e: Message, input: any, extra: any[] = [])
     /**
      * **两条发送链路**（平台决定，见文件头的说明）：
      *
-     *   - 官方 QQ：每片先传到 assets 拿 https 地址，再拼成**一条 markdown**（连续图片紧贴渲染）；
-     *   - OneBot：**不传 assets、不拼 markdown**，直接按普通图片段发 —— 省掉整轮上传（更快），
-     *     而且 markdown 在 NapCat 这类客户端上根本渲染不出来。
+     *   - 官方 QQ（见 `canUseMarkdownImage`）：每片先传到 assets 拿 https 地址，
+     *     再拼成**一条 markdown**（连续图片紧贴渲染，视觉上仍是一整张）；
+     *   - **其余一律**（OneBot 系、QQ 频道、以及任何认不出来的平台）：**不传 assets、不拼
+     *     markdown**，直接按普通图片段发 —— 省掉整轮上传（更快），而且 markdown 在这些地方
+     *     要么渲染不出来（NapCat / 频道），要么压根不是 QQ 的语法（telegram / discord…）。
+     *
+     * ⚠️ 以前这里是 `!isOneBotLike(platform)`（「只要不是 OneBot 就用 markdown」），
+     * 于是凡是**识别不出来**的平台（`platformOf()` 拿到空串、或者根本不是 QQ 的适配器）
+     * 全被当成官方 QQ，发出去一串 `![#1440px #2000px](url)` 裸文本 —— 图一张都出不来。
+     * 所以这里必须用**正向点名**的判据。
      */
-    const oneBotMode = isOneBotLike(platform)
-    const markdownMode = !oneBotMode
+    const markdownMode = canUseMarkdownImage(platform)
     const slices: Buffer[] = []
     const parts: string[] = []
     /**
@@ -455,7 +498,7 @@ export const sendSlicedImage = async (e: Message, input: any, extra: any[] = [])
       }
     }
 
-    const usable = oneBotMode ? slices.length : parts.length
+    const usable = markdownMode ? parts.length : slices.length
     if (!usable) {
       // 切片失败就退回原图，至少不是完全没反应
       await e.reply(withExtra(segment.image(source)))
@@ -469,12 +512,12 @@ export const sendSlicedImage = async (e: Message, input: any, extra: any[] = [])
     }
 
     /**
-     * OneBot：按普通图片段发（base64 直接给适配器，不需要公网地址）。
+     * 非官方 QQ：按普通图片段发（base64 直接给适配器，不需要公网地址）。
      * 一次 5 片，避免单条消息过大被客户端截断；视觉上依旧是「一条卡片的若干段」。
      */
     const groups = chunkElements(slices, SLICES_PER_MESSAGE)
     logger.mark('[图片切片] 长图 ' + width + 'x' + height + ' 已切成 ' + slices.length + ' 片，按图片段分 '
-      + groups.length + ' 条发送（' + (platform || 'onebot') + ' 不渲染 markdown）')
+      + groups.length + ' 条发送（' + (platform || '未知平台') + ' 不用 markdown）')
     for (const [groupIndex, group] of groups.entries()) {
       const lastGroup = groupIndex === groups.length - 1
       /**
@@ -499,11 +542,12 @@ export const sendSlicedImage = async (e: Message, input: any, extra: any[] = [])
  * 直接发必然被 QQ 拒收，等于「报错本身也发不出来」。
  *
  * 返回什么由平台决定（见文件头）：
- *   - 官方 QQ：一个 \`markdown\` 元素（里面的连续图片紧贴渲染，视觉上仍是一整张）；
- *   - OneBot：若干 \`image\` 元素（NapCat 这类客户端不渲染 markdown，只发图片段）。
+ *   - 官方 QQ（`canUseMarkdownImage`）：一个 \`markdown\` 元素（里面的连续图片紧贴渲染，视觉上仍是一整张）；
+ *   - **其余一律**：若干 \`image\` 元素 —— markdown 不是哪儿都能渲染的，
+ *     认不出来的平台也按图片段发，最坏只是「一张一张发」，不会变成一串裸链接。
  *
  * @param input 图片（data URI / 本地路径 / 消息元素）
- * @param platform 适配器平台名，缺省按官方 QQ 处理
+ * @param platform 适配器平台名；**缺省 = 不用 markdown**（只有官方 QQ 才点名允许）
  */
 export const sliceImageToElements = async (input: any, platform = ''): Promise<any[] | null> => {
   const first = Array.isArray(input) ? input[0] : input
@@ -539,13 +583,13 @@ export const sliceImageToElements = async (input: any, platform = ''): Promise<a
     }
     if (!width || !height) return null
     /**
-     * OneBot 不渲染 markdown：直接把图当普通图片段返回（也不需要先传 assets）。
-     * 官方 QQ 才走「上传 → markdown 拼接」。
+     * 只有官方 QQ 走「上传 → markdown 拼接」；其余（OneBot 系 / 频道 / 认不出来的平台）
+     * 直接把图当普通图片段返回（也不需要先传 assets）。判据同上，必须正向点名。
      */
-    const oneBotMode = isOneBotLike(platform)
+    const markdownMode = canUseMarkdownImage(platform)
     if (height <= sliceHeight) {
       // 带 mime 的 data URI（见上面 sendSlicedImage 里的说明）
-      if (oneBotMode) return [segment.image('data:image/jpeg;base64,' + buffer.toString('base64'))]
+      if (!markdownMode) return [segment.image('data:image/jpeg;base64,' + buffer.toString('base64'))]
       const url = await uploadSlice(buffer, 'kkk-one.jpg')
       return url ? [segment.markdown('![#' + width + 'px #' + height + 'px](' + url + ')')] : null
     }
@@ -569,15 +613,15 @@ export const sliceImageToElements = async (input: any, platform = ''): Promise<a
       if (!ok || !fs.existsSync(output)) break
       const slice = fs.readFileSync(output)
       slices.push(slice)
-      if (!oneBotMode) {
+      if (markdownMode) {
         const url = await uploadSlice(slice, 'kkk-slice-' + index + '.jpg')
         if (!url) break
         parts.push('![#' + useWidth + 'px #' + each + 'px](' + url + ')')
       }
     }
-    if (oneBotMode) {
+    if (!markdownMode) {
       if (!slices.length) return null
-      logger.mark('[图片切片] 错误卡片等超长图已切成 ' + slices.length + ' 段（图片段，' + (platform || 'onebot') + ' 不渲染 markdown）')
+      logger.mark('[图片切片] 错误卡片等超长图已切成 ' + slices.length + ' 段（图片段，' + (platform || '未知平台') + ' 不用 markdown）')
       return chunkElements(slices, SLICES_PER_MESSAGE)
         .map((group) => group.map((slice) => segment.image('data:image/jpeg;base64,' + slice.toString('base64'))))
         .flat()

@@ -5,6 +5,7 @@ import { douyinFetcher } from '@/module/utils/amagiClient'
 import { Config } from '@/module/utils/Config'
 import { wrapWithErrorHandler } from '@/module/utils/ErrorHandler'
 import { getDouyinID } from '@/platform/douyin/getID'
+import { liveRoomParams } from '@/platform/douyin/liveParams'
 import { renderFavoriteImage, renderLiveImage, renderRecommendImage, renderWorkImage } from '@/platform/douyin/push/render'
 import { buildDouyinWorkDetail } from '@/platform/douyin/types'
 import type { DouyinWorkDetailData } from '@/platform/douyin/types'
@@ -191,10 +192,9 @@ const handleTestPush = wrapWithErrorHandler(
           return true
         }
         const room_data = JSON.parse(user.room_data)
-        const liveInfo = await douyinFetcher.fetchLiveRoomInfo({
-          room_id: user.room_id_str,
-          web_rid: room_data.owner.web_rid
-        })
+        const liveInfo = await douyinFetcher.fetchLiveRoomInfo(
+          liveRoomParams(room_data.owner.web_rid, user.room_id_str)
+        )
         const Detail_Data = { user_info: userinfo.data, room_data, live_data: liveInfo.data }
         images = await renderLiveImage({ e, Detail_Data })
         if (!images.length) {

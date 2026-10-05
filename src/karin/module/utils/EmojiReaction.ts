@@ -5,7 +5,7 @@ import type { Message } from 'node-karin'
 import { logger } from 'node-karin'
 
 import { Config } from './Config'
-import { isOneBotLike, platformOf } from './ImageSlice'
+import { isOneBotLike, isQqFamily, platformOf } from './ImageSlice'
 
 /**
  * 各平台表情 ID 配置
@@ -104,7 +104,7 @@ export function getEmojiId(e: Message, type: EmojiType): string | number {
    * **QQ 系统表情 id** —— 和清晰度面板那排（301 / 320 / 333…、478 / 479）同一套。
    * 只有真不认 QQ 表情的平台（微信 / Telegram / KOOK…）才给占位符。
    */
-  if (isOneBotLike(platform)) return PLATFORM_EMOJI_IDS.qq[type]
+  if (isOneBotLike(platform) || isQqFamily(platform)) return PLATFORM_EMOJI_IDS.qq[type]
   // node-karin 的 AdapterPlatform 联合里有本表未覆盖的取值（如 dingtalk），
   // 索引前先按「表里有没有这个键」收窄，缺的一律落到 other
   const platformEmojis = platform in PLATFORM_EMOJI_IDS ? PLATFORM_EMOJI_IDS[platform as keyof typeof PLATFORM_EMOJI_IDS] : PLATFORM_EMOJI_IDS.other

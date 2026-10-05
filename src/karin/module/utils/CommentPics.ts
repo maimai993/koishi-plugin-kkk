@@ -16,10 +16,17 @@
  * ## 图片地址要先落地
  * `commentPics` 存的是接口给的**原始地址**，直接塞进 markdown 会踩外链防盗链 / 过期，
  * 所以统一过一遍 {@link processImageUrl}（按 `imageSendMode` 决定下载成本地还是保持 url）。
+ *
+ * ## 这些图**不按「图片」归类**（见 {@link ParseForward} 的 \`commentPic\`）
+ * 评论长图（渲染出来的那张卡）里已经把评论画了一遍，里面就有这些图。
+ * 开着合并转发时如果这批原图再按 \`image\` 收进聊天记录，同一批图会在一条转发里出现两遍 ——
+ * 所以这里用 \`withForwardKind('commentPic', …)\` 单独标一类，默认**不进**聊天记录（单独直发），
+ * 用户在「合并转发内容」里勾了 \`评论区图片\` 才会进去。
  */
 import { common, logger, segment } from 'node-karin'
 
 import { Config } from './Config'
+import { withForwardKind } from '../../../compat/forward-collect'
 import { processImageUrl } from './ImageHelper'
 import { platformOf } from './ImageSlice'
 import { buildMarkdownImageMessage } from './QqPanel'
@@ -59,7 +66,12 @@ export async function sendCommentPicsDirectly (
       platformOf(e)
     )
     if (md) {
-      await e.reply(md)
+      /**
+       * 标成 `commentPic`：这批图**不按「图片」归类**，
+       * 默认不进合并转发（评论长图里已经画过一遍，再收就是同一批图发两遍）。
+       * 不在收集上下文里时 `withForwardKind` 是透明的，和以前完全一样。
+       */
+      await withForwardKind('commentPic', () => e.reply(md))
       return true
     }
     const res = common.makeForward(

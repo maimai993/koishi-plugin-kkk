@@ -122,8 +122,14 @@ export const collectRuntimeReport = async (event: Message): Promise<RuntimeRepor
       processUptime: formatDuration(process.uptime())
     },
     adapter: {
-      // 卡片上要好看：NapCat / OneBot 这种；取不到就退回平台名
-      name: (adapter as any).displayName || adapter.name || '未知',
+      /**
+       * 印成 `onebot(nc)` 这种：平台名 + 实现端代号。
+       *
+       * 各家协议端都自报 `onebot`，光写平台名分不出 NapCat 和 LLOneBot；
+       * 而只写 `NapCat.Onebot` 又看不出走的是哪个平台 —— 两个都要，所以拼在一起。
+       * 认不出实现端时退化成友好名（`OneBot`），再退化成平台名。
+       */
+      name: (adapter as any).shortLabel || (adapter as any).displayName || adapter.name || '未知',
       version: adapter.version || '未知',
       platform: String(adapter.platform || '未知'),
       protocol: String(adapter.protocol || '未知'),

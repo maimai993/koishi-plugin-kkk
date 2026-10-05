@@ -6,9 +6,8 @@ import { ParseSteps, SendTasks } from '@/module/utils/ParseSteps'
 // sendParseTip 单独导入：它在一个无依赖的叶子模块里，避免和平台模块形成循环 import
 import { sendParseTip } from '@/module/utils/parseTip'
 import type { ParseWorkType } from '@/module/db'
-import { cardImageActions, kuaishouShareUrl, sendCopyJumpMessage } from '@/module/utils/QqPanel'
+import { kuaishouShareUrl, sendCopyJumpMessage, sendSlicedImageWithActions } from '@/module/utils/QqPanel'
 import { cardImageKeyOf, imageSourcesOf, rememberCardImages, rememberLastCardKey } from '@/module/utils/CardImageCache'
-import { sendSlicedImage } from '@/module/utils/ImageSlice'
 import { Config } from '@/module/utils/Config'
 // 注意用相对写法：@/ 别名在仓库里指向 karin/，@/player 会被解析成不存在的 karin/player
 import { applyForceOnlinePlayer } from '../../../player'
@@ -232,7 +231,7 @@ export class Kuaishou extends Base {
     /**
      * 评论区这张卡是快手**唯一**的一张卡：封面与评论区两个按钮都挂它下面，同一条消息。
      */
-    await sendSlicedImage(this.e, img, cardImageActions(this.e, { cover: true, comment: true, key: cardKey }))
+    await sendSlicedImageWithActions(this.e, img, { cover: true, comment: true, key: cardKey })
     })
 
     /**

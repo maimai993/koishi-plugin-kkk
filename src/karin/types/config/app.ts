@@ -81,7 +81,7 @@ export interface appConfig {
    * **语音和 markdown 不在候选里**（配了也不生效）：QQ 的聊天记录不支持语音气泡；
    * markdown 只有官方 bot 认，而官方适配器根本没有合并转发能力。
    */
-  forwardContent: Array<'text' | 'image' | 'video' | 'file'>
+  forwardContent: Array<'text' | 'image' | 'video' | 'file' | 'commentPic'>
 
   // /**
   //  * 表情 ID

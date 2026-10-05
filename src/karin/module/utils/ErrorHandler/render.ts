@@ -1,5 +1,6 @@
 import util from 'node:util'
 
+import { adapterCardInfo } from '../../../../compat/adapter-info'
 import { MAX_CARD_LOG_LINES, foldLongRuns, truncateWithNote } from '../../../../compat/fold'
 import { groupLinkOf, reportConfig } from '../ErrorReport'
 
@@ -9,6 +10,30 @@ import { formatBuildTime, Render, Root } from '@/module'
 import { AmagiError } from '@/module/utils/amagiClient'
 
 import type { ErrorContext, RenderErrorOptions } from './types'
+
+/** 响应体原文的印字上限：反爬页可能是整份 HTML，全印会把图撑到几十屏 */
+const RAW_TEXT_LIMIT = 500
+
+/**
+ * 取响应体原文。
+ *
+ * **只收字符串 body** —— 那正是 judge 判 `ANTIBOT_PAGE` 的情形（反爬页、Argus
+ * 拦截）。这种响应下 `error.message` 必然是 amagi 的兜底文案「平台返回了反爬页面」，
+ * 因为 amagi 的 `extractPlatformMessage` 只认对象、拿字符串 body 一律返回
+ * `undefined`；平台究竟说了什么，只有这里能看到。
+ *
+ * 对象 body 不收：那份信息已由 `platformCode` 与 `trace` 覆盖，整份 JSON 印进图里
+ * 既撑爆版面、又可能带出令牌 —— 这张图是要发到群里的。
+ *
+ * amagi 只在 `createClient({ debug: true })` 时填 `error.raw`，本封装层常开着。
+ * @param error - amagi 失败异常
+ * @returns 截断后的响应体原文；body 不是字符串时为 `undefined`
+ */
+const rawTextOf = (error: AmagiError): string | undefined => {
+  const raw = error.rawError.raw
+  if (typeof raw !== 'string' || raw.trim() === '') return undefined
+  return raw.length > RAW_TEXT_LIMIT ? `${raw.slice(0, RAW_TEXT_LIMIT)}…（共 ${raw.length} 字符）` : raw
+}
 
 /**
  * 把 amagi 的 v7 错误摊成模板能直接印的一块。
@@ -24,6 +49,7 @@ const amagiDetailOf = (error: Error) => {
     kind: error.kind,
     code: error.amagiCode,
     reason: error.reason,
+    raw: rawTextOf(error),
     retryable: error.retryable,
     platformCode: error.rawError.platform?.code,
     httpStatus: error.httpStatus,
@@ -162,7 +188,7 @@ const stackPartsOf = (error: Error, override?: string): { stack: string; dump?: 
  * ```
  */
 export const renderErrorImage = async (ctx: ErrorContext, opts: RenderErrorOptions = {}) => {
-  const { error, options, logs, event, buildMetadata, adapterInfo } = ctx
+  const { error, options, logs, event, buildMetadata } = ctx
   const amagi = amagiDetailOf(error)
   const { stack, dump } = stackPartsOf(error, opts.stack)
 
@@ -207,12 +233,12 @@ export const renderErrorImage = async (ctx: ErrorContext, opts: RenderErrorOptio
     commitHash: buildMetadata?.commitHash,
     /**
      * 之前这里可能传 undefined，模板读 adapterInfo.version.startsWith 直接 SSR 崩掉。
-     * name 换成友好名（NapCat / OneBot）只是给卡片看：兼容层里 adapter.name 是**平台标识**，
-     * 别动原对象，免得面板那条链路拿到被改过的平台名。
+     *
+     * 名称和图标依据都交给 adapterCardInfo：它会先问一句实现端（`get_version_info`）
+     * 再取快照，于是 NapCat 能印成 `onebot(nc)` 并配上 NapCat 的图标 ——
+     * 光看平台名各家都是 `onebot`，是分不出来的。
      */
-    adapterInfo: adapterInfo
-      ? { ...adapterInfo, name: String((adapterInfo as any).displayName || adapterInfo.name || '未知适配器') }
-      : { name: '未知适配器', version: '' },
+    adapterInfo: await adapterCardInfo(event?.bot),
     // 上报成功的编号与反馈群：印在卡片上，用户照着进群提问
     report: ctx.report
       ? { id: ctx.report.id, url: ctx.report.url, group: reportConfig().group, groupUrl: groupLinkOf(reportConfig().group) }

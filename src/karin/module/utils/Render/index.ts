@@ -24,6 +24,8 @@ import { readImageSize } from '../../../../compat/imageSize'
 import { loadTemplate } from '../../../../ktr/registry'
 import { Root } from '@/module/utils'
 import { Config } from '@/module/utils/Config'
+// 注册 Unicode emoji 图源解析器（emoji-datasource-apple，见 utils/emojiAssets.ts）
+import '@/module/utils/emojiAssets'
 
 import { resolveUseDarkTheme } from './coverTheme'
 

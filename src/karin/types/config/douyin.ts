@@ -13,7 +13,7 @@ export interface douyinConfig {
    * text 文字 / image 图片 / video 视频 / file 文件。
    * 没列出来的内容单独直发。
    */
-  forwardContent: Array<'text' | 'image' | 'video' | 'file'>
+  forwardContent: Array<'text' | 'image' | 'video' | 'file' | 'commentPic'>
 
   /** 解析时发送的内容，可选值：'info'(视频信息)、'comment'(评论图片)、'video'(视频文件) */
   sendContent: ['info' | 'comment' | 'video']

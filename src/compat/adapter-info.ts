@@ -29,6 +29,22 @@ export interface KkkAdapterInfo {
   displayName: string
   /** 展示版本：实现端版本优先，其次是适配器插件版本；都没有就是「未知」 */
   version: string
+  /**
+   * 实现端自报的名字（`NapCat.Onebot` / `LLOneBot` …），没问到是空串。
+   *
+   * 卡片**选图标**就靠它：平台名各家都是 `onebot`，只有这个名字能区分 NapCat 和 LLOneBot。
+   */
+  implementationName: string
+  /** 实现端代号：`nc` / `ll` / `lg` …，认不出来是空串 */
+  implementationCode: string
+  /**
+   * 卡片上的短标签：`onebot(nc)` —— 平台名 + 实现端代号。
+   *
+   * 各家协议端都自报 `onebot`，光看平台名分不出 NapCat 和 LLOneBot，
+   * 而只写 `NapCat.Onebot` 又看不出走的是哪个平台；两个都要，所以拼成这个样子。
+   * 认不出实现端时就只有平台名（`qq` / `onebot`）。
+   */
+  shortLabel: string
   /** 平台名，就是 Koishi 的 bot.platform */
   platform: string
   /** 协议，保持平台名语义（卡片与多页判断都按它分支） */
@@ -76,6 +92,36 @@ const PACKAGE_NAME_HINTS: Array<{ key: string; name: string }> = [
   { key: 'adapter-satori', name: 'Satori' }
 ]
 
+/**
+ * 实现端自报的名字（get_version_info 的 app_name）→ 卡片上的短代号。
+ *
+ * 全部按**小写子串**匹配，所以 `NapCat.Onebot` 能命中 napcat、`Lagrange.OneBot` 能命中
+ * lagrange。顺序有意义：越具体的放前面（没有 `onebot` 这种通用项 —— 它谁都配不上，
+ * OneBot 适配器自己、以及那些不肯自报家门的协议端都属于这一类，此时就不带代号）。
+ */
+const IMPLEMENTATION_CODES: Array<{ key: string; code: string }> = [
+  { key: 'napcat', code: 'nc' },
+  { key: 'llonebot', code: 'll' },
+  { key: 'lltwobot', code: 'lt' },
+  { key: 'lagrange', code: 'lg' },
+  { key: 'chronocat', code: 'cc' },
+  { key: 'shamrock', code: 'sr' },
+  { key: 'conwechat', code: 'cw' },
+  { key: 'go-cqhttp', code: 'go' },
+  { key: 'gocq', code: 'go' },
+  { key: 'oitq', code: 'oitq' }
+]
+
+/** 实现端名字 → 短代号，认不出来给空串 */
+export const implementationCode = (name: string): string => {
+  const lower = String(name ?? '').toLowerCase()
+  if (!lower) return ''
+  for (const item of IMPLEMENTATION_CODES) {
+    if (lower.includes(item.key)) return item.code
+  }
+  return ''
+}
+
 const PACKAGE_PREFIXES = [
   'koishi-plugin-adapter-',
   '@koishijs/plugin-adapter-',
@@ -95,10 +141,24 @@ const COMMUNICATION_NAMES: Record<string, string> = {
   webhook: 'Webhook'
 }
 
+/** 实现端自报的名字 / 版本 / 协议版本 */
+interface ImplementationInfo {
+  name: string
+  version: string
+  protocol: string
+}
+
 /** 包版本缓存：key 是平台名 + adapterName */
 const PACKAGE_CACHE = new Map<string, PackageVersion>()
-/** 实现端版本缓存：key 是平台名 + selfId，值是 null 表示问过了但没问到 */
-const IMPLEMENTATION_CACHE = new Map<string, { name: string; version: string; protocol: string } | null>()
+/**
+ * 实现端缓存，**优先按 bot 对象记**（同一个对象必然是同一个机器人）。
+ *
+ * 只按 `platform:selfId` 记是不够的：还没登录的机器人 selfId 是空的，
+ * 好几个机器人会撞成同一个 key，于是「第一个问到的 NapCat」会被后面每个机器人当成自己的身份。
+ */
+const IMPLEMENTATION_BY_BOT = new WeakMap<object, ImplementationInfo | null>()
+/** 实现端缓存（按 platform:selfId）：机器人重连换了对象时也能认出来 */
+const IMPLEMENTATION_CACHE = new Map<string, ImplementationInfo | null>()
 /** 机器人上线时间：Koishi 没有这个字段，第一次看到它在线时记一笔 */
 const ONLINE_SINCE = new Map<string, number>()
 
@@ -283,40 +343,135 @@ const displayNameOf = (platform: string, packageName: string): string => {
   return PLATFORM_META[platform]?.name ?? (platform || '未知')
 }
 
+/** 有 selfId 才按 platform:selfId 记，否则不同机器人会撞 key（见 IMPLEMENTATION_BY_BOT） */
+const hasStableKey = (bot: any): boolean => !!String(bot?.selfId ?? '').trim()
+
+/** 查缓存：undefined = 没问过；null = 问过但没问到 */
+const knownImplementation = (bot: any): ImplementationInfo | null | undefined => {
+  if (bot && typeof bot === 'object' && IMPLEMENTATION_BY_BOT.has(bot)) {
+    return IMPLEMENTATION_BY_BOT.get(bot) ?? null
+  }
+  if (!hasStableKey(bot)) return undefined
+  const key = botKey(bot)
+  // 一定要先用 has：Map.get 缺键时返回 undefined，直接 ?? null 会被当成「问过但没问到」，
+  // 于是这个机器人永远不再发问，卡片上一直是适配器插件的版本号
+  if (!IMPLEMENTATION_CACHE.has(key)) return undefined
+  return IMPLEMENTATION_CACHE.get(key) ?? null
+}
+
 /** 已经问到的实现端信息（没问过就是 undefined，卡片渲染路径不会触发网络请求） */
-export const cachedAdapterImplementation = (bot: any) => IMPLEMENTATION_CACHE.get(botKey(bot)) ?? undefined
+export const cachedAdapterImplementation = (bot: any) => knownImplementation(bot) ?? undefined
+
+/** 问一次实现端的超时：问不到就放弃，绝不让错误卡片和海报干等 */
+const IMPLEMENTATION_TIMEOUT_MS = 1500
+
+/**
+ * 带超时的 await，超时或报错都给 null。
+ *
+ * 注意一定要给原 promise 挂 `.catch`：Promise.race 输了的那条如果之后再 reject，
+ * 会变成 unhandledRejection，在 Koishi 里就是一条莫名其妙的崩溃日志。
+ */
+const withTimeout = async (task: any): Promise<any> => {
+  let timer: any
+  try {
+    return await Promise.race([
+      Promise.resolve(task).catch(() => null),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(null), IMPLEMENTATION_TIMEOUT_MS)
+        timer.unref?.()
+      })
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+/**
+ * 从 get_version_info 的返回里挖出实现端信息。
+ *
+ * 信封拆没拆不一定（`_get` 会拆、`_request` 不拆），所以带 `data.app_name` 的先剥一层。
+ */
+const pickImplementation = (payload: any): { name: string; version: string; protocol: string } | null => {
+  if (!payload || typeof payload !== 'object') return null
+  const data = payload?.data && typeof payload.data === 'object' && ('app_name' in payload.data)
+    ? payload.data
+    : payload
+  const name = String(data?.app_name ?? data?.appName ?? '').trim()
+  const version = String(data?.app_version ?? data?.appVersion ?? '').trim()
+  if (!name && !version) return null
+  return { name, version, protocol: String(data?.protocol_version ?? data?.protocolVersion ?? '').trim() }
+}
 
 /**
  * 问适配器要实现端名字与版本（只有 OneBot 一整类支持 get_version_info）。
  *
- * 带 1.5 秒超时：适配器没实现这个接口、或者对面不回，都直接放弃，绝不让海报卡住。
+ * 各家把这个接口暴露成什么样都有：适配器自己 define 的 `getVersionInfo`、
+ * 原样的 `get_version_info`、以及通用的 `_get` / `_request`（信封拆不拆也不一样）。
+ * 所以按顺序全试一遍，第一个认出 `app_name` 的就算数。
+ *
+ * 每一步都带 1.5 秒超时：适配器没实现这个接口、或者对面不回，都直接放弃。
+ * 结果（包括「问不到」）按机器人缓存，**只会问一次**。
  */
 export const queryAdapterImplementation = async (bot: any) => {
-  const key = botKey(bot)
-  if (IMPLEMENTATION_CACHE.has(key)) return IMPLEMENTATION_CACHE.get(key) ?? null
+  const cached = knownImplementation(bot)
+  if (cached !== undefined) return cached
 
   const result = await (async () => {
     const internal: any = bot?.internal
-    if (!internal || typeof internal.get_version_info !== 'function') return null
-    try {
-      const timeout = new Promise<null>((resolve) => {
-        const timer = setTimeout(() => resolve(null), 1500)
-        timer.unref?.()
-      })
-      const raw: any = await Promise.race([internal.get_version_info(), timeout])
-      if (!raw || typeof raw !== 'object') return null
-      const name = String(raw.app_name ?? raw.appName ?? '').trim()
-      const version = String(raw.app_version ?? raw.appVersion ?? '').trim()
-      const protocol = String(raw.protocol_version ?? raw.protocolVersion ?? '').trim()
-      if (!name && !version) return null
-      return { name, version, protocol }
-    } catch {
-      return null
+    if (!internal) return null
+    // 适配器用 Internal.define 声明时，方法挂在 internal 上；也有直接挂在 bot 上的
+    for (const name of ['getVersionInfo', 'getVersion', 'get_version_info']) {
+      for (const owner of [bot, internal]) {
+        if (typeof owner?.[name] !== 'function') continue
+        const hit = pickImplementation(await withTimeout(owner[name]()))
+        if (hit) return hit
+      }
     }
+    if (typeof internal._get === 'function') {
+      const hit = pickImplementation(await withTimeout(internal._get('get_version_info', {})))
+      if (hit) return hit
+    }
+    if (typeof internal._request === 'function') {
+      const response = await withTimeout(internal._request('get_version_info', {}))
+      if (Number(response?.retcode ?? 0) === 0) {
+        const hit = pickImplementation(response?.data ?? response)
+        if (hit) return hit
+      }
+    }
+    return null
   })()
 
-  IMPLEMENTATION_CACHE.set(key, result)
+  if (bot && typeof bot === 'object') IMPLEMENTATION_BY_BOT.set(bot, result)
+  if (hasStableKey(bot)) IMPLEMENTATION_CACHE.set(botKey(bot), result)
   return result
+}
+
+/**
+ * 错误卡片底部「Adapter / 适配器」那一栏。
+ *
+ * 关键是**先问一句实现端再取快照**：捕获错误时 `e.bot.adapter` 是同步算出来的，
+ * 那时还没人问过协议端是谁，卡片上就只有 `OneBot` 一个空壳名字、图标也只能是万能拼图。
+ * 这里补问一次（带超时、按机器人缓存，只问一遍），之后 NapCat 就能印成 `onebot(nc)`
+ * 并配上 NapCat 的图标。
+ *
+ * @param bot 兼容层的 KkkBot 包装**或** Koishi 原生 Bot，两种都收
+ */
+export const adapterCardInfo = async (bot: any): Promise<{ name: string; version: string; implementationName: string }> => {
+  const unknown = { name: '未知适配器', version: '', implementationName: '' }
+  try {
+    const koishiBot: any = bot?.bot ?? bot
+    if (!koishiBot) return unknown
+    await queryAdapterImplementation(koishiBot)
+    const info = resolveAdapterInfo(koishiBot)
+    return {
+      name: info.shortLabel || info.displayName || info.name || '未知适配器',
+      version: info.version || '',
+      // 选图标靠它：平台名各家都是 onebot，只有实现端名字能分出 NapCat / LLOneBot
+      implementationName: info.implementationName || ''
+    }
+  } catch {
+    return unknown
+  }
 }
 
 /**
@@ -329,11 +484,17 @@ export const resolveAdapterInfo = (bot: any): KkkAdapterInfo => {
   const pkg = resolvePackage(bot)
   const implementation = cachedAdapterImplementation(bot)
   const version = implementation?.version || pkg.version || '未知'
+  const name = platform || '未知'
+  // 各家协议端都自报 onebot，光看平台名分不出来，所以拼上实现端代号：onebot(nc)
+  const code = implementationCode(implementation?.name ?? '')
 
   return {
     // 前四个字段是「身份」，一律保持 Koishi 的原值；只有下面这些是这次修好的展示信息
-    name: platform || '未知',
+    name,
     displayName: implementation?.name || displayNameOf(platform, pkg.packageName),
+    implementationName: implementation?.name ?? '',
+    implementationCode: code,
+    shortLabel: code ? `${name}(${code})` : name,
     version,
     platform: platform || '未知',
     protocol: platform,

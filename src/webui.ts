@@ -1,12 +1,15 @@
 /**
- * kkk 的配置 WebUI —— 照搬原版 SPA，并且**免登录**。
+ * kkk 的配置 WebUI —— 照搬原版 SPA。
  *
  * 界面就是 koishi-plugin-kkk 自带的那个 React 面板（assets/web/），服务端按它的接口契约实现。
  *
- * ## 登录策略
- * 不设独立口令。只认 Koishi 的 **auth 插件**：
- *   - auth 没启用（当前部署就是关的）→ 全部免登录，直接进；
- *   - auth 启用了 → 要求控制台已登录（用控制台的 cookie 查 token 表）。
+ * ## 登录策略：**只有一个入口**
+ * 面板不做独立鉴权，只认 **Koishi 控制台**。`/kkk` 这条路由现在是
+ * 「控制台专属」：必须由控制台页面（左侧边栏「kkk 配置」）拿 RPC `kkk/panel-token`
+ * 换一个一次性令牌，拼成 `/kkk?panel=<token>` 才能打开；**直接访问 /kkk 一律 404**。
+ *
+ * 这样即使宿主没装 auth 插件（整台控制台本身就不设防），也不会凭空多出一个
+ * 「谁都能改配置」的公网地址 —— 这才是之前那个独立 /kkk 页面真正的风险。
  *
  * ## 原版 SPA 的契约
  *   POST /api/v1/login    → { code, data: { accessToken, userId, refreshToken }, message }
@@ -251,10 +254,11 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
   /**
    * 面板 token：控制台页面（左侧边栏「kkk 配置」）通过 RPC 向服务端要一个，
    * 再拼到 iframe 地址上（`/kkk?panel=<token>`）。服务端校验通过后给面板发 cookie，
-   * 后续静态资源与接口都靠它放行。
+   * 后续静态资源与接口都靠它放行 —— **这是打开面板的唯一凭据**。
    *
-   * 关键点：RPC 监听器带 `authority: 4`，**未登录或权限不足的客户端根本调不到**，
-   * 所以「不登录就打不开面板」这件事是服务端强制的，不依赖前端自觉。
+   * 关键点：RPC 监听器带 `authority: 4`。auth 插件会在 `console/intercept` 里拦掉
+   * 未登录 / 权限不足的客户端（没装 auth 插件时那条拦截器不存在，控制台本身就不设防，
+   * 此时任何人都能打开控制台，也就都能打开面板 —— 这是控制台的门禁，不是面板的）。
    */
   const panelTokens = new Map<string, number>()
   const PANEL_TOKEN_TTL = 10 * 60 * 1000
@@ -265,6 +269,12 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
     return value
   }
 
+  /**
+   * 令牌是否有效。
+   *
+   * **滑动续期**：每次校验通过都把有效期往后推。否则面板开着超过 10 分钟再去
+   * 取静态资源/调接口就会被判过期（cookie 还是那份），用户看到的就是半张白屏。
+   */
   const panelTokenValid = (value: unknown): boolean => {
     const key = String(value || '')
     const expire = panelTokens.get(key)
@@ -273,17 +283,21 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
       panelTokens.delete(key)
       return false
     }
+    panelTokens.set(key, Date.now() + PANEL_TOKEN_TTL)
     return true
   }
+
+  /** 装没装 auth 插件：没装时控制台本身不设防，再要求 this.auth 会让面板永远打不开 */
+  const hasAuthService = (): boolean => !!(ctx as any).get?.('auth')
 
   try {
     const consoleService: any = (ctx as any).console
     if (typeof consoleService?.addListener !== 'function') {
-      logger.warn('[kkk] 控制台没有 addListener，面板 token RPC 未注册（面板将无法从控制台获取登录态）')
+      logger.warn('[kkk] 控制台没有 addListener，面板 token RPC 未注册（面板将无法打开）')
     } else {
       consoleService.addListener('kkk/panel-token', function (this: any) {
         // this 是发起调用的控制台客户端，auth 由 auth 插件写入
-        if (!this?.auth) throw new Error('请先登录 Koishi 控制台')
+        if (hasAuthService() && !this?.auth) throw new Error('请先登录 Koishi 控制台')
         return issuePanelToken()
       }, { authority: 4 })
     }
@@ -316,7 +330,7 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
   /**
    * 请求有没有带**控制台发的面板令牌**。
    *
-   * 这是「只能从控制台 iframe 进面板」的唯一凭据：令牌由 RPC \`kkk/panel-token\` 下发，
+   * 这是「只能从控制台进面板」的唯一凭据：令牌由 RPC `kkk/panel-token` 下发，
    * 那个 RPC 走控制台登录态（authority 4），没登录控制台根本调不到 → 也就拿不到令牌。
    * 这里**不看 webUiAuth，也不依赖宿主装没装 auth 插件**，所以任何部署下都堵得住。
    */
@@ -324,13 +338,37 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
     const panelCookie = new RegExp(COOKIE_NAME + '_panel=([0-9a-f]+)').exec(String(request?.headers?.cookie || ''))
     if (panelCookie && panelTokenValid(panelCookie[1])) return true
     const header = String(request?.headers?.authorization || request?.headers?.['x-access-token'] || '')
-    if (header && panelTokenValid(header.replace(/^Bearer\\s+/i, ''))) return true
+    // 注意是 \s 不是 \\s：写在正则字面量里 \\s 会去匹配一个真的反斜杠，永远匹配不上
+    if (header && panelTokenValid(header.replace(/^Bearer\s+/i, ''))) return true
     const url = String(request?.url || '')
     const panel = /[?&]panel=([0-9a-f]+)/.exec(url)
     if (panel && panelTokenValid(panel[1])) return true
     const token = /[?&]token=([0-9a-f]+)/.exec(url)
     return !!(token && panelTokenValid(token[1]))
   }
+
+  /**
+   * 页面 / 登录接口能不能放行：**只认控制台令牌**。
+   *
+   * 以前这里是「装了 auth 插件才要求登录」，于是没装 auth 的部署上
+   * `/kkk` 就是一个谁都能打开、还能改配置的公网地址 —— 现在不看那套了。
+   */
+  const panelAllowed = (request: any): boolean => panelTokenOk(request)
+
+  /**
+   * 有没有带**面板自己发的**会话凭据（Bearer）。
+   *
+   * 这个凭据只能从 `/kkk/api/v1/login` 拿到，而那条路已经要求控制台令牌了，
+   * 所以认它不等于开口子 —— 但不认它的话，SPA 换完凭据再调接口会被我们自己挡掉。
+   */
+  const hasValidBearer = (request: any): boolean => {
+    const header = String(request?.headers?.authorization || request?.headers?.['x-access-token'] || '')
+    return !!header && tokens.has(header.replace(/^Bearer\s+/i, ''))
+  }
+
+  /** 数据接口的放行条件：控制台令牌 / 面板会话凭据 /（装了 auth 且已登录的）控制台 cookie */
+  const apiAllowed = (request: any): boolean =>
+    panelTokenOk(request) || hasValidBearer(request) || (authRequired() && authed(request))
 
   const ok = (response: any, data: any = null, message = '') => {
     response.type = 'application/json; charset=utf-8'
@@ -350,10 +388,13 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
    * （assets/web 里已经替换过），服务端两个路径都注册一份，外部按原路径调也照样能用。
    */
   const loginHandler = async (response: any) => {
-    // 免登录模式下任何输入都放行（原版会弹登录框，随便点一下即可进入）
-    if (!(await consoleAuthed(response.request))) {
-      logger.warn('[kkk] 配置面板需要先登录 Koishi 控制台')
-      return fail(response, 401, '需要先登录 Koishi 控制台')
+    /**
+     * 拿到控制台令牌才发面板自己的会话凭据 —— 否则没人令牌也能换到 Bearer，
+     * 等于绕开了页面那道门（页面 404 但接口照通）。
+     */
+    if (!panelAllowed(response.request)) {
+      logger.warn('[kkk] 拒绝面板登录：/kkk 只能从 Koishi 控制台侧边栏进入')
+      return fail(response, 401, '需要从 Koishi 控制台侧边栏进入')
     }
     ok(response, issueToken(), '登录成功')
   }
@@ -386,7 +427,7 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
    * 所以 data 一定要给（哪怕空对象），否则前端会直接抛「获取配置失败」。
    */
   server.get('/kkk/v1/config', (response: any) => {
-    if (!authed(response)) return fail(response, 401, '鉴权失败: 缺少authorization')
+    if (!apiAllowed(response)) return fail(response, 401, '鉴权失败: 需要从 Koishi 控制台侧边栏进入')
     // 面板面向的是 karin 那份 config.json（画质 / 发送内容 / 推送 / 渲染…），
     // 在 Koishi 这边它就存在 `upstream` 里，启动时同步进 config.json。
     // 另外附一份 `qq`（「QQ 适配器」分类）：面板/切片/番剧选集/卡片识别这些是 Koishi 侧才有的开关，
@@ -396,7 +437,7 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
   })
 
   server.post('/kkk/v1/config', async (response: any) => {
-    if (!authed(response)) return fail(response, 401, '鉴权失败: 缺少authorization')
+    if (!apiAllowed(response)) return fail(response, 401, '鉴权失败: 需要从 Koishi 控制台侧边栏进入')
     try {
       const body: any = response.request?.body
       if (!body || typeof body !== 'object') throw new Error('请求体不是配置对象')
@@ -463,8 +504,15 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
    * 未登录时不要把 token 传进来，也就不会给面板发 cookie。
    */
   server.get('/kkk/api/status', async (response: any) => {
+    /**
+     * `authRequired` **恒为 true**：面板现在总是要控制台令牌（见 panelAllowed）。
+     *
+     * 控制台前端拿这个值决定要不要先去 RPC 换令牌 —— 返回 false 的话它会直接把
+     * iframe 指向裸的 `/kkk`，而那条路已经被 404 掉了，面板就打不开了。
+     * 所以这里不能照 `webUiAuth` 如实报。
+     */
     ok(response, {
-      authRequired: authRequired(),
+      authRequired: true,
       authed: await consoleAuthed(response),
     }, '')
   })
@@ -549,12 +597,12 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
   }
 
   server.get('/kkk/v1/bots', (response: any) => {
-    if (!authed(response)) return fail(response, 401, '鉴权失败: 缺少authorization')
+    if (!apiAllowed(response)) return fail(response, 401, '鉴权失败: 需要从 Koishi 控制台侧边栏进入')
     ok(response, botList(), '')
   })
 
   server.get('/kkk/v1/bots/:id/groups', async (response: any) => {
-    if (!authed(response)) return fail(response, 401, '鉴权失败: 缺少authorization')
+    if (!apiAllowed(response)) return fail(response, 401, '鉴权失败: 需要从 Koishi 控制台侧边栏进入')
     ok(response, await botChannels(String(response.params?.id ?? '')), '')
   })
 
@@ -570,7 +618,7 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
    *   - 每一项带上 groupName / botName / isOnline，拿不到就只给 id，前端会退回显示 id。
    */
   server.post('/kkk/v1/groups/batch', async (response: any) => {
-    if (!authed(response)) return fail(response, 401, '鉴权失败: 缺少authorization')
+    if (!apiAllowed(response)) return fail(response, 401, '鉴权失败: 需要从 Koishi 控制台侧边栏进入')
     try {
       const body: any = response.request?.body ?? {}
       const raw = Array.isArray(body?.groups) ? body.groups : []
@@ -619,21 +667,18 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
    * 手动判前缀最省事也最兼容。
    */
   /**
-   * 面板页面与静态资源的鉴权。
+   * 面板页面与静态资源的鉴权：**只放控制台那条路**。
    *
-   * `webUiAuth` 关（默认）时一律放行 —— 打开 `/kkk` 就能改配置；
-   * 打开后要求**已登录 Koishi 控制台**（认控制台的 cookie），没登录直接给提示页，
-   * 这样未登录状态下连 SPA 的静态资源和 /kkk/assets/config 这种前端路由也拿不到。
+   * 没有控制台令牌（也就是直接敲 `/kkk`、或者别人拿旧链接来）一律 404，
+   * 于是 SPA 的静态资源、/kkk/assets/config 这种前端路由也一并拿不到。
+   *
+   * ⚠️ 以前这里是「没装 auth 插件就一律放行」，等于把配置面板挂在一个公网地址上；
+   * 换成只看控制台令牌之后，`webUiAuth` 不再决定「能不能进」，它只影响数据接口那条路
+   * （见 apiAllowed）。注意**不能顺手加 `consoleAuthed` 兜底**：那等于又给直链开了口子。
    */
   const pageDenied = async (response: any): Promise<boolean> => {
-    /**
-     * 鉴权就用控制台登录态：装了 auth 插件（且 webUiAuth 开着）时认控制台 cookie，
-     * 没登录给 404。**额外加令牌校验会把控制台 iframe 也挡掉**（实测面板直接打不开），
-     * 按用户要求不做那层校验。
-     */
-    if (!authRequired()) return false
-    if (await consoleAuthed(response.request)) return false
-    logger.warn('[kkk] 拒绝访问面板：需要先登录 Koishi 控制台')
+    if (panelAllowed(response.request)) return false
+    logger.warn('[kkk] 拒绝访问面板：/kkk 只能从 Koishi 控制台侧边栏进入')
     response.status = 404
     response.type = 'text/plain; charset=utf-8'
     response.body = 'Not Found'
@@ -708,13 +753,13 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
    */
 
   server.get('/kkk/api/config', (response: any) => {
-    if (!authed(response)) return fail(response, 401, '未登录')
+    if (!apiAllowed(response)) return fail(response, 401, '未登录')
     const { upstream, ...options } = config || {}
     ok(response, { options, upstream: upstream || {} }, '')
   })
 
   server.post('/kkk/api/save', async (response: any) => {
-    if (!authed(response)) return fail(response, 401, '未登录')
+    if (!apiAllowed(response)) return fail(response, 401, '未登录')
     try {
       const body: any = response.request?.body || {}
       const patch: any = { ...(body.options || {}) }
@@ -730,5 +775,11 @@ export function registerWebUi ({ ctx, config, rawConfig, logger, pluginRoot }: W
     }
   })
 
-  logger.info('[kkk] 配置面板: /kkk（原版界面，免登录）；简易编辑页: /kkk/edit')
+  /**
+   * 这里**故意不打入口地址**。
+   *
+   * 配置面板只在 Koishi 控制台左侧边栏里出现（「kkk 配置」），启动时再往日志里
+   * 贴一个 /kkk 链接只会让人以为那是个需要单独记住的入口 —— 而且之前的
+   * 「简易编辑页 /kkk/edit」早就删掉了，那行提示等于指了一个不存在的页面。
+   */
 }

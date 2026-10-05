@@ -25,6 +25,8 @@ import {
 } from '../../../player'
 // 解析阶段（「下载进度」指令读的就是这里登记的状态）
 import { DOWNLOAD_STAGES, clearParseStage, updateDownloadStage } from './Network/Downloader'
+// 「没拿到消息 ID」这种失败不能重试（详见 sendGroupFile）
+import { isUnconfirmedSendError } from '../../../compat/sendError'
 
 /** 发送结果里把消息 ID 抠出来（不同适配器返回的形状不一样：对象带 messageId、或者就是字符串数组） */
 const reportSent = (options: uploadFileOptions | undefined, sent: any): void => {
@@ -268,39 +270,67 @@ export const uploadFile = async (event: Message, file: fileInfo, videoUrl: strin
   // 判断是否需要压缩后再上传
   if (Config.app.compress && file.totalBytes > Config.app.compresstrigger) {
     const Duration = await getMediaDuration(file.filepath)
-    logger.warn(
-      logger.yellow(
-        `视频大小 (${file.totalBytes} MB) 触发压缩条件（设定值：${Config.app.compresstrigger} MB），正在进行压缩至${Config.app.compressvalue} MB...`
+    /**
+     * ⚠️ 读不出时长就别压了。
+     *
+     * ffprobe 解不动这个编码时（日志里就是 `[hevc …] Unknown profile bitstream`）
+     * `Duration` 是 NaN，算出来的目标码率也是 NaN，ffmpeg 必然失败 ——
+     * 而压缩产物一旦不存在，后面拿它去发就变成「上传文件不存在」，
+     * 用户的观感是「视频压根发不出去」。解不动的时候老实发原文件。
+     */
+    if (!Number.isFinite(Duration) || Duration <= 0) {
+      logger.warn('读不出视频时长（ffmpeg 解不动这个编码），放弃压缩，直接发原文件')
+    } else {
+      logger.warn(
+        logger.yellow(
+          `视频大小 (${file.totalBytes} MB) 触发压缩条件（设定值：${Config.app.compresstrigger} MB），正在进行压缩至${Config.app.compressvalue} MB...`
+        )
       )
-    )
-    const message = [
-      segment.text(
-        `视频大小 (${file.totalBytes} MB) 触发压缩条件（设定值：${Config.app.compresstrigger} MB），正在进行压缩至${Config.app.compressvalue} MB...`
-      ),
-      options?.message_id ? segment.reply(options.message_id) : segment.text('')
-    ]
+      const message = [
+        segment.text(
+          `视频大小 (${file.totalBytes} MB) 触发压缩条件（设定值：${Config.app.compresstrigger} MB），正在进行压缩至${Config.app.compressvalue} MB...`
+        ),
+        options?.message_id ? segment.reply(options.message_id) : segment.text('')
+      ]
 
-    // 「正在压缩」属于过程提示：不进合并转发
-    const msg1 = await withoutForwardCollect(() => karin.sendMsg(selfId, contact, message))
-    // 计算目标视频平均码率
-    const targetBitrate = Common.calculateBitrate(Config.app.compresstrigger, Duration) * 0.75
-    // 执行压缩
-    const startTime = Date.now()
-    const outputPath = `${Common.tempDri.video}tmp_${Date.now()}.mp4`
-    await compressVideo({ inputPath: file.filepath, outputPath, targetBitrate })
-    file.filepath = outputPath
-    const endTime = Date.now()
-    // 再次检查大小
-    newFileSize = await Common.getVideoFileSize(file.filepath)
-    logger.debug(
-      `原始视频大小为: ${file.totalBytes.toFixed(1)} MB, ${logger.green(`经 FFmpeg 压缩后最终视频大小为: ${newFileSize.toFixed(1)} MB，原视频文件已删除`)}`
-    )
+      // 「正在压缩」属于过程提示：不进合并转发
+      const msg1 = await withoutForwardCollect(() => karin.sendMsg(selfId, contact, message))
+      // 计算目标视频平均码率
+      const targetBitrate = Common.calculateBitrate(Config.app.compresstrigger, Duration) * 0.75
+      // 执行压缩
+      const startTime = Date.now()
+      const outputPath = `${Common.tempDri.video}tmp_${Date.now()}.mp4`
+      const compressed = await compressVideo({ inputPath: file.filepath, outputPath, targetBitrate })
+      const endTime = Date.now()
+      /**
+       * ⚠️ 压缩失败必须**接着用原文件**，不能直接把 filepath 换成那个不存在的产物。
+       *
+       * 以前这里不看 `compressVideo` 的返回值，`file.filepath = outputPath` 一律执行，
+       * 于是 ffmpeg 一失败（编码不认识 / 缺少解码器）就变成「上传文件不存在」——
+       * 视频本来是好的，却一条都发不出去。
+       */
+      if (!compressed) {
+        logger.warn('视频压缩失败，改用原文件发送（体积可能超限，必要时关掉「视频压缩」）')
+        const message2 = [
+          segment.text('视频压缩失败，改为发送原文件'),
+          segment.reply(msg1.messageId)
+        ]
+        await withoutForwardCollect(() => karin.sendMsg(selfId, contact, message2))
+      } else {
+        file.filepath = outputPath
+        // 再次检查大小
+        newFileSize = await Common.getVideoFileSize(file.filepath)
+        logger.debug(
+          `原始视频大小为: ${file.totalBytes.toFixed(1)} MB, ${logger.green(`经 FFmpeg 压缩后最终视频大小为: ${newFileSize.toFixed(1)} MB，原视频文件已删除`)}`
+        )
 
-    const message2 = [
-      segment.text(`压缩后最终视频大小为: ${newFileSize.toFixed(1)} MB，压缩耗时：${((endTime - startTime) / 1000).toFixed(1)} 秒`),
-      segment.reply(msg1.messageId)
-    ]
-    await withoutForwardCollect(() => karin.sendMsg(selfId, contact, message2))
+        const message2 = [
+          segment.text(`压缩后最终视频大小为: ${newFileSize.toFixed(1)} MB，压缩耗时：${((endTime - startTime) / 1000).toFixed(1)} 秒`),
+          segment.reply(msg1.messageId)
+        ]
+        await withoutForwardCollect(() => karin.sendMsg(selfId, contact, message2))
+      }
+    }
   }
 
   /**
@@ -377,6 +407,16 @@ export const uploadFile = async (event: Message, file: fileInfo, videoUrl: strin
     try {
       return await bot.uploadFile(contact, File, name)
     } catch (error) {
+      /**
+       * 换文件名重试**只适用于「名字不合法」这类失败**（QQ 的 upload_prepare 会因为
+       * 换行 / 超长 / 非法字符直接参数错误，而文件本身没问题）。
+       *
+       * ⚠️ 但「没拿到消息 ID」**绝对不能重试**：它只说明没确认，不说明没发出去 ——
+       * LLOneBot 发视频就是不回 `message_id` 的，文件其实已经进了群。
+       * 以前这里一视同仁地重试，结果用户一条指令收到**两条一模一样的视频**，
+       * 还额外收到一张「发送失败」的错误卡片。
+       */
+      if (isUnconfirmedSendError(error)) throw error
       logger.warn(
         `群文件名「${name}」发送失败，改用临时文件名重试一次：` + describeError(error)
       )
@@ -434,10 +474,9 @@ export const uploadFile = async (event: Message, file: fileInfo, videoUrl: strin
     // 发送阶段结束（成功失败都要清，否则「下载进度」会一直卡在「正在发送」）
     clearParseStage()
     const filePath = file.filepath
-    Common.registerVideoPreview(filePath, Config.app.removeCache, 30 * 60 * 1000)
-    logger.mark(
-      `临时预览地址：http://localhost:${previewPort()}/kkk/ssr/video/${encodeURIComponent(filePath.split('/').pop() ?? '')}`
-    )
+    const previewInfo = Common.registerVideoPreview(filePath, Config.app.removeCache, 30 * 60 * 1000)
+    // 预览地址用随机令牌寻址，不暴露磁盘文件名
+    logger.mark(`临时预览地址：http://localhost:${previewPort()}/kkk/ssr/video/${previewInfo.token}`)
     if (Config.app.removeCache) {
       logger.info(`文件 ${filePath} 将在 30 分钟后删除`)
     }

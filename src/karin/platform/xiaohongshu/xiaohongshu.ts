@@ -1,8 +1,7 @@
 import fs from 'node:fs'
-import { cardImageActions, sendCopyJumpMessage, withCardActions, xiaohongshuShareUrl } from '@/module/utils/QqPanel'
+import { replyWithCardActions, sendCopyJumpMessage, sendSlicedImageWithActions, xiaohongshuShareUrl } from '@/module/utils/QqPanel'
 import { sendParseTip } from '@/module/utils/parseTip'
 import { cardImageKeyOf, imageSourcesOf, rememberCardImages, rememberLastCardKey } from '@/module/utils/CardImageCache'
-import { sendSlicedImage } from '@/module/utils/ImageSlice'
 
 import type { XiaohongshuNoteCommentsResponse, XiaohongshuEmojiListResponse } from '@ikenxuan/amagi'
 import type { RichTextEmojiDefinition } from '@kkk/richtext'
@@ -284,7 +283,7 @@ export class Xiaohongshu extends Base {
          * 封面卡下面挂「提取封面图」按钮（**同一条消息**，见 withCardActions）。
          * 渲染失败时 `noteInfoImg` 是 undefined，这时不发（原来会把 undefined 交给 reply）。
          */
-        await this.e.reply(withCardActions(this.e, noteInfoImg, cardKey, { cover: true }))
+        await replyWithCardActions(this.e, noteInfoImg, cardKey, { cover: true })
       }
       logger.mark('[小红书] 详情卡片已发送')
     }
@@ -443,7 +442,7 @@ export class Xiaohongshu extends Base {
           commentPics: xiaohongshuCommentPics(processedComments)
         })
         /** 评论区长图下面挂「提取评论区图片」按钮（同一条消息内） */
-        await sendSlicedImage(this.e, commentListImg, cardImageActions(this.e, { comment: true, key: cardKey }))
+        await sendSlicedImageWithActions(this.e, commentListImg, { comment: true, key: cardKey })
       }
     }
 

@@ -138,6 +138,106 @@ const officialQq = () => ({ bot: { platform: 'qq' }, contact: { peer: 'c2c:1', i
     }
     check('OneBot：要么返回图片段、要么返回 null —— 绝不能是 markdown',
       one === null || !render(one).includes('[markdown]'), one === null ? 'null' : render(one))
+
+    /**
+     * **Milky 同样不认 markdown**（用户反馈：「为什么 milky 适配器会发这个
+     * `![#420px #315px](https://…)`」）。
+     *
+     * 根因：这份「不渲染 markdown」的名单在四个文件里各写了一遍，**都不含 milky** ——
+     * 于是 Milky 被当成「会渲染 markdown」，评论区图片 / 封面全发成裸文本。
+     */
+    let milky = null
+    try {
+      milky = await qqPanel.buildMarkdownImageMessage([png], 420, 'milky')
+    } catch (error) {
+      check('Milky：调用本体不抛', false, String(error?.message ?? error))
+    }
+    check('Milky：也返回图片段 —— 绝不能是 markdown',
+      milky === null || !render(milky).includes('[markdown]'), milky === null ? 'null' : render(milky))
+  }
+
+  console.log('\n=== 3.5 图片切片 / 错误卡片：只有官方 QQ 才用 markdown ===')
+  {
+    /**
+     * 判据必须**正向点名**（「是官方 QQ 才用」），不能写成「不是 OneBot 就用」。
+     *
+     * 以前 `ImageSlice` 里就是 `markdownMode = !isOneBotLike(platform)` —— 于是凡是
+     * **认不出来**的平台（`platformOf()` 拿到空串、或者 telegram / discord / satori 这类
+     * 根本不是 QQ 的适配器）全被当成官方 QQ，发下去一串 `![#1440px #2000px](url)` 裸文本，
+     * 图一张都出不来（用户反馈：「适配器不等于 qq（platform）为什么会使用 md 格式发送」）。
+     */
+    const md = require(path.join(lib, 'compat/imageMarkdown.js'))
+    const slice = require(path.join(lib, 'karin/module/utils/ImageSlice.js'))
+    check('判据只有一处（canUseMarkdownImage 已导出，别处都来问它）', typeof md.canUseMarkdownImage === 'function')
+    /**
+     * **白名单**：只有 QQ 和 QQ 频道。
+     *
+     * ⚠️ 判据必须**正向点名**（「是官方 QQ 才用」），不能写成「不是 OneBot 就用」——
+     * 以前 `ImageSlice` 里就是 `markdownMode = !isOneBotLike(platform)`，于是凡是
+     * **认不出来**的平台（`platformOf()` 拿到空串、或者 telegram / discord / satori /
+     * **milky** 这类）全被当成官方 QQ，发下去一串 `![#1440px #2000px](url)` 裸文本，
+     * 图一张都出不来（用户反馈过好几次）。
+     *
+     * 黑名单的失效方式是「**新协议端默认被放行**」—— 而这里放行的代价就是一堆乱码。
+     */
+    for (const platform of ['qq', 'QQ', 'qqbot', 'qq-foo']) {
+      check(platform + ' → 用 markdown', md.canUseMarkdownImage(platform) === true, String(md.canUseMarkdownImage(platform)))
+    }
+    /**
+     * ⚠️ `qqguild`（QQ 频道）在**这一份**名单里是 false —— 图片 md 只有 `qq` 认。
+     * 它走的是另一套编码器，带尺寸的图片写法到那边是纯文本，图就变成一串代码
+     * （3.7.2 引入图片 md 时就是这个结论，`smoke-md-image` 里那条用例盯着它）。
+     * **文字** md（代码块 / 面板按钮）频道是认的 —— 那看 `supportsMarkdown`，别混。
+     */
+    for (const platform of ['qqguild', 'onebot', 'napcat', 'lagrange', 'go-cqhttp', 'chronocat', 'milky',
+      'discord', 'telegram', 'kook', 'satori', 'wechat', 'feishu', 'dingtalk', 'bilibili', '']) {
+      check((platform || '（空）') + ' → 不用 markdown 图片', md.canUseMarkdownImage(platform) === false, String(md.canUseMarkdownImage(platform)))
+    }
+    {
+      /** 上面那条的反证：文字 md 的名单**仍然**包含 QQ 频道，两份名单不许合并 */
+      check('  文字 md 仍然认 QQ 频道（图片 md 不认，两份名单有意分开）',
+        qqPanel.supportsMarkdown('qqguild') === true && qqPanel.supportsMarkdown('qq') === true
+        && qqPanel.supportsMarkdown('onebot') === false && md.canUseMarkdownImage('qqguild') === false)
+    }
+    {
+      /**
+       * 全仓库只允许 `compat/imageMarkdown.ts` 一处写这份正则 ——
+       * Milky 就是靠「四份名单各写各的、都漏了它」溜过去的。
+       */
+      const files = ['compat/imageMarkdown.ts', 'karin/module/utils/ImageSlice.ts',
+        'karin/module/utils/QqPanel.ts', 'karin/module/utils/ParseForward.ts']
+      /**
+       * 匹配 `/onebot|napcat|lagrange`（正则字面量开头那个斜杠要带上）——
+       * `ImageSlice` 里还有个 `QQ_FAMILY`（`/^(qq|qqguild|onebot|…`）也会命中裸的那三个词，
+       * 但那是「QQ 那一族」的另一份名单，不是这一份。
+       */
+      const owners = files.filter((file) =>
+        /\/onebot\|napcat\|lagrange/.test(fs.readFileSync(path.join(root, 'src', file), 'utf8')))
+      check('这份名单全仓库只有一处定义（在 compat/imageMarkdown.ts）',
+        owners.length === 1 && owners[0] === 'compat/imageMarkdown.ts', owners.join(', '))
+      /**
+       * 两个判据**不能混**：`isOneBotLike` 问的是「走不走 OneBot 私有协议」（合并转发），
+       * Milky 不是 OneBot；`canUseMarkdownImage` 是白名单，Milky 不在里面。
+       */
+      check('  两个判据没混成一个（milky 两个都不算）',
+        md.isOneBotLike('milky') === false && md.canUseMarkdownImage('milky') === false
+        && md.isOneBotLike('onebot') === true && md.canUseMarkdownImage('onebot') === false)
+    }
+
+    /**
+     * 真的跑一遍 `sliceImageToElements`（错误卡片走的就是它）：
+     * 空的 / 认不出来的平台也必须拿回**图片段**，绝不能是 markdown。
+     * 用 1x1 的 data URI，不联网、也不用切片。
+     */
+    const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8AAAwAB/wD/AAf/AAAAAElFTkSuQmCC'
+    /**
+     * `qqguild` 也在这组里（图片 md 只有 `qq` 认，见上面 3.5 开头那组）。
+     */
+    for (const platform of ['onebot', 'qqguild', 'milky', 'discord', '']) {
+      const out = await slice.sliceImageToElements([png], platform)
+      const text = out === null ? '' : render(out)
+      check((platform || '（空）') + ' → 返回图片段（不是 markdown）', !!text && !text.includes('[markdown]'), text.slice(0, 40))
+    }
   }
 
   console.log('\n=== 4. 静态闸门：还有谁在造 <qqbot-cmd-input> ===')

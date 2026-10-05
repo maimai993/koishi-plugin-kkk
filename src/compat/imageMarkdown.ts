@@ -32,22 +32,48 @@ import { logger } from './logger'
 import { tryGetRuntime } from './runtime'
 import { segment } from './segment'
 
-/** OneBot 系：不渲染 markdown（见文件头） */
-const ONEBOT_LIKE = /onebot|napcat|lagrange|go-?cqhttp|chronocat|mirai/i
+/**
+ * **OneBot 系**（NapCat / Lagrange / go-cqhttp / Chronocat…）。
+ *
+ * 这是「走不走 OneBot 那套私有协议」的判据（合并转发、表情回应那些接口），
+ * **不是**「认不认 markdown」—— 后者是 {@link canUseMarkdownImage}。
+ * Milky 不是 OneBot，所以它**不在这个名单里**。
+ *
+ * ⚠️ 全仓库只有这一处定义，别在别的文件里再抄一份正则。
+ */
+export const isOneBotLike = (platform: string): boolean =>
+  /onebot|napcat|lagrange|go-?cqhttp|chronocat|mirai/i.test(String(platform ?? ''))
 
 /**
- * 会渲染 markdown 图片的平台。
+ * **能渲染 markdown 图片的平台**（白名单）—— 只有 **QQ 官方机器人**。
  *
- * 只认 `qq` 这一个平台名 —— QQ 的 markdown 是**官方机器人**能力，
- * `qqguild`（频道）走的是另一套编码器，md 元素在那里会被当成纯文本原样发出去。
+ * ## ⚠️ 图片 md 和文字 md 不是一回事，别合并成一份名单
+ *
+ * - **文字** markdown（代码块、面板按钮、提示语）：QQ（`qq`）和 **QQ 频道**（`qqguild`）都认，
+ *   那份判据在 `QqPanel.supportsMarkdown`；
+ * - **图片** markdown（`![#600px #400px](地址)` 这种带尺寸的写法）**只有 `qq` 认** ——
+ *   `qqguild` 走的是另一套编码器，md 元素到那边会被当成纯文本原样发出去，
+ *   图片就变成一串看不懂的代码。**所以这里必须把 `qqguild` 排除掉。**
+ *   （3.7.2 引入图片 md 时就是这个结论，改动前请先看 `smoke-md-image` 那条用例。）
+ *
+ * ## ⚠️ 必须写成**白名单**，不能写成黑名单
+ *
+ * 以前是「先排除 OneBot 系，剩下都用 md」，结果**每出一个新协议端就漏一次**：
+ * Discord / Telegram / Satori / **Milky** 都先后被当成过官方 QQ，
+ * 图片全发出去变成一串看不懂的代码（用户反馈过不止一次）。
+ * 黑名单的失效方式是「**新东西默认被放行**」，而这里放行的代价就是一堆乱码。
+ *
+ * 反过来写就没有这个问题：新协议端**默认不发 md**，最坏情况只是「少了点排版」，
+ * 图片照样出得来 —— 宁可朴素，不要乱码。
+ *
+ * ## 匹配范围
+ * `qq` / `qqbot`，以及带后缀的那些（`qq-xxx`）。
+ * 别的形式（`qqguild` / `onebot` / `napcat` / `milky` / `satori` / 空串…）一律不算。
  */
-const canUseMarkdownImage = (platform: string): boolean => {
-  const name = String(platform || '').toLowerCase()
-  if (!name) return false
-  if (ONEBOT_LIKE.test(name)) return false
-  if (name.startsWith('qqguild')) return false
-  return name === 'qq' || name.startsWith('qq-') || name.startsWith('qqbot')
-}
+const MARKDOWN_IMAGE_PLATFORMS = /^qq(bot)?(-|$)/i
+
+export const canUseMarkdownImage = (platform: string): boolean =>
+  MARKDOWN_IMAGE_PLATFORMS.test(String(platform ?? '').trim())
 
 /** 媒体段：md 和附件不能塞进同一条消息（会被适配器吃掉），所以要跳过整条改写 */
 const ATTACHMENT_TYPES = new Set(['video', 'audio', 'record', 'file'])

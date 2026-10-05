@@ -1,5 +1,5 @@
 import fs from 'node:fs'
-import { cardImageActions, withCardActions } from '@/module/utils/QqPanel'
+import { replyWithCardActions, sendSlicedImageWithActions } from '@/module/utils/QqPanel'
 import { sendCommentPicsDirectly } from '@/module/utils/CommentPics'
 import { cardImageKeyOf, imageSourcesOf, rememberCardImages, rememberLastCardKey } from '@/module/utils/CardImageCache'
 // 弹幕策略（通用里的「强制不烧录弹幕」优先；「在线播放器」开着时是在线播放，不烧录）
@@ -20,7 +20,6 @@ import {
   type PlayerWorkInfo
 } from '../../../player'
 import { ParseSteps, SendTasks } from '@/module/utils/ParseSteps'
-import { sendSlicedImage } from '@/module/utils/ImageSlice'
 
 import {
   AmagiSuccess,
@@ -39,10 +38,11 @@ import type { BilibiliForwardOriginalContentProps } from '@template/template/bil
 import { DecorationCardData } from '@template/template/bilibili/dynamic/types'
 import { format, formatDistanceToNow, fromUnixTime } from 'date-fns'
 import { zhCN } from 'date-fns/locale'
-import karin, { common, ElementTypes, logger, Message, segment, SendMessage, withoutForwardCollect } from 'node-karin'
+import karin, { common, ElementTypes, isForwardCollecting, logger, Message, segment, SendMessage, withoutForwardCollect } from 'node-karin'
 
 // 番剧在 QQ 上用「卡片 + 分集表格」面板（见 sendBangumiPanel 的说明）
 import { buildDownloadTip, recallLastPanel, replyReplacing, sendBangumiPanel } from '../../module/utils/QqPanel'
+import { attachCardImageEmojiPanel, attachDownloadProgressPanel } from '../../module/utils/ReactionPanel'
 
 import type { ParseWorkType } from '@/module/db'
 import {
@@ -221,7 +221,13 @@ export class Bilibili extends Base {
       // 面板点进来的：只回一句「收到请求，开始下载」，并挂一个只查本次任务的进度按钮
       // replyReplacing 会先撤掉上一条（也就是刚点的画质面板），群里只留这句提示
       // 第三个参数是事件本身：OneBot 不渲染 markdown，那条提示会退化成纯文本指令（见 buildDownloadTip）
-      await replyReplacing(this.e, buildDownloadTip(String(iddata.bvid ?? ''), '收到请求，开始下载', this.e))
+      const downloadTip = await replyReplacing(this.e, buildDownloadTip(String(iddata.bvid ?? ''), '收到请求，开始下载', this.e))
+      /**
+       * OneBot 上没有按钮也没有 markdown，那条「发送「下载进度 xxx」」的提示只能靠手打。
+       * 这里给这条消息**挂一个表情按钮**：贴任意表情就查一次进度，而且**可以反复贴**
+       * （贴几个就查几次）—— 下载要跑一会儿，用户不会只想问一次。
+       */
+      void attachDownloadProgressPanel(this.e, downloadTip?.messageId, String(iddata.bvid ?? ''))
     } else if (!this.storyOnly && Config.app.parseTip) {
       /**
        * 同样：发这句话时把上一条机器人消息撤掉。
@@ -348,9 +354,27 @@ export class Bilibili extends Base {
          * 顺序按用户要求改成「先把视频下下来，再渲染卡片」：下载最慢也最不能失败，
          * 先做掉；卡片渲染失败也不会连累视频（见下面 await steps.run('渲染作品信息卡', …)）。
          */
+        /**
+         * 详情卡片（封面卡）这次**到底发不发**。
+         *
+         * 「提取封面图」按钮本来只挂在这张卡下面，而它在三种情况下是不发的：
+         * 面板路径（面板已经发过那张卡）、没勾 `info`、互动切片。**而面板路径恰恰是最常见的**
+         * ——QQ 上「发链接 → 出面板 → 点清晰度」走的就是它（用户反馈：
+         * 「我打开了视频发送的话，它会根本不会出现这个按钮」）。
+         *
+         * 所以下面评论区那条长图要按这个补上 `cover`：那是面板路径下用户唯一看得到的卡片。
+         *
+         * ⚠️ 唯一例外：**开着「解析结果合并转发」时卡片要照发**（用户要求：
+         * 「先不要渲染图片，先询问清晰度，后面再合成一条」）。那种情况下
+         * 面板本身是**不渲染卡片**的（见 `ReactionPanel.sendQualityReactionPanel`），
+         * 卡片只能在这一次解析里补上 —— 它会被收进转发袋子，和视频、评论卡
+         * 合成**一条**转发出去；不补的话那条转发里就完全没有卡片。
+         */
+        const infoCardSent = !this.storyOnly && (!fromPanel || isForwardCollecting())
+          && Config.bilibili.sendContent.some((content) => content === 'info')
         // fromPanel：面板里已经发过这张卡片了，别再发一遍
         const renderInfoCard = async () => {
-          if (this.storyOnly || fromPanel || !Config.bilibili.sendContent.some((content) => content === 'info')) return
+          if (!infoCardSent) return
           if (Config.bilibili.videoInfoMode === 'text') {
             // 构建回复内容数组
             const replyContent: SendMessage = []
@@ -408,9 +432,7 @@ export class Bilibili extends Base {
              * 「提取评论区图片」归评论区那条 —— 两张卡各带各的，不堆在最后一条下面。
              * 封面在上面拿到作品信息时就记过了，这里只负责挂按钮。
              */
-            this.e.reply(
-              withCardActions(this.e, img, cardKey, { cover: true })
-            )
+            replyWithCardActions(this.e, img, cardKey, { cover: true })
           }
         }
 
@@ -652,13 +674,22 @@ export class Bilibili extends Base {
               /**
                * 评论区卡片**同一条消息**里带上「提取封面图 / 提取评论区图片」。
                *
-               * 按钮**必须挂在这里**：详情卡片在面板路径下是不发的（`fromPanel` 时跳过，
-               * 面板已经发过那张卡了），而 QQ 上的解析几乎都是「发链接 → 出面板 → 点清晰度」，
-               * 用户真正看到的就只有评论区这条长图。
+               * `cover` 传 `!picsSent && !infoCardSent && !fromPanel`：
+               *   - **详情卡发了**（`infoCardSent`）→ 封面按钮归它，两张卡各带各的；
+               *   - **面板路径**（`fromPanel`）→ **这里不带**：那条路上封面入口在**清晰度面板**
+               *     上（面板最右边那个 ✅️，见 `ReactionPanel.sendQualityReactionPanel`），
+               *     再挂一次就是同一件事两处入口，而长图挂表情还得**另发一条消息**
+               *     （用户明确要求不要再多发一条）；
+               *   - **评论图已经直接发过**（`picsSent`）→ 什么都不挂（用户要求：
+               *     「会主动发送评论区图片，就不要发提示了，也不要贴表情」）。
                *
-               * `comment` 传 `!picsSent`：图刚刚已经直接发过时**不再挂按钮**（见上面的 `picsSent`）。
+               * `comment` 传 `!picsSent`：图刚刚已经直接发过时不再挂按钮。
                */
-              await sendSlicedImage(this.e, img, cardImageActions(this.e, { comment: !picsSent, key: cardKey }))
+              await sendSlicedImageWithActions(this.e, img, {
+                cover: !picsSent && !infoCardSent && !fromPanel,
+                comment: !picsSent,
+                key: cardKey
+              })
             }
           }
         })
@@ -1022,8 +1053,7 @@ export class Bilibili extends Base {
               summary.rich_text_nodes.unshift({ orig_text: name, jump_url: '', text: name, type: 'topic' })
               summary.text = summary.text ? `${name}\n${summary.text}` : name
             }
-            this.e.reply(
-              withCardActions(this.e, await Render(this.e, 'bilibili/dynamic/DYNAMIC_TYPE_DRAW', {
+            replyWithCardActions(this.e, await Render(this.e, 'bilibili/dynamic/DYNAMIC_TYPE_DRAW', {
                 // 生成类型在判别联合里把 `pics` 记成 `any`（各支索引签名），`Object.values` 于是推出
                 // `unknown[]` —— 谓词里先把元素当成「可能有 url 的对象」再判，形状仍然照旧收窄
                 image_url: Object.values(dynamicInfo.data.data.item.modules.module_dynamic.major.opus.pics)
@@ -1056,7 +1086,6 @@ export class Bilibili extends Base {
                 additional: parseAdditionalCard(dynamicInfo.data.data.item.modules.module_dynamic.additional),
                 dynamic_id: dynamicInfo.data.data.item.id_str
               }), dynamicCardKey, dynamicCardActions)
-            )
             break
           }
           /** 纯文 */
@@ -1076,8 +1105,7 @@ export class Bilibili extends Base {
               dynamicInfo.data.data.item.modules.module_dynamic.major.opus?.summary?.rich_text_nodes ?? []
             )
 
-            this.e.reply(
-              withCardActions(this.e, await Render(this.e, 'bilibili/dynamic/DYNAMIC_TYPE_WORD', {
+            replyWithCardActions(this.e, await Render(this.e, 'bilibili/dynamic/DYNAMIC_TYPE_WORD', {
                 text,
                 dianzan: Count(dynamicInfo.data.data.item.modules.module_stat.like.count),
                 pinglun: Count(dynamicInfo.data.data.item.modules.module_stat.comment.count),
@@ -1097,7 +1125,6 @@ export class Bilibili extends Base {
                 additional: parseAdditionalCard(dynamicInfo.data.data.item.modules.module_dynamic.additional),
                 dynamic_id: dynamicInfo.data.data.item.id_str
               }), dynamicCardKey, dynamicCardActions)
-            )
             break
           }
           /** 转发动态 */
@@ -1250,8 +1277,7 @@ export class Bilibili extends Base {
                 break
               }
             }
-            this.e.reply(
-              withCardActions(this.e, await Render(this.e, 'bilibili/dynamic/DYNAMIC_TYPE_FORWARD', {
+            replyWithCardActions(this.e, await Render(this.e, 'bilibili/dynamic/DYNAMIC_TYPE_FORWARD', {
                 text,
                 imgList: imgList.length > 0 ? imgList : null,
                 dianzan: Count(dynamicInfo.data.data.item.modules.module_stat.like.count),
@@ -1272,7 +1298,6 @@ export class Bilibili extends Base {
                 original_content,
                 dynamic_id: dynamicInfo.data.data.item.id_str
               }), dynamicCardKey, dynamicCardActions)
-            )
             break
           }
           /** 视频动态 */
@@ -1343,7 +1368,7 @@ export class Bilibili extends Base {
                 dynamic_id: dynamicInfo.data.data.item.id_str,
                 staff
               })
-              this.e.reply(withCardActions(this.e, img, dynamicCardKey, dynamicCardActions))
+              replyWithCardActions(this.e, img, dynamicCardKey, dynamicCardActions)
             }
             break
           }
@@ -1446,7 +1471,7 @@ export class Bilibili extends Base {
               following_count: Count(userProfileData.data.data.card.friend),
               fans: Count(userProfileData.data.data.card.fans)
             })
-            this.e.reply(withCardActions(this.e, img, dynamicCardKey, dynamicCardActions))
+            replyWithCardActions(this.e, img, dynamicCardKey, dynamicCardActions)
             break
           }
           default: {
@@ -1520,7 +1545,7 @@ export class Bilibili extends Base {
               })
               /** 动态评论区下面只带「提取评论区图片」，封面那个归动态卡片 */
               rememberCardImages(dynamicCardKey, { comment: imageSourcesOf(img) })
-              this.e.reply(withCardActions(this.e, img, dynamicCardKey, { comment: !picsSent }))
+              replyWithCardActions(this.e, img, dynamicCardKey, { comment: !picsSent })
             } else {
               this.e.reply('这条动态暂时还没有评论~')
             }
@@ -2570,7 +2595,14 @@ export const parseAdditionalCard = (additional: any) => {
   }
 }
 
-const mapping_table = (type: any): number => {
+/**
+ * B站动态类型 → 评论接口的 `type`。
+ *
+ * 返回类型写成字面量联合而不是 `number`：amagi 7.0.0-beta.6 起 `fetchComments` 的
+ * `type` 收成了评论类型枚举（`33 | 1 | 5 | …`），`number` 赋不进去。
+ * 这 5 个值本身就在那个联合里，写精确反而如实反映了「只可能返回这几档」。
+ */
+const mapping_table = (type: any): 1 | 11 | 12 | 17 | 19 => {
   const Array: Record<string, string[]> = {
     1: ['DYNAMIC_TYPE_AV', 'DYNAMIC_TYPE_PGC', 'DYNAMIC_TYPE_UGC_SEASON'],
     11: ['DYNAMIC_TYPE_DRAW'],
@@ -2580,7 +2612,7 @@ const mapping_table = (type: any): number => {
   }
   for (const key in Array) {
     if (Array[key].includes(type)) {
-      return parseInt(key, 10)
+      return Number(key) as 1 | 11 | 12 | 17 | 19
     }
   }
   return 1

@@ -133,6 +133,37 @@ const rewriteAliases = (dir) => {
   return count
 }
 
+/**
+ * 兜底检查：产物里残留**裸** `node-karin` 引用。
+ *
+ * ## 为什么必须卡死在这一步
+ * `node-karin` 是 karin 生态的包，**不在本插件的 dependencies 里**（产物自带兼容层），
+ * 所以别名没改写干净 = 装到宿主上直接 `Cannot find module 'node-karin'`，
+ * 而且是**加载期**就崩，宿主连插件列表都起不来。
+ *
+ * 线上真出过：3.11.0 那份产物里有 56 个文件裸 `require("node-karin")`，
+ * 宿主一加载就报 `Error: Cannot find module 'node-karin'`（lib/player/index.js:83）。
+ * 这种错误只在**装到干净的 node_modules 里**才暴露，本地开发目录因为有转发包永远发现不了。
+ *
+ * 只认代码里的引用（注释里提到这个包名不算）。
+ */
+const checkBareNodeKarin = (dir) => {
+  const offenders = []
+  const pattern = /(require\(|import\()\s*["']node-karin(\/[^"']*)?["']\s*\)/
+  for (const entry of ts.sys.readDirectory(dir, ['.js'])) {
+    const source = readFileSync(entry, 'utf8')
+    if (!source.includes('node-karin')) continue
+    const inCode = source.split(/\r?\n/).some((line) => {
+      const trimmed = line.trim()
+      if (!trimmed.includes('node-karin')) return false
+      if (trimmed.startsWith('*') || trimmed.startsWith('//') || trimmed.startsWith('/*')) return false
+      return pattern.test(trimmed)
+    })
+    if (inCode) offenders.push(path.relative(root, entry))
+  }
+  return offenders
+}
+
 /** 兜底检查：CJS 产物里残留 import.meta 会让 Node 把该文件当 ESM（exports is not defined） */
 const checkImportMeta = (dir) => {
   const offenders = []
@@ -217,6 +248,13 @@ const writeBuildMetadata = () => {
 mkdirSync(outDir, { recursive: true })
 const buildMetadata = writeBuildMetadata()
 const rewritten = rewriteAliases(outDir)
+const bareKarin = checkBareNodeKarin(outDir)
+if (bareKarin.length) {
+  console.error('构建失败：以下产物还在引用外部的 node-karin 包（它不在依赖里，装到宿主上会 '
+    + 'Cannot find module）—— 别名没改写干净：')
+  for (const item of bareKarin) console.error('  - ' + item)
+  process.exit(1)
+}
 const offenders = checkImportMeta(outDir)
 if (offenders.length) {
   console.error('构建失败：以下产物残留 import.meta，CJS 下会被 Node 当成 ESM：')

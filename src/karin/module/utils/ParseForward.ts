@@ -24,6 +24,7 @@
 import { drainForwardGroups, forwardKindOf, isForwardSupported, logger, makeForward, runWithForwardBag, withoutForwardCollect, type Message } from 'node-karin'
 
 import { Config } from './Config'
+import { isOneBotLike } from '../../../compat/imageMarkdown'
 
 /** 本次消息要发到哪个频道（合并转发的目标） */
 export function parseForwardPeer (e: any): string {
@@ -44,7 +45,13 @@ function platformOf (e: any): string {
  * 结果整条转发发出去「没有拿到消息 ID」（适配器根本没有聊天记录这种东西），
  * 连退回来的逐条发送也失败了 —— 用户什么都没收到。
  */
-const ONEBOT_LIKE = /onebot|napcat|lagrange|go-?cqhttp|chronocat|mirai/i
+/**
+ * 名单本体在 `compat/imageMarkdown` 的 `isOneBotLike`。
+ *
+ * ⚠️ 这里问的是「**走不走 OneBot 那套私有协议**」（合并转发是 OneBot 的
+ * `send_group_forward_msg`），**不是**「认不认 markdown」—— 那要看 `canUseMarkdownImage`。
+ * Milky 不是 OneBot，所以它不在名单里是对的，别把两个判据混成一个。
+ */
 
 /** 这台部署的适配器支不支持合并转发（**只有明确支持才算支持**） */
 export function canForwardParseResult (e: any): boolean {
@@ -58,7 +65,7 @@ export function canForwardParseResult (e: any): boolean {
   /** ② 其余只认 OneBot 系的平台名 */
   const platform = platformOf(e)
   if (!platform) return false
-  return ONEBOT_LIKE.test(platform)
+  return isOneBotLike(platform)
 }
 
 /** 平台名 → 配置段名（合并转发的平台开关就写在各自的平台段里） */
@@ -108,6 +115,10 @@ export function isParseForwardEnabled (platform?: string): boolean {
  *   - \`file\`  文件（群文件等）
  *   - \`chart\` B站互动视频的**剧情流程图**：它本身是图片，但可以在「合并转发内容」里单独勾/不勾，
  *     所以由发送方用 \`withForwardKind('chart', …)\` 标出来（见 compat/forward-collect）
+ *   - \`commentPic\` **评论区里用户自己贴的那些图**（「是否收集评论区的图片」打开时那一路）。
+ *     它们本来是图片，但**评论长图里已经画过一遍了** —— 再按 \`image\` 收进聊天记录就是
+ *     同一批图发两遍（用户反馈：「不然合并转发里面又发一遍就没有意义了」）。
+ *     所以单独给它一个类别：默认**不进**聊天记录，单独直发；想要它进就勾上。
  *
  * **没列出来的内容一律单独直发**（不进转发节点）。默认只合并文字和图片。
  *
@@ -125,7 +136,11 @@ export function isParseForwardEnabled (platform?: string): boolean {
  * 会让整条转发被拒（\`Error with request send_group_forward_msg …\`），所以默认只合并文字和图片；
  * 想要视频也进去就勾上 \`video\` —— 真发不出去时下面的兜底会逐条直发，不会丢内容。
  */
-const FORWARD_KINDS = ['text', 'image', 'video', 'file', 'chart']
+/**
+ * \`commentPic\` **故意不在默认里**：评论长图（\`image\`）里已经画过这些图，
+ * 默认再收一份原图就是同一批图发两遍。要它进聊天记录得显式勾上。
+ */
+const FORWARD_KINDS = ['text', 'image', 'video', 'file', 'chart', 'commentPic']
 const DEFAULT_FORWARD_CONTENT = ['text', 'image']
 
 /**

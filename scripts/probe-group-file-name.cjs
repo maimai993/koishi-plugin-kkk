@@ -17,11 +17,12 @@
  *     已经做过 `substring(0, 50).replace(/[\\/:*?"<>|\r\n\s]/g, ' ')` 清洗，快手没有；
  *   - 今天走群文件失败的三次**全是快手**，而且是同一个视频。
  *
- * 覆盖四件事：
+ * 覆盖五件事：
  *   ① 「文件名生成」是纯函数，直接按真实标题断言（旧实现会失败、新实现通过）；
  *   ② 端到端：真调 `uploadFile`，断言交给适配器的文件名里**没有换行**；
  *   ③ 兜底：名字被 QQ 打回时，会换一个临时名重试一次；
- *   ④ 错误描述：satori 的 `AggregateError`（message 是空的）要能说出真正的原因。
+ *   ④ 错误描述：satori 的 `AggregateError`（message 是空的）要能说出真正的原因；
+ *   ⑤ 「发了但协议端没回消息 ID」（LLOneBot 发视频）：算成功，且**不许重发**。
  *
  * 全程离线：不联网、不连 QQ、不改用户配置；只往系统临时目录里写一个探针自己的数据目录。
  *
@@ -225,11 +226,47 @@ const run = async () => {
     }
   })())
 
-  section('⑤ 源码守卫（产物里真的接上了）')
+  /**
+   * ⑤ 「发了，但协议端没回消息 ID」（LLOneBot 发视频就是这样）。
+   *
+   * 用户实测：一条指令下来群里躺着**两条一模一样的视频**，还多出一张「发送失败」的
+   * 错误卡片。链路是这样的：
+   *   uploadFile 判「没 ID = 没发出去」→ 抛错 → sendGroupFile **换个文件名再发一次**
+   *   （视频于是进了两次群）→ 第二次同样没 ID → 错误卡片。
+   * 适配器没抛异常就说明协议端收下了（OneBot 是 retcode 0），所以这里必须按成功算，
+   * 而且**绝不能重试** —— 大文件重传的代价远大于漏报一次失败。
+   */
+  section('⑤ 「发了但没拿到消息 ID」：算成功，也不许重发')
+  const sendError = require(path.join(lib, 'compat/sendError.js'))
+  const d = makeEvent(async () => ({ messageId: '', rawData: [], unconfirmed: true }))
+  const dReturn = await Base.uploadFile(d.event, makeFile('测试视频.mp4', videoPath), '', { message_id: 'MSG-1' })
+  check('只发了一次（不再换文件名重发一遍）', d.calls.length === 1, `调用 ${d.calls.length} 次`)
+  check('整体算成功（视频确实已经在群里）', dReturn === true)
+
+  const e = makeEvent(async () => { throw new sendError.UnconfirmedSendError() })
+  let eThrew = null
+  try {
+    await Base.uploadFile(e.event, makeFile('测试视频.mp4', videoPath), '', { message_id: 'MSG-1' })
+  } catch (error) {
+    eThrew = error
+  }
+  check('万一上面还是抛了未确认错误：也不重试', e.calls.length === 1, `调用 ${e.calls.length} 次`)
+  check('未确认错误照样往上抛（由上层决定怎么报）', !!eThrew, eThrew ? eThrew.name : '没抛')
+  check('isUnconfirmedSendError 认得它', sendError.isUnconfirmedSendError(new sendError.UnconfirmedSendError()))
+  check('普通错误不认（该重试的还是会重试）', !sendError.isUnconfirmedSendError(new Error('file_name invalid')))
+
+  section('⑥ 源码守卫（产物里真的接上了）')
   const baseSrc = fs.readFileSync(path.join(lib, 'karin/module/utils/Base.js'), 'utf8')
   check('产物里有 groupFileName', /groupFileName/.test(baseSrc))
   check('群文件分支不再直接拼 `${originTitle}.mp4`', !/\$\{[^}]*(?:file\.)?originTitle\}\.mp4/.test(baseSrc))
   check('产物里有失败重试', /fallbackGroupFileName/.test(baseSrc))
+  /**
+   * 「视频压根发不出去」的另一半原因：ffmpeg 解不动这个编码（日志里是
+   * `[hevc …] Unknown profile bitstream`）时压缩必然失败，而以前**不看压缩结果**，
+   * 一律把 filepath 换成那个压根不存在的产物 → 后面报「上传文件不存在」。
+   */
+  check('压缩失败时改用原文件（不会拿不存在的产物去发）', /压缩失败，改用原文件发送/.test(baseSrc))
+  check('读不出时长时不进压缩（码率算出来是 NaN）', /放弃压缩，直接发原文件/.test(baseSrc))
   check('临时预览地址不再用 process.env.HTTP_PORT 裸取', !/localhost:\$\{process\.env\.HTTP_PORT/.test(baseSrc))
   /**
    * 源码守卫要先**剥掉注释**再匹配。

@@ -17,7 +17,7 @@ import type { Bot, Context, Session } from 'koishi'
 // 版本比较复用注入器那边的实现（它处理了 -beta.1 这类预发布号的先后）
 import { isSemverGreater } from '../karin/module/utils/semver'
 
-import { resolveAdapterInfo } from './adapter-info'
+import { queryAdapterImplementation, resolveAdapterInfo } from './adapter-info'
 import { logger } from './logger'
 import { COLLECTED_MESSAGE_ID, collectForward } from './forward-collect'
 import { imagesToMarkdown } from './imageMarkdown'
@@ -74,6 +74,33 @@ const MIME_BY_EXT: Record<string, string> = {
 function guessMime (filePath: string): string {
   const ext = path.extname(filePath).toLowerCase()
   return MIME_BY_EXT[ext] ?? 'application/octet-stream'
+}
+
+/**
+ * 从 `sendMessage` 的返回值里掏消息 ID。
+ *
+ * 各家给回来的形状不一样：字符串数组（`['123']`）、数字、`{message_id}`、
+ * `{data:{message_id}}` 都见过。之前只取「数组最后一个」，LLOneBot 那种
+ * 「发了但没塞 message_id」的就被判成空 —— 而它其实已经把视频发出去了。
+ * 数字 0 / -1 是「没有 ID」的占位（不是合法 id），同样按空处理。
+ */
+const firstMessageId = (result: any): string => {
+  const pick = (value: any): string => {
+    if (value === undefined || value === null) return ''
+    if (typeof value === 'string') return value.trim()
+    if (typeof value === 'number') return Number.isFinite(value) && value > 0 ? String(value) : ''
+    if (typeof value !== 'object') return ''
+    if (Array.isArray(value)) {
+      for (let i = value.length - 1; i >= 0; i--) {
+        const hit = pick(value[i])
+        if (hit) return hit
+      }
+      return ''
+    }
+    return pick(value.messageId ?? value.message_id ?? value.id ?? value.data?.message_id)
+  }
+  if (Array.isArray(result)) return pick(result)
+  return pick(result?.messageId ?? result?.message_id ?? result?.data?.message_id ?? result)
 }
 
 /** 仿 karin 的 AdapterType（机器人实例） */
@@ -290,17 +317,25 @@ export class KkkBot {
     /** 解析结果合并转发：文件（视频/群文件）也要进转发 */
     if (collectForward(channelId, [element])) return { messageId: COLLECTED_MESSAGE_ID, rawData: undefined }
     const ids = await this.bot.sendMessage(channelId, [element] as any)
+    const id = firstMessageId(ids)
     /**
-     * 和 {@link reply} 同一个判据：**没拿到消息 ID 就是没发出去**。
+     * ⚠️ 文件/视频这里**不能**照 {@link reply} 那套「没 ID = 没发出去」判失败。
      *
-     * 文件/视频走的是「上传媒体 + 发一条带 media 的消息」，最后那条消息同样会返回 id；
-     * 没有 id 说明它没发成功（qq-chat 也是这么判的）。以前这里把空 ID 当成功返回，
-     * 结果「视频没发出去」被静默吞掉 —— Base.ts 那边看到没有异常就当发送成功了。
+     * 适配器没抛异常，就说明协议端收下了（OneBot 那边是 retcode 0）。
+     * 而「发了却不回 message_id」是真实存在的：LLOneBot 发视频就是这样 ——
+     * 判成失败的后果不是少一张卡片，而是
+     *   ① Base.ts 换个文件名**再发一次**（群里于是有两条一模一样的视频）；
+     *   ② 明明发出去了却给用户甩一张「发送失败」的错误卡片。
+     * 大文件重传的代价远大于「漏报一次失败」，所以这里按**已发出**处理，只记一条 warn。
+     *
+     * 普通消息（reply / sendMsg）仍然保持严格判据，那边没 ID 基本就是真没发出去。
      */
-    const id = ids?.[ids.length - 1] ?? ''
     if (!id) {
-      logger.mark('[compat] 文件上传后没有拿到消息 ID：适配器没抛异常，但这个文件没有发出去')
-      throw new UnconfirmedSendError()
+      logger.warn(
+        '[compat] 文件已提交，但适配器没给消息 ID（平台 ' + String(this.bot?.platform ?? '?') +
+        '）：按「已发出」处理，不做重试 —— 重试会让群里多一条一样的视频'
+      )
+      return { messageId: '', rawData: ids, unconfirmed: true }
     }
     return { messageId: id, rawData: ids }
   }
@@ -384,12 +419,27 @@ export class KkkBot {
    * 定义在 \`Internal.prototype\` 上（见适配器源码），**只有 \`bot.internal.setMsgEmojiLike\` 存在**，
    * \`bot.setMsgEmojiLike\` 是 undefined —— 只查本体等于永远贴不上去（面板下面一排表情就是空的）。
    *
+   * 都找不到就**再试 Satori 标准名** \`createReaction\` / \`deleteReaction\`
+   * （见下面「Milky」那节）。
+   *
    * 都找不到就静默返回 false：表情只是提示，失败不该影响主流程。
    *
-   * 参数顺序三者一致：\`(messageId, emojiId, isAdd)\`。
+   * ## Milky：`createReaction(channelId, messageId, emojiId)`
+   *
+   * Milky 不是 OneBot（没有 \`set_msg_emoji_like\`），但它实现了 **Satori 标准**那两个方法。
+   * 形状跟上面三个都不一样：
+   *   - 第一个参数是 **channelId**（它要从里面解出 \`peerId\` / \`messageSeq\`），
+   *     所以调用方必须把群号传进来（老代码第一参数是个占位的 \`''\`）；
+   *   - 贴和撤是**两个方法**，没有 \`isAdd\` 参数；
+   *   - 表情 id 是 \`face|301\` 这种「类型|id」写法（转换器在 ReactionPanel 里，
+   *     见 \`reactionIdOf\`），这里原样往下传。
+   *
+   * 放在最后试：OneBot 那三个名字先匹配，行为跟以前完全一致。
+   *
+   * @param contact 群号（Milky 必须；OneBot 用不到）
    * @param isAdd true = 贴表情，false = 取消
    */
-  async setMsgReaction (_contact: Contact | string, messageId: string, emojiId: string | number, isAdd = true): Promise<boolean> {
+  async setMsgReaction (contact: Contact | string, messageId: string, emojiId: string | number, isAdd = true): Promise<boolean> {
     const bot: any = this.bot
     const internal: any = bot?.internal
     const names = ['setMessageReaction', 'setMsgEmojiLike', 'setMsgReaction']
@@ -399,16 +449,39 @@ export class KkkBot {
       if (typeof bot?.[name] === 'function') { fn = bot[name]; owner = bot; break }
       if (typeof internal?.[name] === 'function') { fn = internal[name]; owner = internal; break }
     }
-    if (typeof fn !== 'function') {
-      logger.debug('[compat] 这个适配器没有可用的表情回应接口（' + String(bot?.platform ?? '未知') + '），跳过')
-      return false
+    if (typeof fn === 'function') {
+      try {
+        await fn.call(owner, messageId, String(emojiId), isAdd)
+        return true
+      } catch {
+        return false
+      }
     }
-    try {
-      await fn.call(owner, messageId, String(emojiId), isAdd)
-      return true
-    } catch {
-      return false
+    /** Satori 标准名（Milky）：`(channelId, messageId, emojiId)` */
+    const channelId = typeof contact === 'string' ? contact : String(contact?.peer ?? '')
+    if (typeof bot?.createReaction === 'function') {
+      try {
+        if (isAdd) await bot.createReaction(channelId, messageId, String(emojiId))
+        else if (typeof bot?.deleteReaction === 'function') {
+          await bot.deleteReaction(channelId, messageId, String(emojiId))
+        } else return false
+        return true
+      } catch (error: any) {
+        logger.debug('[compat] createReaction / deleteReaction 调用失败（已忽略）: '
+          + String(error?.message ?? error))
+        return false
+      }
     }
+    /** ③ Satori 协议：适配器没生成 `createReaction` 方法，但协议有 `/v1/reaction.create` */
+    const reaction = await satoriReaction(bot, isAdd ? 'create' : 'delete', {
+      channel_id: channelId,
+      message_id: messageId,
+      emoji_id: String(emojiId)
+    })
+    if (reaction !== null) return true
+
+    logger.debug('[compat] 这个适配器没有可用的表情回应接口（' + String(bot?.platform ?? '未知') + '），跳过')
+    return false
   }
 
   /**
@@ -427,14 +500,32 @@ export class KkkBot {
    * 所以：先找有没有别名（别的实现叫 `fetchEmojiLike` / `getEmojiLikes`…），
    * 找不到就走 `_get`；再退一步用 `_request` 自己看 retcode。
    *
+   * ## ⚠️ NapCat 有**两个**接口，参数名和返回结构都不一样
+   *
+   * 只认一种就等于「只有一半协议端能用」（实测：LLOneBot 能查到、NapCat 查不到）：
+   *
+   *   |                      | 参数                                              | 返回                              |
+   *   |----------------------|---------------------------------------------------|-----------------------------------|
+   *   | `fetch_emoji_like`   | `emojiId` / `emojiType`（**驼峰**）                | `data.emojiLikesList[].tinyId`     |
+   *   | `get_emoji_likes`    | `emoji_id` / `emoji_type`（**下划线**）            | `data.emoji_like_list[].user_id`   |
+   *
+   * 而且 **`emojiType` / `emoji_type` 是必填**（`1` = QQ 系统表情，`2` = Unicode emoji）。
+   * 以前只发 `{message_id, emoji_id, count}`，NapCat 直接回
+   * `retcode 1400 请求参数错误或业务逻辑执行失败` —— 于是判定「这个协议端查不到」、
+   * 轮询压根没起来，用户看到的就是「点了没反应」。
+   *
+   * 两个动作都试，**谁真的给出列表就用谁**（空列表也算成功 —— 那是「没人贴」）。
+   * 参数里两种写法都带上（多的字段各家会忽略），这样同一份参数两种接口都能吃。
+   *
    * ⚠️ 大 id 不能强转数字：适配器的 `prepareArg` 只在 `|value| < 2^32` 时才转
    * （QQ 消息 id 有的是 19 位，超出 JS 安全整数），这里跟它保持一致。
    *
+   * @param groupId 群号（`get_emoji_likes` 用它定位；短 id 时可不给）
    * @returns 贴了这个表情的用户 id 列表；**`null` = 问不到**（接口不存在或调用失败）。
    *          调用方必须分清「没人贴」（空数组）和「问不到」（null）——
    *          前者是正常等待，后者要停掉轮询别再打接口。
    */
-  async fetchEmojiLikes (messageId: string, emojiId: string | number): Promise<string[] | null> {
+  async fetchEmojiLikes (messageId: string, emojiId: string | number, groupId?: string): Promise<string[] | null> {
     const bot: any = this.bot
     const internal: any = bot?.internal
     const toId = (value: any): any => {
@@ -442,52 +533,98 @@ export class KkkBot {
       if (!Number.isFinite(num)) return String(value)
       return Math.abs(num) < 4294967296 ? num : String(value)
     }
-    const params = { message_id: toId(messageId), emoji_id: toId(emojiId), count: 20 }
+    const messageIdArg = toId(messageId)
+    const emojiIdArg = toId(emojiId)
+    const params: Record<string, any> = {
+      message_id: messageIdArg,
+      /** 驼峰（fetch_emoji_like）和下划线（get_emoji_likes）两套名字都给上 */
+      emoji_id: emojiIdArg,
+      emojiId: String(emojiIdArg),
+      emoji_type: '1',
+      emojiType: 1,
+      count: 20,
+      cookie: ''
+    }
+    if (groupId) params.group_id = String(groupId)
     try {
-      let data: any
-      let called = false
+      /**
+       * ① 协议端 / 适配器自己声明的方法（LLOneBot 这类直接给了函数）。
+       *
+       * 参数顺序沿用老写法 `(messageId, emojiId, count)` —— 这条路现在**是通的**，
+       * 别去改它（改成 NapCat 那套 5 参数位置的话，第 3 个会被当成 emojiType / count，
+       * 反而把能用的那家弄坏）。
+       */
       for (const name of ['fetchEmojiLike', 'fetchEmojiLikes', 'getEmojiLikes', 'getEmojiLikeList']) {
         const owner = typeof bot?.[name] === 'function' ? bot
           : typeof internal?.[name] === 'function' ? internal : null
         if (!owner) continue
-        data = await owner[name](params.message_id, params.emoji_id, params.count)
-        called = true
-        break
+        try {
+          const users = pickEmojiUsers(await owner[name](messageIdArg, emojiIdArg, 20))
+          if (users) return users
+        } catch { /* 换下一个名字 */ }
       }
-      /**
-       * 动作名也不止一个：NapCat 文档里是 `fetch_emoji_like`，
-       * 而有些实现（以及 `koishi-plugin-adapter-napcat` 的说明）叫 `get_emoji_likes`。
-       * 两个都试，**成功一次就够**（拿不到就返回 null 让调用方停掉轮询）。
-       */
-      if (!called && typeof internal?._get === 'function') {
-        for (const action of REACTION_QUERY_ACTIONS) {
+      /** ② 通用入口：两个动作名各试一遍 */
+      for (const action of REACTION_QUERY_ACTIONS) {
+        if (typeof internal?._get === 'function') {
           try {
-            data = await internal._get(action, params)
-            called = true
-            break
-          } catch { /* 这个动作名没有，试下一个 */ }
+            const users = pickEmojiUsers(await internal._get(action, params))
+            if (users) return users
+          } catch { /* 这个动作名没有 / 参数不对，试下一个 */ }
+        }
+        if (typeof internal?._request === 'function') {
+          try {
+            const response = await internal._request(action, params)
+            if (Number(response?.retcode ?? 0) === 0) {
+              const users = pickEmojiUsers(response)
+              if (users) return users
+            }
+          } catch { /* 同上 */ }
         }
       }
-      if (!called && typeof internal?._request === 'function') {
-        for (const action of REACTION_QUERY_ACTIONS) {
-          const response = await internal._request(action, params)
-          if (Number(response?.retcode ?? 0) !== 0) continue
-          data = response?.data
-          called = true
-          break
-        }
-      }
-      if (!called) return null
-      /** 别名那条路可能已经拆过信封，`_request` 那条没有 —— 两种都认 */
-      const list = data?.emojiLikesList ?? data?.data?.emojiLikesList
-      if (!Array.isArray(list)) return null
-      return list
-        .map((item: any) => String(item?.tinyId ?? item?.user_id ?? item?.userId ?? ''))
-        .filter((id: string) => !!id)
+      /** ③ Satori 协议：`POST /v1/reaction.list`（见 {@link satoriReaction} 那节的说明） */
+      const users = await satoriReaction(bot, 'list', {
+        channel_id: String(groupId ?? ''),
+        message_id: messageIdArg,
+        emoji_id: String(emojiIdArg)
+      })
+      return users ? pickEmojiUsers(users) : null
     } catch (error: any) {
       logger.debug('[compat] 查表情回应失败（' + String(bot?.platform ?? '未知') + '）: ' + String(error?.message ?? error))
       return null
     }
+  }
+
+  /**
+   * 让协议端**自报家门**（`get_version_info`）。
+   *
+   * ## 为什么要有它
+   * 表情回应那两个接口（`fetch_emoji_like` / `get_emoji_likes`）NapCat 和 LLOneBot
+   * 实现得不一样（参数名、返回结构都不是一套），排查「点了没反应」时**最想知道的第一件事
+   * 就是对端到底是谁**。以前只能看 `bot.platform`（各家都报 `onebot`，分不出来）。
+   *
+   * ## 路径两家是一样的
+   * 都是 `get_version_info`（NapCat 是 POST、LLOneBot 是 GET，走 POST 一般也能吃），
+   * 返回的字段名也一致：`{app_name, protocol_version, app_version}`
+   * —— NapCat 给 `NapCat.Onebot`，LLOneBot 给 `LLOneBot`。
+   *
+   * 这只是**诊断信息**：问不到就返回 null，绝不影响主流程，而且**不问第二次**
+   * （结果 —— 包括「问不到」—— 会按机器人记下来）。
+   */
+  async fetchVersionInfo (): Promise<ProtocolEndInfo | null> {
+    const bot: any = this.bot
+    // 探测逻辑只有一份（compat/adapter-info 的 queryAdapterImplementation）：
+    // 卡片上的「适配器」一栏和表情面板的诊断日志走同一个缓存，结论不会打架
+    const impl = await queryAdapterImplementation(bot?.bot ?? bot)
+    const info: ProtocolEndInfo | null = impl && impl.name
+      ? { appName: impl.name, appVersion: impl.version, protocolVersion: impl.protocol }
+      : null
+    if (info) {
+      logger.mark('[kkk] 协议端：%s %s（OneBot %s）',
+        info.appName, info.appVersion || '版本未知', info.protocolVersion || '协议未知')
+    } else {
+      logger.debug('[kkk] 问不到协议端版本（get_version_info 没返回）')
+    }
+    return info
   }
 
   /**
@@ -518,6 +655,81 @@ export type AdapterType = KkkBot
 
 /** 查「谁贴了这个表情」可能的动作名（各家 / 各版本不一样，按顺序试） */
 const REACTION_QUERY_ACTIONS = ['fetch_emoji_like', 'get_emoji_likes']
+
+/** 协议端自报的版本信息（`get_version_info`） */
+export interface ProtocolEndInfo {
+  /** `NapCat.Onebot` / `LLOneBot` … */
+  appName: string
+  appVersion: string
+  protocolVersion: string
+}
+
+/**
+ * 从返回体里掏出「贴了这个表情的人」。
+ *
+ * 两种接口的字段名完全不一样，而且**信封拆没拆也不一定**：
+ *   - `internal._get` 会自己把 `{status, retcode, data}` 拆开，给进来的是 `data`；
+ *   - `internal._request` 给的是**整个信封**；
+ *   - 协议端自己的方法可能给任何一种。
+ * 所以两种都认。**掏不出列表就返回 `null`**（让调用方去试下一个动作名）——
+ * 注意要和「列表是空的」区分开：空数组 = 真的没人贴，是正常结果。
+ */
+/**
+ * **Satori 协议**的表情回应（`/v1/reaction.*`）。
+ *
+ * ## 为什么要有这一段
+ * `@satorijs/adapter-satori` 的 `SatoriBot` **根本没有 `createReaction` 方法** ——
+ * 它是按 `Universal.Methods` 那张表在原型上批量生成方法的
+ * （`SatoriBot.prototype[method.name] = … this.http.post('/v1/' + key, …)`），
+ * 而这个版本的 `@satorijs/core` 里 reaction 还是实验性资源，**不在那张表里**。
+ * 于是「能收到 `reaction-added` 事件、却发不出表情」（用户反馈的就是这个）。
+ *
+ * 但协议本身是通的：Satori 的 API 就是往 `/v1/<方法名>` POST 一段 snake_case 的载荷
+ * （见 https://satori.chat/zh-CN/resources/reaction.html）：
+ *
+ *   | 动作              | 字段                                                  | 返回              |
+ *   |-------------------|-------------------------------------------------------|-------------------|
+ *   | `/reaction.create`| `channel_id` / `message_id` / `emoji_id`              | 空                |
+ *   | `/reaction.delete`| 同上 + 可选 `user_id`（不给 = 删自己的）              | 空                |
+ *   | `/reaction.list`  | 同上 + 可选 `next`                                    | `{ data: [User] }`|
+ *
+ * 而 `SatoriBot` 自带 `bot.http`（已带好 `Satori-Platform` / `Satori-User-ID` 头），
+ * 直接照协议发就行 —— 不需要适配器额外支持。
+ *
+ * ## 路径要不要带 `/v1`
+ * 适配器自己是 `this.http.post('/v1/' + key, …)`，所以先试 `/v1/…`；
+ * 有些服务端不挂这个前缀，再退一步试不带前缀的。
+ *
+ * @returns 动作成功时返回响应体（`list` 是分页列表）；**失败返回 null**（调用方当「问不到」）
+ */
+const satoriReaction = async (bot: any, action: 'create' | 'delete' | 'list', payload: Record<string, any>): Promise<any> => {
+  const http = bot?.http
+  if (!http || typeof http.post !== 'function') return null
+  for (const prefix of ['/v1/', '/']) {
+    try {
+      return await http.post(prefix + 'reaction.' + action, payload)
+    } catch { /* 换下一种路径 */ }
+  }
+  return null
+}
+
+const pickEmojiUsers = (payload: any): string[] | null => {
+  if (!payload || typeof payload !== 'object') return null
+  const inner = payload?.data && typeof payload.data === 'object'
+    && ('emojiLikesList' in payload.data || 'emoji_like_list' in payload.data)
+    ? payload.data
+    : payload
+  /**
+   * **Satori 的 `/v1/reaction.list`**：返回的是标准分页列表 `{ data: [User…], next? }`，
+   * 用户 id 就在 `id` 上（和上面那两家的 `tinyId` / `user_id` 都不一样）。
+   */
+  const list = inner?.emojiLikesList ?? inner?.emoji_like_list
+    ?? (Array.isArray(inner?.data) ? inner.data : null)
+  if (!Array.isArray(list)) return null
+  return list
+    .map((item: any) => String(item?.tinyId ?? item?.user_id ?? item?.userId ?? item?.uin ?? item?.id ?? ''))
+    .filter((id: string) => !!id)
+}
 
 /** 仿 karin 的 Message（事件对象） */
 export class Message {

@@ -1,7 +1,6 @@
 import fs from 'node:fs'
-import { sendSlicedImage } from '@/module/utils/ImageSlice'
 import { platformOf } from '@/module/utils/ImageSlice'
-import { buildMarkdownImageMessage, cardImageActions, withCardActions } from '@/module/utils/QqPanel'
+import { buildMarkdownImageMessage, replyWithCardActions, sendSlicedImageWithActions } from '@/module/utils/QqPanel'
 import { sendCommentPicsDirectly } from '@/module/utils/CommentPics'
 import { cardImageKeyOf, imageSourcesOf, rememberCardImages, rememberLastCardKey } from '@/module/utils/CardImageCache'
 // 弹幕策略（通用里的「强制不烧录弹幕」优先；「在线播放器」开着时是在线播放，不烧录）
@@ -13,12 +12,13 @@ import {
 import { DOWNLOAD_STAGES, withDownloadStage } from '@/module/utils/Network/Downloader'
 import { sendParseTip } from '@/module/utils/parseTip'
 
+import { liveRoomParams } from '@/platform/douyin/liveParams'
 import { type DouyinEmojiListResponse, DouyinVideoWorkResponse } from '@ikenxuan/amagi'
 import type { RichTextEmojiDefinition } from '@kkk/richtext'
 import type { DouyinUserVideoListData } from '@template/template/douyin/user_profile/components/types'
 import { format } from 'date-fns'
 import karin, { type Elements, Message, SendMessage } from 'node-karin'
-import { common, logger, mkdirSync, segment } from 'node-karin'
+import { common, isForwardCollecting, logger, mkdirSync, segment } from 'node-karin'
 
 import type { ParseWorkType } from '@/module/db'
 import {
@@ -162,10 +162,20 @@ export class DouYin extends Base {
             + '，常见原因：Cookie 失效、被风控，或者这条链接已经失效 / 作品已删除。')
         }
         // 根据 API 返回的数据判断作品类型，而不是依赖 URL
-        // aweme_type: 0=视频, 68=图集, 163=文章
+        // aweme_type: 0,4,55=视频, 68=图集, 163=文章
+
+        /**
+         * 根据 aweme_type 判断作品类型
+         * - `0`、`4`、`55`：视频作品；`4` 是剧集合集
+         * - `163`：文章作品
+         * - `68`：图文作品（含图集、合辑等）
+         *
+         * ⚠️ `4`（剧集合集）以前**漏了**，于是剧集被当成「图集」处理 ——
+         * 上游 `3E13D29` 补上。
+         */
         const aweme_type = VideoData.data.aweme_detail.aweme_type
         const isArticle = aweme_type === 163
-        const isVideo = aweme_type === 0 || aweme_type === 55
+        const isVideo = aweme_type === 0 || aweme_type === 4 || aweme_type === 55
 
         const CommentsData = await this.amagi.douyin.fetcher.fetchWorkComments({
           aweme_id: data.aweme_id,
@@ -762,7 +772,23 @@ export class DouYin extends Base {
         const douyinCardKey = cardImageKeyOf('douyin', (VideoData.data.aweme_detail as any)?.aweme_id)
         rememberCardImages(douyinCardKey, { cover: douyinCoverUrl(VideoData.data.aweme_detail) })
         rememberLastCardKey(this.e, douyinCardKey)
-        if (!fromPanelDouyin && Config.douyin.sendContent.includes('info')) {
+        /**
+         * 详情卡片这次发不发（面板路径 `fromPanelDouyin` / 没勾 `info` 都不发）。
+         *
+         * 「提取封面图」按钮原本只挂在这张卡下面，而**面板路径是最常见的**（发链接 → 出面板 →
+         * 点清晰度），那时这张卡不发 —— 下面评论区那条长图就得把 `cover` 补上，
+         * 否则用户根本看不到「提取封面图」这个入口（用户反馈）。
+         */
+        /**
+         * ⚠️ 例外：**开着「解析结果合并转发」时卡片要照发**（用户要求：
+         * 「先不要渲染图片，先询问清晰度，后面再合成一条」）。那种情况下
+         * 面板本身是**不渲染卡片**的（见 `ReactionPanel.sendQualityReactionPanel`），
+         * 卡片只能在这一次解析里补上 —— 它会被收进转发袋子，和视频、评论卡
+         * 合成**一条**转发出去；不补的话那条转发里就完全没有卡片。
+         */
+        const douyinInfoCardSent = (!fromPanelDouyin || isForwardCollecting())
+          && Config.douyin.sendContent.includes('info')
+        if (douyinInfoCardSent) {
           // 卡片渲染失败只跳过卡片，视频照发（最后统一报错）；不再阻塞视频那条线
           sends.add('渲染作品信息卡', async () => {
           if (Config.douyin.videoInfoMode === 'text') {
@@ -823,9 +849,7 @@ export class DouYin extends Base {
                 : aweme.images?.[0]?.url_list?.[0]
             rememberCardImages(douyinCardKey, { cover: String(coverImageUrl ?? '') })
             /** 详情卡（封面卡）只带「提取封面图」，评论区那条带「提取评论区图片」 */
-            await this.e.reply(
-              withCardActions(this.e, workInfoImg, douyinCardKey, { cover: true })
-            )
+            await replyWithCardActions(this.e, workInfoImg, douyinCardKey, { cover: true })
           }
           })
         }
@@ -856,7 +880,11 @@ export class DouYin extends Base {
               Type: isArticle ? '文章' : isVideo ? '视频' : this.is_slides ? '合辑' : '图集',
               CommentsData: douyinCommentsRes.CommentsData,
               CommentLength: douyinCommentsRes.CommentsData.length ?? 0,
-              share_url: isVideo && selectedVideo ? buildDouyinPlayUrl(selectedVideo.play_addr) : aweme.share_url,
+              /**
+               * 非视频作品没有直链，二维码用 www.douyin.com 的 PC 访问地址；
+               * iesdouyin 超长分享链接字节过多，会降低二维码的鲁棒性（上游 `840CE1a`）。
+               */
+              share_url: isVideo && selectedVideo ? buildDouyinPlayUrl(selectedVideo.play_addr) : `https://www.douyin.com/${isArticle ? 'article' : 'note'}/${aweme.aweme_id}`,
               VideoSize: mp4size,
               VideoFPS: FPS,
               ImageLength: imagenum,
@@ -906,9 +934,17 @@ export class DouYin extends Base {
             })
             /**
              * 同上：评论区是每次解析都能看到的那条，提取按钮跟着它一起发（同一条消息）。
+             *
+             * `cover: !picsSent && !douyinInfoCardSent && !fromPanelDouyin` ——
+             * 详情卡发了就归它；**面板路径不带**（封面入口在清晰度面板那个 ✅️ 上，
+             * 见 `ReactionPanel.sendQualityReactionPanel`）；评论图已直接发过就什么都不挂。
              * `comment: !picsSent` —— 图刚直接发过就不挂按钮。
              */
-            await sendSlicedImage(this.e, img, cardImageActions(this.e, { comment: !picsSent, key: douyinCardKey }))
+            await sendSlicedImageWithActions(this.e, img, {
+              cover: !picsSent && !douyinInfoCardSent && !fromPanelDouyin,
+              comment: !picsSent,
+              key: douyinCardKey
+            })
           }
           })
         }
@@ -1257,10 +1293,9 @@ export class DouYin extends Base {
           }
 
           const room_data = JSON.parse(roomDataRaw)
-          const live_data = await this.amagi.douyin.fetcher.fetchLiveRoomInfo({
-            room_id: UserInfoData.data.user.room_id_str,
-            web_rid: room_data.owner.web_rid
-          })
+          const live_data = await this.amagi.douyin.fetcher.fetchLiveRoomInfo(
+            liveRoomParams(room_data.owner.web_rid, UserInfoData.data.user.room_id_str)
+          )
           const liveItem = live_data.data.data.data[0]
           const user = UserInfoData.data.user
           const streamExtra = liveItem.stream_url?.extra

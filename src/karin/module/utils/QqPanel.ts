@@ -29,9 +29,10 @@ import { isBurnDanmakuSupported } from './DanmakuPolicy'
 import { resolvePlayerSizeLimitMB } from '../../../player'
 import { Config } from './Config'
 import { getDouyinQualityLevel } from '@/platform/douyin/videoQuality'
-import { platformOf } from '@/module/utils/ImageSlice'
+import { isOfficialQq, platformOf, sendSlicedImage } from '@/module/utils/ImageSlice'
 import { cardImageKeyOf, recallCardImages, rememberCardImages, rememberLastCardKey } from '@/module/utils/CardImageCache'
 import { getImageMetadata, Render } from '@/module/utils/Render'
+import { canUseMarkdownImage } from '../../../compat/imageMarkdown'
 import { isUsableSize, readImageSize, scaleToWidth } from '../../../compat/imageSize'
 import { getHotDanmaku } from '@/platform/bilibili/danmaku'
 // 头像框 / 昵称颜色要从 UP 主页接口拿，和解析结果保持一致；简介同样走解析那边的统一口径
@@ -183,6 +184,44 @@ const INFO_TTL = 5 * 60 * 1000
 export function isQqPlatform (e: Message): boolean {
   const platform = String(e?.bot?.adapter?.name ?? e?.bot?.adapter?.protocol ?? '')
   return /qqguild|qqbot|^qq$|official/i.test(platform)
+}
+
+/**
+ * 这一条链接**这次解析会不会发视频文件**。
+ *
+ * ## 为什么要有它
+ * 各平台配置里都有一个「解析时发送的内容」多选框（`douyin.sendContent` /
+ * `bilibili.sendContent` / `xiaohongshu.sendContent`，可选项 `info` / `comment` /
+ * `image` / `video`）。**只勾了「评论图片」、没勾「视频文件」时再去问「选哪档清晰度」
+ * 纯属打扰** —— 根本不会有视频发出去（用户反馈：「我没有勾选要发送视频啊，怎么还是
+ * 有一个选择清晰度」）。
+ *
+ * 所以两个解析面板（QQ 官方的 markdown 面板、QQ 系的表情 / 数字列表面板）都要先过这一条：
+ * 不发视频就**直接跳过面板**，走正常解析 —— 该发的信息卡片 / 评论区卡片照发。
+ *
+ * ## 读不到的时候怎么办
+ * 快手没有 `sendContent` 这个配置（它是单独的 `comment` 开关），那种**读不到就当「会发」**：
+ * 保守一点，按老行为继续问，不会让用户少拿到东西。
+ * 反过来，**读到了但里面没有 `video`**（包括空数组 = 一个都没勾）就一定不问。
+ *
+ * @param platform 平台名（douyin / bilibili / xiaohongshu / kuaishou）
+ * @returns true = 这次会发视频文件（可以继续问清晰度）
+ */
+export function willSendVideo (platform: string): boolean {
+  const key = String(platform ?? '')
+  if (!key) return true
+  let list: any
+  try {
+    /** 优先读控制台 / 面板那一份（`config.upstream`，和 config.json 同构） */
+    const upstream = (tryGetRuntime()?.config as any)?.upstream?.[key]
+    list = upstream?.sendContent
+    /** 兜底读配置文件那一份（上游没带全时它仍是权威来源） */
+    if (!Array.isArray(list)) list = (Config as any)?.[key]?.sendContent
+  } catch {
+    list = undefined
+  }
+  if (!Array.isArray(list)) return true
+  return list.some((item: any) => String(item) === 'video')
 }
 
 /** 秒 → mm:ss / hh:mm:ss */
@@ -460,10 +499,7 @@ export function xiaohongshuShareUrl (noteId: string, xsecToken = ''): string {
  * 这些平台发**去围栏的纯文本**：提示一行 + 链接一行，照样能整段复制，App 一样认。
  * @param platform `platformOf(e)` 拿到的适配器名
  */
-export const supportsMarkdown = (platform: string): boolean => {
-  const name = String(platform ?? '').toLowerCase()
-  return name === 'qq' || name === 'qqguild'
-}
+export const supportsMarkdown = (platform: string): boolean => isOfficialQq(String(platform ?? ''))
 
 /**
  * **没有清晰度面板的平台**：单独发一条「复制后打开 XX 自动跳转」。
@@ -547,7 +583,7 @@ export function cmdInput (command: string, show?: string): string {
  * @param platform 平台
  * @param detail 作品详情（面板拿到的那份）
  */
-function panelCoverUrl (platform: string, detail: any): string {
+export function panelCoverUrl (platform: string, detail: any): string {
   if (!detail) return ''
   if (platform === 'bilibili') return String(detail.pic ?? '')
   return String(
@@ -704,7 +740,7 @@ export function parseCommandActions (e: any, url: string): any[] {
  */
 export function cardImageActionLine (
   e: any,
-  options: { cover?: boolean, comment?: boolean, key?: string } = {}
+  options: { cover?: boolean, comment?: boolean, key?: string, emoji?: boolean } = {}
 ): string {
   const wanted: Array<{ command: string, label: string }> = []
   if (options.cover && hasCardImage(options.key, 'cover')) wanted.push({ command: EXTRACT_COVER_COMMAND, label: '提取封面图' })
@@ -720,7 +756,18 @@ export function cardImageActionLine (
   if (supportsMarkdown(platformOf(e))) {
     return wanted.map((item) => cmdInput(withKey(item.command), item.label)).join(' ')
   }
-  return wanted.map((item) => '引用这条消息发送「' + withKey(item.command) + '」可' + item.label).join('；')
+  /**
+   * 没有 markdown 按钮的那些平台（OneBot 系）：这句是文字退路。
+   *
+   * `emoji` 为真 = 这条消息下面**真的会**贴一排表情按钮（见 {@link cardImageActions}），
+   * 那就必须把「贴个表情也行」写进去 —— 用户反馈「下方没有说可以点击表情提取」，
+   * 只写「引用发送 kkk封面 …」的话，那排表情看着就像凭空冒出来的装饰。
+   *
+   * ⚠️ 只在确认能挂表情时才写：写了一句做不到的提示，比不写更糟
+   * （用户会去贴表情，然后「没有反应」）。
+   */
+  const emojiHint = options.emoji ? '；也可以直接给这条消息贴个表情' : ''
+  return wanted.map((item) => '引用这条消息发送「' + withKey(item.command) + '」可' + item.label).join('；') + emojiHint
 }
 
 /**
@@ -743,7 +790,7 @@ export function cardImageActionLine (
  */
 export function cardImageActions (
   e: any,
-  options: { cover?: boolean, comment?: boolean, key?: string } = {}
+  options: { cover?: boolean, comment?: boolean, key?: string, emoji?: boolean } = {}
 ): any[] {
   /** 适配器支持原生按钮就用原生按钮：方块按钮 + 点击直接回调，比文字链好用得多 */
   if (supportsKeyboardButton(e)) return cardImageButtons(e, options)
@@ -777,11 +824,90 @@ export function withCardActions (
   e: any,
   content: any,
   key: string,
-  options: { cover?: boolean, comment?: boolean } = {}
+  options: { cover?: boolean, comment?: boolean, emoji?: boolean } = {}
 ): any[] {
   const list = Array.isArray(content) ? [...content] : [content]
   if (!key) return list
   return [...list, ...cardImageActions(e, { ...options, key })]
+}
+
+/**
+ * 给刚发出去的卡片挂上 OneBot 的**表情按钮**（QQ 上什么也不做）。
+ *
+ * ⚠️ 这里用**动态 import**：`ReactionPanel` 反过来要 import 本文件的
+ * `hasCardImage` / `EXTRACT_*`，静态互引会成环（谁先初始化都不对）。
+ * 挂不上只是少一种点法，卡片本身已经发出去了，所以失败一律忽略。
+ */
+const attachCardEmojiPanel = async (e: any, messageId: string, options: any): Promise<void> => {
+  try {
+    const { attachCardImageEmojiPanel } = await import('./ReactionPanel')
+    await attachCardImageEmojiPanel(e, messageId, options)
+  } catch (error: any) {
+    logger.debug('[QQ面板] 挂卡片表情按钮失败（已忽略）: ' + String(error?.message ?? error))
+  }
+}
+
+/**
+ * 这条消息下面**会不会**真的贴上一排表情按钮。
+ *
+ * 卡片正文里那句提示要照着它写：能贴才写「也可以贴个表情」，不能贴就只写文字退路
+ * —— 写一句做不到的提示比不写更糟（用户照着贴了，然后「没有反应」）。
+ *
+ * 判定和 `attachCardImageEmojiPanel` 用的是**同一个**函数，不会两边说法不一致。
+ */
+const canAttachEmoji = async (e: any): Promise<boolean> => {
+  try {
+    const { canUseEmojiButtons } = await import('./ReactionPanel')
+    return canUseEmojiButtons(e)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 「卡片 + 提取按钮」一步发完，**并顺手把表情按钮挂到这条卡片消息上**。
+ *
+ * 就是 {@link withCardActions} + `e.reply`，多做的那一件事是：
+ * OneBot 上没有原生按钮，卡片发完再补一个表情按钮（**只点一次**），
+ * 用户贴个表情就能把封面 / 评论区那张图单独提出来。
+ *
+ * 表情按钮挂在**同一条消息**上（卡片自己已经在正文里写了「引用发送 kkk封面 …」那条退路），
+ * 所以不会多一条消息。
+ */
+export const replyWithCardActions = async (
+  e: any,
+  content: any,
+  key: string,
+  options: { cover?: boolean; comment?: boolean } = {}
+): Promise<any> => {
+  /** 先问一句「能不能贴表情」—— 卡片正文那句提示要跟着它写（见 canAttachEmoji） */
+  const emoji = await canAttachEmoji(e)
+  const sent = await e.reply(withCardActions(e, content, key, { ...options, emoji }))
+  void attachCardEmojiPanel(e, String(sent?.messageId ?? ''), { ...options, key })
+  return sent
+}
+
+/**
+ * 长图（评论卡）一步发完，同样顺手挂表情按钮。
+ *
+ * 和 {@link replyWithCardActions} 的差别：切片发送内部可能发好几条，
+ * 而且拿不到「最后一条」的 id，所以这里**拿不到 id**，改由
+ * `attachCardImageEmojiPanel` 自己发一条很短的面板消息。
+ */
+export const sendSlicedImageWithActions = async (
+  e: any,
+  img: any,
+  options: { cover?: boolean; comment?: boolean; key?: string }
+): Promise<boolean> => {
+  /**
+   * 长图是**切片**发出去的，拿不到最后一条的消息 id —— 表情挂不上去
+   * （`attachCardImageEmojiPanel` 也不再为它另发一条短消息，见那里的说明）。
+   *
+   * 所以这里**一定传 `emoji: false`**：正文里那句「也可以贴个表情」必须和
+   * 「真的会贴上去」一致，否则用户照着贴了又是一次「没有反应」。
+   */
+  const ok = await sendSlicedImage(e, img, cardImageActions(e, { ...options, emoji: false }))
+  return ok
 }
 
 /* ------------------------------------------------------------------ *
@@ -1694,11 +1820,12 @@ export const toMarkdownImage = async (url: string, maxWidth = 420): Promise<stri
 }
 
 /**
- * **OneBot 系（NapCat / Lagrange / go-cqhttp…）不渲染 markdown**（用户实测反馈）：
- * markdown 是 QQ **官方机器人**才有的能力，个人号客户端收到 \`markdown\` 段只会显示成一串文字、
- * 图片一张都出不来。所以这条链路上要改发**普通图片段**。
+ * 判据统一走 `compat/imageMarkdown` 的白名单 {@link canUseMarkdownImage}。
+ *
+ * 以前这里是本地另写的一份**黑名单**（「不是 OneBot 系就用 md」），于是凡是
+ * 认不出来的平台（Milky / Satori / Discord…）全被当成官方 QQ，图片发成
+ * `![#420px #315px](https://…)` 这种裸文本。现在只有一处白名单，别再各写各的。
  */
-const ONEBOT_LIKE = /onebot|napcat|lagrange|go-?cqhttp|chronocat|mirai/i
 
 /** 把一张图读成 Buffer（data URI / base64:// / 本地路径 / 远程 URL 都认） */
 async function loadImageBuffer (url: string): Promise<{ buffer: Buffer; mime: string } | null> {
@@ -1746,7 +1873,8 @@ export const buildMarkdownImageMessage = async (urls: string[], maxWidth = 420, 
   const list = urls.filter(Boolean).map(String)
   if (!list.length) return null
 
-  if (ONEBOT_LIKE.test(platform)) {
+  /** 白名单反过来用：不是官方 QQ / QQ 频道 → 一律发普通图片段 */
+  if (!canUseMarkdownImage(platform)) {
     const images: any[] = []
     for (const url of list) {
       const loaded = await loadImageBuffer(url)

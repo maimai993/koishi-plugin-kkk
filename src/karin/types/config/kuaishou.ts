@@ -12,7 +12,7 @@ export interface kuaishouConfig {
    * text 文字 / image 图片 / video 视频 / file 文件。
    * 没列出来的内容单独直发。
    */
-  forwardContent: Array<'text' | 'image' | 'video' | 'file'>
+  forwardContent: Array<'text' | 'image' | 'video' | 'file' | 'commentPic'>
 
   /** 快手评论解析，发送快手作品评论图 */
   comment: boolean

@@ -3,6 +3,7 @@ import { logger } from 'node-karin'
 
 import { douyinDB } from '@/module'
 import type { douyinFetcher } from '@/module/utils/amagiClient'
+import { liveRoomParams } from '@/platform/douyin/liveParams'
 import type { douyinPushItem } from '@/types/config/pushlist'
 
 import type { DouyinLivePushItem } from './types'
@@ -47,10 +48,9 @@ export async function processLiveStream(
     }
 
     const room_data = JSON.parse(UserInfoData.data.user.room_data)
-    const liveInfo = await amagi.douyin.fetcher.fetchLiveRoomInfo({
-      room_id: UserInfoData.data.user.room_id_str,
-      web_rid: room_data.owner.web_rid
-    })
+    const liveInfo = await amagi.douyin.fetcher.fetchLiveRoomInfo(
+      liveRoomParams(room_data.owner.web_rid, UserInfoData.data.user.room_id_str)
+    )
 
     // 如果之前没有直播，现在开播了，需要推送
     if (!liveStatus.living) {

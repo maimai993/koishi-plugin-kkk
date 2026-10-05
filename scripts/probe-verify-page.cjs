@@ -277,9 +277,15 @@ const CHALLENGE = '9f8e7d6c5b4a'
   console.log('\n=== 8. 抖音：没有地址时抓样本，绝不编链接 ===')
   {
     /** ① amagi 的抖音确实没装挑战提取器 —— 这是「做不了代理」的根因，钉住别忘 */
-    const amagiSrc = fs.readFileSync(
-      path.join(root, '../..', 'node_modules/@ikenxuan/amagi/dist/src-blqLvYiW.mjs'), 'utf8')
-    const runtimeBlock = amagiSrc.slice(amagiSrc.indexOf('const PLATFORM_RUNTIME'), amagiSrc.indexOf('const PLATFORM_RUNTIME') + 900)
+    // ⚠️ 别写死 chunk 文件名：rollup 的 hash 每次构建都变（升 amagi 就换一个名字），
+    //    写死的话升级后这里直接 ENOENT、整个探针崩掉。按 `src-*.mjs` 动态找。
+    const amagiDist = path.join(root, '../..', 'node_modules/@ikenxuan/amagi/dist')
+    const srcName = fs.readdirSync(amagiDist).find((f) => f.startsWith('src-') && f.endsWith('.mjs'))
+    check('找得到 amagi 的 src chunk（按名字找，不写死 hash）', Boolean(srcName), srcName || '未找到')
+    const amagiSrc = srcName ? fs.readFileSync(path.join(amagiDist, srcName), 'utf8') : ''
+    const at = amagiSrc.indexOf('const PLATFORM_RUNTIME')
+    const runtimeBlock = at >= 0 ? amagiSrc.slice(at, at + 900) : ''
+    check('amagi 里还有 PLATFORM_RUNTIME（挑战提取器注册表）', at >= 0, srcName || '')
     check('amagi 只有快手装了 challenge 提取器', /kuaishou:\s*\{[^}]*challenge:/.test(runtimeBlock), '')
     check('  抖音那一支没有 challenge', !/douyin:\s*\{[^}]*challenge:/.test(runtimeBlock), '')
 

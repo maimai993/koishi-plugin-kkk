@@ -151,7 +151,7 @@ const WEBUI_GUIDE = [
   '',
   '一、就在这个页面改：下面的设置项都在，常用的有「是否发解析面板」「画质档体积上限」「超长图自动切片」「在线播放器」「错误上报」等。',
   '',
-  '二、用配置面板改：打开 Koishi 控制台后，左侧边栏有一个「kkk 配置」入口，也可以直接访问 /kkk。',
+  '二、用配置面板改：打开 Koishi 控制台后，左侧边栏有一个「kkk 配置」入口（**只能从这里进**，直接访问 /kkk 是打不开的）。',
   '面板界面更直观，接口库、抖音、哔哩哔哩、快手、小红书、推送列表都在里面，改完点右下角保存，不用重启 Koishi。',
   '',
   '两边的说明和默认值都是同一份，不会出现「面板里有、控制台里没有」。' +
@@ -180,7 +180,7 @@ export const Config: Schema<Config> = Schema.intersect([
       autoParse: Schema.boolean().default(true)
         .description('群里有人发链接（或者回复一条带链接的消息）就自动解析，不用打指令'),
       webUiAuth: Schema.boolean().default(true)
-        .description('配置面板 /kkk 是否要求先登录 Koishi 控制台。装了 auth 插件的部署建议保持打开；没装 auth 插件时本来就没有登录这一步，这里不生效'),
+        .description('配置面板的数据接口是否额外要求先登录 Koishi 控制台。面板**页面本身**无论这里怎么设都只能从控制台侧边栏进（直接访问 /kkk 一律 404）；装了 auth 插件的部署建议保持打开，没装 auth 插件时这里不生效'),
     }).description('Koishi 原生设置（一般不用改）'),
   }),
   Schema.object({
@@ -191,20 +191,20 @@ export const Config: Schema<Config> = Schema.intersect([
     forward: Schema.object({
       global: Schema.boolean().default(false)
         .description('全局合并转发。打开后所有平台都把一次解析的内容合成一条聊天记录发出；关着时下面各平台的开关才起作用。默认关闭'),
-      globalContent: Schema.array(Schema.union(['text', 'image', 'video', 'file', 'chart'])).default([])
-        .description('全局合并转发里放哪些内容：text 文字 / image 图片 / video 视频 / file 文件 / chart 流程图（B站互动视频的剧情图）。没勾的单独直发，留空等于只放文字和图片。视频体积大时有些适配器（比如 NapCat）会拒绝整个聊天记录，这时会自动改成单独发送，不会丢内容'),
+      globalContent: Schema.array(Schema.union(['text', 'image', 'video', 'file', 'chart', 'commentPic'])).default([])
+        .description('全局合并转发里放哪些内容：text 文字 / image 图片 / video 视频 / file 文件 / chart 流程图（B站互动视频的剧情图）/ commentPic 评论区图片。没勾的单独直发，留空等于只放文字和图片。视频体积大时有些适配器（比如 NapCat）会拒绝整个聊天记录，这时会自动改成单独发送，不会丢内容'),
       douyin: Schema.boolean().default(false).description('抖音：单独打开合并转发（全局关着时才起作用）'),
-      douyinContent: Schema.array(Schema.union(['text', 'image', 'video', 'file'])).default([])
-        .description('抖音合并转发里放哪些内容，留空表示用全局那一份'),
+      douyinContent: Schema.array(Schema.union(['text', 'image', 'video', 'file', 'commentPic'])).default([])
+        .description('抖音合并转发里放哪些内容，commentPic 是评论区里用户贴的图（只有打开抖音的「是否收集评论区的图片」时才有这一路）。留空表示用全局那一份'),
       bilibili: Schema.boolean().default(false).description('B站：单独打开合并转发（全局关着时才起作用）'),
-      bilibiliContent: Schema.array(Schema.union(['text', 'image', 'video', 'file', 'chart'])).default([])
-        .description('B站合并转发里放哪些内容，chart 是互动视频的剧情流程图（只有 B站有）。留空表示用全局那一份'),
+      bilibiliContent: Schema.array(Schema.union(['text', 'image', 'video', 'file', 'chart', 'commentPic'])).default([])
+        .description('B站合并转发里放哪些内容：chart 是互动视频的剧情流程图（只有 B站有），commentPic 是评论区里用户贴的图（只有打开 B站的「是否收集评论区的图片」时才有这一路）。留空表示用全局那一份'),
       kuaishou: Schema.boolean().default(false).description('快手：单独打开合并转发（全局关着时才起作用）'),
-      kuaishouContent: Schema.array(Schema.union(['text', 'image', 'video', 'file'])).default([])
-        .description('快手合并转发里放哪些内容，留空表示用全局那一份'),
+      kuaishouContent: Schema.array(Schema.union(['text', 'image', 'video', 'file', 'commentPic'])).default([])
+        .description('快手合并转发里放哪些内容，commentPic 是评论区里用户贴的图。留空表示用全局那一份'),
       xiaohongshu: Schema.boolean().default(false).description('小红书：单独打开合并转发（全局关着时才起作用）'),
-      xiaohongshuContent: Schema.array(Schema.union(['text', 'image', 'video', 'file'])).default([])
-        .description('小红书合并转发里放哪些内容，留空表示用全局那一份')
+      xiaohongshuContent: Schema.array(Schema.union(['text', 'image', 'video', 'file', 'commentPic'])).default([])
+        .description('小红书合并转发里放哪些内容，commentPic 是评论区里用户贴的图。留空表示用全局那一份')
     }).description('合并转发：把一次解析的内容合成一条聊天记录发出'),
     upstream: buildUpstreamSchema(pluginRootDir).description(
       '插件配置：接口库（Cookie / 代理 / API 服务）、抖音 / B站 / 快手 / 小红书 的解析与推送、推送订阅列表。'
@@ -1050,9 +1050,10 @@ function registerCommands (
  *
  * 注意这里**不再有** audio / markdown：QQ 的聊天记录不支持语音气泡，markdown 只有官方 bot 认、
  * 而官方适配器没有合并转发能力 —— 留着它们只会让人配了不生效（见 ParseForward 的说明）。
- * chart 是 B站互动视频的剧情流程图。
+ * chart 是 B站互动视频的剧情流程图；commentPic 是评论区里用户贴的那些图
+ * （它默认**不进**聊天记录：评论长图里已经画过一遍，再收一份就是同一批图发两遍）。
  */
-const FORWARD_KIND_VALUES = ['text', 'image', 'video', 'file', 'chart']
+const FORWARD_KIND_VALUES = ['text', 'image', 'video', 'file', 'chart', 'commentPic']
 /** 平台名 → 上游配置段名 */
 const FORWARD_PLATFORMS = ['douyin', 'bilibili', 'kuaishou', 'xiaohongshu']
 

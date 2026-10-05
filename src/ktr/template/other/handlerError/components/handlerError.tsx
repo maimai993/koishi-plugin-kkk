@@ -6,6 +6,7 @@ import {
   Braces,
   Clock,
   FileText,
+  FileWarning,
   Fingerprint,
   Gauge,
   GitBranch,
@@ -300,6 +301,15 @@ const getLogLevelTheme = (level: LogLevel, dark: boolean) => {
   return themeMap[level] || themeMap['TRAC']
 }
 
+/**
+ * 实现端关键字 → 图标。
+ *
+ * ⚠️ **顺序有意义**：`getAdapterLogo` 命中第一个就返回，所以「具体的」必须排在「笼统的」前面。
+ * 尤其 `onebot` / `satori` 这两个兜底项**只能放最后** —— 它们会匹配到
+ * `NapCat.Onebot` / `Lagrange.OneBot` 这类实现端名字，放前面就把各家自己的图标顶掉了。
+ *
+ * 资源文件在 `resources/image/other/handlerError/`（Milky 的图是 `Milky.png`，注意大小写）。
+ */
 const ADAPTER_LOGO_MAP: Record<string, string> = {
   napcat: '/image/other/handlerError/napcat.webp',
   lagrange: '/image/other/handlerError/lagrange.webp',
@@ -307,13 +317,30 @@ const ADAPTER_LOGO_MAP: Record<string, string> = {
   llonebot: '/image/other/handlerError/llonebot.webp',
   lltwobot: '/image/other/handlerError/llonebot.webp',
   conwechat: '/image/other/handlerError/conwechat.webp',
-  gocq: '/image/other/handlerError/gocq-http.webp'
+  gocq: '/image/other/handlerError/gocq-http.webp',
+  /** Milky：QQ NT 的实现端之一，和 NapCat 同级，不是 OneBot 系 */
+  milky: '/image/other/handlerError/Milky.png',
+  // ↓↓ 兜底项：只在这上面都配不上时才用
+  onebot: '/image/other/handlerError/onebot.png',
+  satori: '/image/other/handlerError/satori.png'
 }
 
-const getAdapterLogo = (adapterName: string): React.ReactNode => {
-  const nameLower = adapterName.toLowerCase()
-  for (const [key, logoPath] of Object.entries(ADAPTER_LOGO_MAP)) {
-    if (nameLower.includes(key)) return <img src={logoPath} className="h-20 w-auto" alt={adapterName} />
+/**
+ * 适配器图标。
+ *
+ * 要拿**实现端名字**（`NapCat.Onebot` / `LLOneBot`）去配，不能拿平台名：
+ * OneBot 系各家都自报 `onebot`，用平台名永远配不上，卡片上就只剩一个万能拼图。
+ * 识别不出实现端时退回平台名再试一次（QQ / 频道这类平台名本身就是标识），
+ * 还是配不上才用拼图。
+ */
+const getAdapterLogo = (adapterInfo: { name?: string; implementationName?: string }): React.ReactNode => {
+  const candidates = [String(adapterInfo?.implementationName ?? ''), String(adapterInfo?.name ?? '')]
+  for (const candidate of candidates) {
+    const nameLower = candidate.toLowerCase()
+    if (!nameLower) continue
+    for (const [key, logoPath] of Object.entries(ADAPTER_LOGO_MAP)) {
+      if (nameLower.includes(key)) return <img src={logoPath} className="h-20 w-auto" alt={candidate} />
+    }
   }
   return <Puzzle size={64} className="text-danger/80" />
 }
@@ -662,18 +689,42 @@ export const handlerError: React.FC<PosterProps<ApiErrorData>> = (props) => {
                 {(ERROR_KIND_META[data.amagi.kind] ?? FALLBACK_KIND_META).hint}
               </p>
 
-              {/* 平台返回的原文：与堆栈里那份 inspect 转储不同，这里是干净的一句话 */}
+              {/* 错误说明：与堆栈里那份 inspect 转储不同，这里是干净的一句话。
+                  标签随 `raw` 在场与否切换 —— 响应体是纯文本时 amagi 提不出平台文案，
+                  这一句必然是它自己的兜底句，继续印「平台原文」会让看图的人以为那是平台说的 */}
               <div
                 className="p-8 rounded-7xl mb-10"
                 style={{ backgroundColor: dark ? 'rgba(220,38,38,0.12)' : 'rgba(254,202,202,0.35)' }}
               >
                 <div className="text-xl font-semibold tracking-[0.12em] opacity-70 mb-3" style={{ color: mutedColor }}>
-                  平台原文
+                  {data.amagi.raw ? '错误说明' : '平台原文'}
                 </div>
                 <p className="text-3xl leading-relaxed break-all" style={{ color: accentColor }}>
                   {data.amagi.reason || '(平台未给出说明)'}
                 </p>
               </div>
+
+              {/* 响应体原文：只有反爬页 / 拦截文本那一类才有（amagi 判 ANTIBOT_PAGE 的情形）。
+                  上面那句是兜底文案，平台究竟回了什么只在这里，所以单独一块 */}
+              {data.amagi.raw && (
+                <div
+                  className="p-8 rounded-7xl mb-10"
+                  style={{
+                    backgroundColor: dark ? 'rgba(0,0,0,0.25)' : 'rgba(255,255,255,0.55)',
+                    border: `1px solid ${dark ? 'rgba(248,113,113,0.2)' : 'rgba(220,38,38,0.14)'}`
+                  }}
+                >
+                  <div className="flex items-center gap-3 mb-3 opacity-70">
+                    <FileWarning size={26} style={{ color: mutedColor }} />
+                    <span className="text-xl font-semibold tracking-[0.12em]" style={{ color: mutedColor }}>
+                      响应体原文
+                    </span>
+                  </div>
+                  <pre className="text-2xl leading-relaxed whitespace-pre-wrap break-all font-mono" style={{ color: accentColor }}>
+                    {data.amagi.raw}
+                  </pre>
+                </div>
+              )}
 
               {/* 分层错误码与请求归因 */}
               <div className="grid grid-cols-3 gap-x-12 gap-y-10">
@@ -972,7 +1023,7 @@ export const handlerError: React.FC<PosterProps<ApiErrorData>> = (props) => {
             </div>
             {data.adapterInfo && (
               <div className="flex items-center gap-6">
-                {getAdapterLogo(data.adapterInfo.name)}
+                {getAdapterLogo(data.adapterInfo)}
                 <div>
                   <p className="text-xl" style={{ color: mutedColor }}>Adapter / 适配器</p>
                   <p className="text-3xl font-bold truncate" style={{ color: accentColor }}>{data.adapterInfo.name}</p>
